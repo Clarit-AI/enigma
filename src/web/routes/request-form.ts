@@ -164,7 +164,7 @@ export async function handleRequestFormPost(req: IncomingMessage, res: ServerRes
     }
   }
 
-  RequestStore.setResults(id, results);
+  RequestStore.fulfill(id, results);
 
   let html = requestDoneHtml;
   html = renderRepeatingBlock(

@@ -42,19 +42,59 @@ describe('RequestStore', () => {
     expect(second).toBeUndefined();
   });
 
-  it('waitForFulfilled resolves to the literal "fulfilled" once tryMarkUsed succeeds', async () => {
+  it('tryMarkUsed alone does NOT resolve the waiter — marking a token used and reporting its outcome are two different moments', async () => {
     const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
     const waiter = RequestStore.waitForFulfilled(record.id);
+    let settled = false;
+    void waiter.then(() => {
+      settled = true;
+    });
 
     RequestStore.tryMarkUsed(record.id);
+    await Promise.resolve();
+    await Promise.resolve();
 
-    await expect(waiter).resolves.toBe('fulfilled');
+    expect(settled).toBe(false);
+
+    // Clean up the still-pending waiter so it doesn't leak into other tests.
+    RequestStore.fulfill(record.id, []);
+    await waiter;
   });
 
-  it('waitForFulfilled resolves immediately when the id is already used', async () => {
+  it('fulfill resolves the waiter, and results are already readable at the moment it resolves — not merely afterwards', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    RequestStore.tryMarkUsed(record.id);
+    const waiter = RequestStore.waitForFulfilled(record.id);
+
+    const assertion = waiter.then(() => {
+      // Read from inside the resolution, not after both calls have already
+      // happened regardless — this is what would catch fulfill resolving
+      // before it finishes recording results.
+      expect(RequestStore.get(record.id)?.results).toEqual([{ name: 'OPENAI_API_KEY', ok: true }]);
+    });
+
+    RequestStore.fulfill(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
+
+    await assertion;
+  });
+
+  it('waitForFulfilled resolves immediately when fulfill has already run — the fast path does not fire on tryMarkUsed alone', async () => {
     const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
     RequestStore.tryMarkUsed(record.id);
 
+    // Between tryMarkUsed and fulfill, the fast path must not resolve early.
+    const midWaiter = RequestStore.waitForFulfilled(record.id);
+    let midSettled = false;
+    void midWaiter.then(() => {
+      midSettled = true;
+    });
+    await Promise.resolve();
+    expect(midSettled).toBe(false);
+
+    RequestStore.fulfill(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
+    await expect(midWaiter).resolves.toBe('fulfilled');
+
+    // After fulfill, a fresh call takes the fast path.
     await expect(RequestStore.waitForFulfilled(record.id)).resolves.toBe('fulfilled');
   });
 
@@ -62,12 +102,18 @@ describe('RequestStore', () => {
     await expect(RequestStore.waitForFulfilled('deadbeefdeadbeefdeadbeefdeadbeef')).rejects.toThrow();
   });
 
-  it('setResults records per-name outcomes, readable via get', () => {
+  it('fulfill records per-name outcomes, readable via get, and defaults results to [] (used by a reveal, which has none)', () => {
     const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
     RequestStore.tryMarkUsed(record.id);
-    RequestStore.setResults(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
+    RequestStore.fulfill(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
 
     expect(RequestStore.get(record.id)?.results).toEqual([{ name: 'OPENAI_API_KEY', ok: true }]);
+
+    const reveal = RequestStore.create({ kind: 'reveal', names: ['GITHUB_TOKEN'] });
+    RequestStore.tryMarkUsed(reveal.id);
+    RequestStore.fulfill(reveal.id);
+
+    expect(RequestStore.get(reveal.id)?.results).toEqual([]);
   });
 
   describe('expiry and the sweeper', () => {

@@ -141,7 +141,10 @@ export const RequestStore = {
    * Atomically checks existence, non-expiry, and non-use, then marks used.
    * This is the security boundary (S2.1): once it returns a record, every
    * later call for the same id returns undefined until the sweeper's grace
-   * period elapses.
+   * period elapses. Deliberately does NOT resolve the fulfilment waiter —
+   * marking a token used and reporting what happened are two different
+   * moments (see `fulfill`); a caller that wrote a value after this call
+   * returns is still free to fail before ever calling `fulfill`.
    */
   tryMarkUsed(id: string): RequestRecord | undefined {
     const record = records.get(id);
@@ -153,25 +156,40 @@ export const RequestStore = {
     if (record.usedAt !== undefined) return undefined;
 
     record.usedAt = Date.now();
+    return record;
+  },
+
+  /**
+   * Records the outcome of a used request/reveal and THEN resolves the
+   * fulfilment waiter, in that order — a caller waking up from
+   * `waitForFulfilled` is therefore guaranteed `get(id)?.results` is already
+   * readable. `results` defaults to `[]` for a reveal, which has no
+   * per-name write outcome to report but still needs the waiter to resolve
+   * once the human has revealed it. No-op if the id is unknown.
+   */
+  fulfill(id: string, results: RequestNameResult[] = []): void {
+    const record = records.get(id);
+    if (record) record.results = results;
+
     const waiter = waiters.get(id);
     if (waiter) {
       waiter.resolve('fulfilled');
       waiters.delete(id);
     }
-    return record;
   },
 
-  /** Records per-name write outcomes (Issue #10 reads this via `get` after the waiter resolves). No-op if the id is unknown. */
-  setResults(id: string, results: RequestNameResult[]): void {
-    const record = records.get(id);
-    if (record) record.results = results;
-  },
-
-  /** Resolves to the literal 'fulfilled' once the id is marked used; rejects if the id is unknown or expires first. Never carries a value. */
+  /**
+   * Resolves to the literal 'fulfilled' once `fulfill` has run for this id —
+   * meaning the single-use token was consumed AND its outcome (`results`) is
+   * already readable — or rejects if the id is unknown or expires first.
+   * `fulfilled` means only that: a human completed the interaction. It says
+   * nothing about per-name outcome, which `results` alone carries. Never
+   * carries a value.
+   */
   waitForFulfilled(id: string): Promise<'fulfilled'> {
     const record = records.get(id);
     if (!record) return Promise.reject(new Error('request not found'));
-    if (record.usedAt !== undefined) return Promise.resolve('fulfilled');
+    if (record.results !== undefined) return Promise.resolve('fulfilled');
 
     let waiter = waiters.get(id);
     if (!waiter) {
