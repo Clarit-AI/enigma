@@ -689,12 +689,249 @@ var macosKeychainDepositoryModule = {
   create: createKeychainDepository
 };
 
+// src/storage/depositories/onepassword.ts
+import { execFile as execFile3 } from "node:child_process";
+import { basename } from "node:path";
+var OP_BIN = "op";
+var VAULT = "Enigma";
+var MIN_MAJOR_VERSION = 2;
+var EXEC_TIMEOUT_MS3 = 15e3;
+var EXEC_MAX_BUFFER_BYTES3 = 1024 * 1024;
+var REF_PATTERN3 = /^[A-Za-z0-9_./-]+$/;
+var REF_MAX_LENGTH3 = 512;
+var VAULT_MISSING_PATTERN = /isn't a vault|no vault named|could not find vault/i;
+var ITEM_MISSING_PATTERN = /isn't an item|could not find item|item.*not found/i;
+function runOp(args) {
+  return new Promise((resolve3, reject) => {
+    execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error, stdout, stderr) => {
+      if (error) {
+        reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
+        return;
+      }
+      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    });
+  });
+}
+function runOpWithStdin(args, stdinData) {
+  return new Promise((resolve3, reject) => {
+    const child = execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error, stdout, stderr) => {
+      if (error) {
+        reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
+        return;
+      }
+      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    });
+    child.on("error", reject);
+    if (!child.stdin) {
+      child.kill();
+      reject(new Error("op: stdin unavailable"));
+      return;
+    }
+    child.stdin.on("error", reject);
+    if (child.stdin.write(stdinData)) {
+      child.stdin.end();
+    } else {
+      child.stdin.once("drain", () => child.stdin?.end());
+    }
+  });
+}
+function isTimeout(failure) {
+  return failure.killed === true || failure.signal != null;
+}
+function refInvalid3() {
+  throw new EnigmaError({
+    code: "E_REF_INVALID",
+    message: `invalid depository ref: expected ${REF_PATTERN3} and at most ${REF_MAX_LENGTH3} characters`,
+    depository: "1password"
+  });
+}
+function validateRef3(ref) {
+  if (ref.length === 0 || ref.length > REF_MAX_LENGTH3 || !REF_PATTERN3.test(ref)) {
+    refInvalid3();
+  }
+}
+function writeFailed3(reason) {
+  throw new EnigmaError({
+    code: "E_WRITE_FAILED",
+    message: reason ?? "failed to write secret to 1password depository",
+    depository: "1password"
+  });
+}
+function readFailed4(reason) {
+  throw new EnigmaError({
+    code: "E_READ_FAILED",
+    message: reason ?? "failed to read secret from 1password depository",
+    depository: "1password"
+  });
+}
+function notFound3() {
+  throw new EnigmaError({ code: "E_NOT_FOUND", message: "secret not found", depository: "1password" });
+}
+function vaultMissing() {
+  throw new EnigmaError({
+    code: "E_VAULT_MISSING",
+    message: `the "${VAULT}" vault does not exist in 1Password; pass createVault to create it`,
+    depository: "1password"
+  });
+}
+function timedOut(op) {
+  const message = `1password depository timed out waiting for the op CLI after ${EXEC_TIMEOUT_MS3}ms; run "op signin" or unlock 1Password and try again`;
+  if (op === "read") readFailed4(message);
+  writeFailed3(message);
+}
+function nameFromRef(ref) {
+  const idx = ref.lastIndexOf("/");
+  return idx === -1 ? ref : ref.slice(idx + 1);
+}
+function buildTitle(ref, ctx) {
+  const name = nameFromRef(ref);
+  const isGlobal = ref === name || ref.startsWith("global/");
+  if (isGlobal || !ctx.projectPath) return name;
+  return `${name} \xB7 ${basename(ctx.projectPath)}`;
+}
+function itemTemplate(title, value) {
+  return JSON.stringify({
+    title,
+    category: "API_CREDENTIAL",
+    fields: [{ id: "credential", type: "CONCEALED", label: "credential", value }]
+  });
+}
+async function createVault() {
+  try {
+    await runOp(["vault", "create", VAULT, "--format", "json"]);
+  } catch (err) {
+    const failure = err;
+    if (isTimeout(failure)) timedOut("write");
+    writeFailed3(`failed to create the "${VAULT}" vault in 1Password`);
+  }
+}
+async function createItem(title, value) {
+  const { stdout } = await runOpWithStdin(["item", "create", "--vault", VAULT, "--format", "json", "-"], itemTemplate(title, value));
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return writeFailed3("op item create returned a response that could not be parsed");
+  }
+  if (typeof parsed.id !== "string" || parsed.id.length === 0) {
+    return writeFailed3("op item create did not return an item id");
+  }
+  return parsed.id;
+}
+function createOnepasswordDepository(ctx) {
+  return {
+    id: "1password",
+    promptProfile: "prompts-each-read",
+    async set(ref, value) {
+      validateRef3(ref);
+      const title = buildTitle(ref, ctx);
+      try {
+        return await createItem(title, value);
+      } catch (err) {
+        const failure = err;
+        if (isTimeout(failure)) timedOut("write");
+        if (VAULT_MISSING_PATTERN.test(failure.stderr ?? "")) {
+          if (!ctx.createVault) vaultMissing();
+          await createVault();
+          try {
+            return await createItem(title, value);
+          } catch (retryErr) {
+            const retryFailure = retryErr;
+            if (isTimeout(retryFailure)) timedOut("write");
+            return writeFailed3();
+          }
+        }
+        return writeFailed3();
+      }
+    },
+    async resolve(ref) {
+      validateRef3(ref);
+      try {
+        const { stdout } = await runOp(["read", `op://${VAULT}/${ref}/credential`]);
+        return stdout.replace(/\n$/, "");
+      } catch (err) {
+        const failure = err;
+        if (isTimeout(failure)) timedOut("read");
+        if (ITEM_MISSING_PATTERN.test(failure.stderr ?? "")) notFound3();
+        return readFailed4();
+      }
+    },
+    async delete(ref) {
+      validateRef3(ref);
+      try {
+        await runOp(["item", "delete", ref, "--vault", VAULT]);
+      } catch (err) {
+        const failure = err;
+        if (isTimeout(failure)) timedOut("read");
+        if (ITEM_MISSING_PATTERN.test(failure.stderr ?? "")) return;
+        readFailed4();
+      }
+    },
+    async has(ref) {
+      validateRef3(ref);
+      try {
+        await runOp(["item", "get", ref, "--vault", VAULT]);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  };
+}
+function parseMajorVersion(stdout) {
+  const match = /^(\d+)\./.exec(stdout.trim());
+  return match ? Number(match[1]) : void 0;
+}
+var onepasswordDepositoryModule = {
+  id: "1password",
+  promptProfile: "prompts-each-read",
+  /**
+   * Available only when `op --version` is 2.x+ and `op whoami` succeeds —
+   * both fail fast and never prompt. Vault existence is deliberately not
+   * checked here (that's a `set`-time concern, AC2) since any vault-touching
+   * `op` subcommand risks the ~60s authorization-timeout hang this module
+   * otherwise avoids.
+   */
+  async detect() {
+    let versionOut;
+    try {
+      versionOut = (await runOp(["--version"])).stdout;
+    } catch (err) {
+      const failure = err;
+      const reason = failure.code === "ENOENT" ? "op CLI not installed" : "op --version failed";
+      return { id: "1password", promptProfile: "prompts-each-read", available: false, reason };
+    }
+    const major = parseMajorVersion(versionOut);
+    if (major === void 0 || major < MIN_MAJOR_VERSION) {
+      return {
+        id: "1password",
+        promptProfile: "prompts-each-read",
+        available: false,
+        reason: `op CLI version ${versionOut.trim() || "unknown"} is older than the required ${MIN_MAJOR_VERSION}.x`
+      };
+    }
+    try {
+      await runOp(["whoami"]);
+    } catch {
+      return {
+        id: "1password",
+        promptProfile: "prompts-each-read",
+        available: false,
+        reason: "op CLI is not signed in (run `op signin`)"
+      };
+    }
+    return { id: "1password", promptProfile: "prompts-each-read", available: true };
+  },
+  create: createOnepasswordDepository
+};
+
 // src/storage/detect.ts
 var DEPOSITORY_MODULES = [
   encryptedDepositoryModule,
   envDepositoryModule,
   macosKeychainDepositoryModule,
-  linuxSecretServiceDepositoryModule
+  linuxSecretServiceDepositoryModule,
+  onepasswordDepositoryModule
 ];
 
 // src/storage/manager.ts
@@ -776,17 +1013,20 @@ function runSessionStart(input) {
 }
 
 // src/hooks/read-guard.ts
-import { basename, resolve as resolve2, sep } from "node:path";
+import { basename as basename2, resolve as resolve2, sep } from "node:path";
+import { existsSync as existsSync7, statSync } from "node:fs";
 var DOTENV_EXEMPT = /* @__PURE__ */ new Set([".env.example"]);
-var DOTENV_UTILITIES = /* @__PURE__ */ new Set(["cat", "grep", "sed", "awk", "head", "tail"]);
 var BARE_ENV_DUMP_COMMANDS = /* @__PURE__ */ new Set(["env", "printenv"]);
+var NON_READING_BASH_VERBS = /* @__PURE__ */ new Set(["rm", "mv", "touch", "chmod", "stat", "ls", "find", "test"]);
+var DOTENV_EXCLUDE_GLOB = "!.env*";
+var MAX_SUBSTITUTION_DEPTH = 3;
 var USE_INSTEAD = "Use `enigma_request` to collect it from the user, or `enigma run -- <command>` to inject the real value into a child process without it ever entering this session.";
 function isDotEnvBasename(name) {
   if (DOTENV_EXEMPT.has(name)) return false;
   return name === ".env" || name.startsWith(".env.");
 }
 function targetsDotEnv(pathLike) {
-  return isDotEnvBasename(basename(pathLike.trim()));
+  return isDotEnvBasename(basename2(pathLike.trim()));
 }
 function targetsEnigmaConfig(pathLike, cwd) {
   const home = resolve2(enigmaHome());
@@ -800,14 +1040,51 @@ function tokenize(segment) {
 function splitSegments(command) {
   return command.split(/\|\||&&|[|;&]/).map((s) => s.trim()).filter((s) => s.length > 0);
 }
+function extractSubstitutions(command) {
+  const results = [];
+  let i = 0;
+  while (i < command.length) {
+    if (command[i] === "$" && command[i + 1] === "(") {
+      let depth = 1;
+      let j = i + 2;
+      while (j < command.length && depth > 0) {
+        if (command[j] === "(") depth++;
+        else if (command[j] === ")") depth--;
+        j++;
+      }
+      if (depth === 0) results.push(command.slice(i + 2, j - 1));
+      i = j;
+      continue;
+    }
+    if (command[i] === "`") {
+      const end = command.indexOf("`", i + 1);
+      if (end === -1) break;
+      results.push(command.slice(i + 1, end));
+      i = end + 1;
+      continue;
+    }
+    i++;
+  }
+  return results;
+}
+function allCommandTexts(command, depth = MAX_SUBSTITUTION_DEPTH) {
+  if (depth <= 0) return [command];
+  const subs = extractSubstitutions(command);
+  return [command, ...subs.flatMap((s) => allCommandTexts(s, depth - 1))];
+}
 function commandName(token) {
   const parts = token.split("/");
   return parts[parts.length - 1] ?? token;
 }
-function segmentTargetsDotEnvViaUtility(segment) {
+function segmentTargetsDotEnvByPath(segment) {
   const [head, ...rest] = tokenize(segment);
-  if (!head || !DOTENV_UTILITIES.has(commandName(head))) return false;
+  if (head && NON_READING_BASH_VERBS.has(commandName(head))) return false;
   return rest.some((t) => !t.startsWith("-") && targetsDotEnv(t));
+}
+function segmentTargetsEnigmaConfigByPath(segment, cwd) {
+  const [head, ...rest] = tokenize(segment);
+  if (!head) return false;
+  return rest.some((t) => !t.startsWith("-") && targetsEnigmaConfig(t, cwd));
 }
 function segmentIsBareEnvDump(segment) {
   const [head] = tokenize(segment);
@@ -824,11 +1101,6 @@ function segmentIsKeychainRead(segment) {
 function segmentIsOpRead(segment) {
   const [head, sub] = tokenize(segment);
   return commandName(head ?? "") === "op" && sub === "read";
-}
-function segmentTargetsEnigmaConfigViaUtility(segment, cwd) {
-  const [head, ...rest] = tokenize(segment);
-  if (!head) return false;
-  return rest.some((t) => !t.startsWith("-") && targetsEnigmaConfig(t, cwd));
 }
 function knownSecretNames() {
   return new Set(readIndex().entries.map((e) => e.name));
@@ -848,6 +1120,32 @@ var PATH_TOOL_FIELDS = {
   Grep: ["path", "glob"],
   Glob: ["path", "pattern"]
 };
+function isKnownNonDirectoryPath(pathLike, cwd) {
+  if (!pathLike) return false;
+  try {
+    const resolved = resolve2(cwd, pathLike.trim());
+    return existsSync7(resolved) && !statSync(resolved).isDirectory();
+  } catch {
+    return false;
+  }
+}
+function grepDotEnvExclusion(toolInput, cwd) {
+  if (isKnownNonDirectoryPath(stringField(toolInput, "path"), cwd)) return void 0;
+  const existingGlob = stringField(toolInput, "glob");
+  if (existingGlob) {
+    return deny(
+      `This Grep call already filters by --glob "${existingGlob}", which can't be safely combined with an exclusion for .env files in the same call. Retry without --glob, or use \`enigma list\`/\`enigma doctor\` if you're looking for what Enigma has stored.`
+    );
+  }
+  return {
+    hookSpecificOutput: {
+      hookEventName: "PreToolUse",
+      permissionDecision: "allow",
+      permissionDecisionReason: "Added a glob exclusion for .env files so this search can proceed without exposing a secret value in its results.",
+      updatedInput: { ...toolInput, glob: DOTENV_EXCLUDE_GLOB }
+    }
+  };
+}
 function runReadGuard(input) {
   const cwd = input.cwd ?? process.cwd();
   const toolInput = input.tool_input ?? {};
@@ -864,16 +1162,21 @@ function runReadGuard(input) {
         );
       }
     }
+    if (input.tool_name === "Grep") {
+      const exclusion = grepDotEnvExclusion(toolInput, cwd);
+      if (exclusion) return exclusion;
+    }
   }
   if (input.tool_name === "Bash") {
     const command = stringField(toolInput, "command");
     if (command) {
       const known = knownSecretNames();
-      for (const segment of splitSegments(command)) {
-        if (segmentTargetsDotEnvViaUtility(segment)) {
+      const segments = allCommandTexts(command).flatMap(splitSegments);
+      for (const segment of segments) {
+        if (segmentTargetsDotEnvByPath(segment)) {
           return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${USE_INSTEAD}`);
         }
-        if (segmentTargetsEnigmaConfigViaUtility(segment, cwd)) {
+        if (segmentTargetsEnigmaConfigByPath(segment, cwd)) {
           return deny(
             "Enigma's config directory holds the encrypted vault, index, and audit log. Use `enigma list` or `enigma doctor` instead of reading it directly."
           );
