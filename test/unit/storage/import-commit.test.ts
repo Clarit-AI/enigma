@@ -1,9 +1,15 @@
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { commitImport } from '../../../src/storage/import-commit.js';
 import { listSecrets } from '../../../src/storage/manager.js';
+import type { ParsedDotEnvEntry } from '../../../src/storage/dotenv-file.js';
+
+/** Shorthand for an unambiguous entry literal — most tests here don't care about A2. */
+function entry(name: string, value: string, ambiguous = false): ParsedDotEnvEntry {
+  return { name, value, ambiguous };
+}
 
 describe('commitImport', () => {
   let tmpHome: string;
@@ -24,16 +30,14 @@ describe('commitImport', () => {
     else process.env.ENIGMA_HOME = originalHome;
     rmSync(tmpHome, { recursive: true, force: true });
     rmSync(tmpProject, { recursive: true, force: true });
+    vi.restoreAllMocks();
   });
 
   it('AC1: on full success into a non-env depository, every entry is stored, the file is rewritten with those lines removed and one summary comment, and unrelated lines survive byte-identical', async () => {
     writeFileSync(envFilePath, '# header\nKEEP_ME=1\nOPENAI_API_KEY=sk-abc\nGITHUB_TOKEN=ghp-xyz\nALSO_KEEP=2\n');
 
     const result = await commitImport({
-      entries: [
-        { name: 'OPENAI_API_KEY', value: 'sk-abc' },
-        { name: 'GITHUB_TOKEN', value: 'ghp-xyz' },
-      ],
+      entries: [entry('OPENAI_API_KEY', 'sk-abc'), entry('GITHUB_TOKEN', 'ghp-xyz')],
       depository: 'encrypted',
       scope: 'project',
       cwd: tmpProject,
@@ -44,6 +48,7 @@ describe('commitImport', () => {
 
     expect(result.succeeded).toEqual(['OPENAI_API_KEY', 'GITHUB_TOKEN']);
     expect(result.failed).toEqual([]);
+    expect(result.skippedMismatch).toEqual([]);
     expect(result.fileRewritten).toBe(true);
 
     const rewritten = readFileSync(envFilePath, 'utf8');
@@ -61,7 +66,7 @@ describe('commitImport', () => {
     writeFileSync(envFilePath, 'KEEP_ME=1\nOPENAI_API_KEY=sk-abc\n');
 
     const result = await commitImport({
-      entries: [{ name: 'OPENAI_API_KEY', value: 'sk-abc' }],
+      entries: [entry('OPENAI_API_KEY', 'sk-abc')],
       depository: 'env',
       scope: 'project',
       cwd: tmpProject,
@@ -83,7 +88,7 @@ describe('commitImport', () => {
   it('AC4: warns when .env is not gitignored, and the warning is silent when it is', async () => {
     writeFileSync(envFilePath, 'OPENAI_API_KEY=sk-abc\n');
     const noGitignore = await commitImport({
-      entries: [{ name: 'OPENAI_API_KEY', value: 'sk-abc' }],
+      entries: [entry('OPENAI_API_KEY', 'sk-abc')],
       depository: 'encrypted',
       scope: 'project',
       cwd: tmpProject,
@@ -100,7 +105,7 @@ describe('commitImport', () => {
 
     // Pre-seed KEY_TWO in the index so its setSecret call fails with E_EXISTS (rotate not set).
     await commitImport({
-      entries: [{ name: 'KEY_TWO', value: 'already-there' }],
+      entries: [entry('KEY_TWO', 'already-there')],
       depository: 'encrypted',
       scope: 'project',
       cwd: tmpProject,
@@ -112,11 +117,7 @@ describe('commitImport', () => {
     writeFileSync(envFilePath, original);
 
     const result = await commitImport({
-      entries: [
-        { name: 'KEY_ONE', value: 'v1' },
-        { name: 'KEY_TWO', value: 'v2' },
-        { name: 'KEY_THREE', value: 'v3' },
-      ],
+      entries: [entry('KEY_ONE', 'v1'), entry('KEY_TWO', 'v2'), entry('KEY_THREE', 'v3')],
       depository: 'encrypted',
       scope: 'project',
       cwd: tmpProject,
@@ -126,7 +127,7 @@ describe('commitImport', () => {
     });
 
     expect(result.succeeded).toEqual(['KEY_ONE']);
-    expect(result.failed).toEqual([{ name: 'KEY_TWO', errorCode: 'E_EXISTS' }]);
+    expect(result.failed).toEqual([{ name: 'KEY_TWO', errorCode: 'E_EXISTS', message: expect.stringContaining('already exists') }]);
     expect(result.notAttempted).toEqual(['KEY_THREE']);
     expect(result.fileRewritten).toBe(false);
     expect(readFileSync(envFilePath, 'utf8')).toBe(original);
@@ -136,7 +137,7 @@ describe('commitImport', () => {
     writeFileSync(envFilePath, 'KEY_ONE=v1\nKEY_TWO=v2\n');
 
     await commitImport({
-      entries: [{ name: 'KEY_TWO', value: 'already-there' }],
+      entries: [entry('KEY_TWO', 'already-there')],
       depository: 'env',
       scope: 'project',
       cwd: tmpProject,
@@ -147,10 +148,7 @@ describe('commitImport', () => {
     writeFileSync(envFilePath, 'KEY_ONE=v1\nKEY_TWO=v2\n# enigma:begin\nKEY_TWO=already-there\n# enigma:end\n');
 
     const result = await commitImport({
-      entries: [
-        { name: 'KEY_ONE', value: 'v1' },
-        { name: 'KEY_TWO', value: 'v2' },
-      ],
+      entries: [entry('KEY_ONE', 'v1'), entry('KEY_TWO', 'v2')],
       depository: 'env',
       scope: 'project',
       cwd: tmpProject,
@@ -160,10 +158,104 @@ describe('commitImport', () => {
     });
 
     expect(result.succeeded).toEqual(['KEY_ONE']);
-    expect(result.failed).toEqual([{ name: 'KEY_TWO', errorCode: 'E_EXISTS' }]);
+    expect(result.failed).toEqual([{ name: 'KEY_TWO', errorCode: 'E_EXISTS', message: expect.stringContaining('already exists') }]);
     expect(result.fileRewritten).toBe(false);
     expect(result.warnings.some((w) => w.includes('already written into the .env managed block'))).toBe(true);
     // KEY_ONE's raw line is still present in plaintext — the batch aborted before the removal step ran.
     expect(readFileSync(envFilePath, 'utf8')).toContain('KEY_ONE=v1');
+  });
+
+  describe('B1: parse/rewrite interleaving — same-value happy path (fs-mocked variants live in import-commit-fs-mocked.test.ts)', () => {
+    it('when the current value still matches, the line is removed exactly as the plain-success test above already proves', async () => {
+      writeFileSync(envFilePath, 'DB_PASSWORD=v\n');
+      const result = await commitImport({
+        entries: [entry('DB_PASSWORD', 'v')],
+        depository: 'encrypted',
+        scope: 'project',
+        cwd: tmpProject,
+        projectPath: tmpProject,
+        envFilePath,
+        actor: 'cli',
+      });
+      expect(result.skippedMismatch).toEqual([]);
+      expect(result.fileRewritten).toBe(true);
+    });
+  });
+
+  describe('A2: ambiguous inline-comment-like values (Issue #13 review, round 2)', () => {
+    it('an unquoted value with " #" refuses through the loud-abort path, never touching the depository', async () => {
+      writeFileSync(envFilePath, 'PORT=3000 # dev port\n');
+
+      const result = await commitImport({
+        entries: [entry('PORT', '3000 # dev port', true)],
+        depository: 'encrypted',
+        scope: 'project',
+        cwd: tmpProject,
+        projectPath: tmpProject,
+        envFilePath,
+        actor: 'cli',
+      });
+
+      expect(result.succeeded).toEqual([]);
+      expect(result.failed).toEqual([
+        { name: 'PORT', errorCode: 'E_VALUE_AMBIGUOUS', message: expect.stringContaining('quote the value') },
+      ]);
+      expect(result.fileRewritten).toBe(false);
+      expect(readFileSync(envFilePath, 'utf8')).toBe('PORT=3000 # dev port\n');
+      expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+    });
+
+    it('a passphrase like "hunter2 #1" is refused rather than silently truncated', async () => {
+      writeFileSync(envFilePath, 'PASSPHRASE=hunter2 #1\n');
+
+      const result = await commitImport({
+        entries: [entry('PASSPHRASE', 'hunter2 #1', true)],
+        depository: 'encrypted',
+        scope: 'project',
+        cwd: tmpProject,
+        projectPath: tmpProject,
+        envFilePath,
+        actor: 'cli',
+      });
+
+      expect(result.failed[0]?.errorCode).toBe('E_VALUE_AMBIGUOUS');
+      expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+      expect(readFileSync(envFilePath, 'utf8')).toBe('PASSPHRASE=hunter2 #1\n');
+    });
+
+    it('a quoted value containing "#" migrates intact, unaffected by the ambiguity check', async () => {
+      writeFileSync(envFilePath, 'TOKEN="abc#def"\n');
+
+      const result = await commitImport({
+        entries: [entry('TOKEN', 'abc#def', false)],
+        depository: 'encrypted',
+        scope: 'project',
+        cwd: tmpProject,
+        projectPath: tmpProject,
+        envFilePath,
+        actor: 'cli',
+      });
+
+      expect(result.succeeded).toEqual(['TOKEN']);
+      expect(result.fileRewritten).toBe(true);
+      expect(readFileSync(envFilePath, 'utf8')).not.toContain('abc#def');
+    });
+
+    it('a plain unquoted value with no "#" is unaffected', async () => {
+      writeFileSync(envFilePath, 'OPENAI_API_KEY=sk-abc\n');
+
+      const result = await commitImport({
+        entries: [entry('OPENAI_API_KEY', 'sk-abc', false)],
+        depository: 'encrypted',
+        scope: 'project',
+        cwd: tmpProject,
+        projectPath: tmpProject,
+        envFilePath,
+        actor: 'cli',
+      });
+
+      expect(result.succeeded).toEqual(['OPENAI_API_KEY']);
+      expect(result.fileRewritten).toBe(true);
+    });
   });
 });
