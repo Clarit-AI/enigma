@@ -1,19 +1,17 @@
 #!/usr/bin/env node
-// Static scan: fails if `resolve(` is reachable from src/mcp/** or src/web/** (ADR-001).
-import { readdirSync, readFileSync } from 'node:fs';
+// Static scan: fails if `resolve(` is reachable from the scanned directories (ADR-001).
+// This is a backstop, not a guarantee — it catches an obvious textual pattern, not every
+// way a secret value could leak. Review and the runtime boundary are the real defenses.
+import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 const ALLOW_PREFIX = '// enigma:leak-fence-allow:';
-const LEAK_PATTERN = 'resolve(';
-const SCAN_DIRS = ['src/mcp', 'src/web'];
+const LEAK_PATTERN = /\bresolve\s*\(/;
+// Issue #7 adds src/web to this list once that surface exists.
+const SCAN_DIRS = ['src/mcp'];
 
 function walk(dir) {
-  let entries;
-  try {
-    entries = readdirSync(dir, { withFileTypes: true });
-  } catch {
-    return [];
-  }
+  const entries = readdirSync(dir, { withFileTypes: true });
   const files = [];
   for (const entry of entries) {
     const full = join(dir, entry.name);
@@ -42,9 +40,16 @@ function main() {
   let failed = false;
 
   for (const dir of SCAN_DIRS) {
+    try {
+      if (!statSync(dir).isDirectory()) throw new Error('not a directory');
+    } catch {
+      console.error(`leak-fence: scan directory ${dir} does not exist`);
+      process.exit(1);
+    }
+
     for (const file of walk(dir)) {
       const content = readFileSync(file, 'utf8');
-      if (!content.includes(LEAK_PATTERN)) continue;
+      if (!LEAK_PATTERN.test(content)) continue;
 
       const marker = checkAllowlist(content.split('\n'));
       if (marker?.allowed) {
@@ -53,7 +58,7 @@ function main() {
         console.error(`leak-fence: ${file} has an empty leak-fence-allow marker (reason required)`);
         failed = true;
       } else {
-        console.error(`leak-fence: ${file} references ${LEAK_PATTERN}`);
+        console.error(`leak-fence: ${file} matches ${LEAK_PATTERN}`);
         failed = true;
       }
     }

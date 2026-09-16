@@ -54,4 +54,28 @@ describe('leak-fence', () => {
     );
     expect(runLeakFence().code).toBe(1);
   });
+
+  it('catches resolve( with intervening whitespace via the regex match', () => {
+    fixture = join(REPO_ROOT, 'src/mcp/__leak-fence-fixture-whitespace__.ts');
+    writeFileSync(fixture, 'export function read(name: string) { return resolve  (name); }\n');
+    expect(runLeakFence().code).toBe(1);
+  });
+
+  it('does not honor an allow marker placed on line 6 or later', () => {
+    fixture = join(REPO_ROOT, 'src/mcp/__leak-fence-fixture-late-marker__.ts');
+    writeFileSync(
+      fixture,
+      [
+        '// line 1',
+        '// line 2',
+        '// line 3',
+        '// line 4',
+        '// line 5',
+        '// enigma:leak-fence-allow: too late to count',
+        'export function read(name: string) { return resolve(name); }',
+        '',
+      ].join('\n'),
+    );
+    expect(runLeakFence().code).toBe(1);
+  });
 });
