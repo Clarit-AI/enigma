@@ -116,6 +116,12 @@ describe('clipboardReveal', () => {
     mockClipboardBinaries(children);
     vi.useRealTimers(); // hasRef()/unref() need a real Node Timeout, not the fake-timer stand-in
 
+    // Deliberately last-wins: this flow calls setTimeout twice — execWithStdin's
+    // 5000ms pbcopy guard timer first (correctly left ref'd, since it represents
+    // in-flight awaited work), then scheduleClear's 60s clear timer, which is the
+    // one under test. Capturing unconditionally works only because scheduleClear
+    // runs last; if a future refactor adds another setTimeout after it, this will
+    // silently start asserting on the wrong handle.
     const realSetTimeout = globalThis.setTimeout;
     let capturedTimer: ReturnType<typeof setTimeout> | undefined;
     globalThis.setTimeout = ((fn: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
