@@ -62,6 +62,16 @@ describe('parseDotEnv', () => {
   it('returns no entries for an empty file', () => {
     expect(parseDotEnv('')).toEqual({ entries: [], invalidNames: [], duplicateNames: [] });
   });
+
+  it('malformed input: an unterminated quote does not swallow the rest of the file — later lines still parse independently', () => {
+    const content = 'BROKEN="never closed\nOPENAI_API_KEY=sk-abc\nGITHUB_TOKEN=ghp-xyz\n';
+    const result = parseDotEnv(content);
+    expect(result.entries).toEqual([
+      { name: 'BROKEN', value: '"never closed' },
+      { name: 'OPENAI_API_KEY', value: 'sk-abc' },
+      { name: 'GITHUB_TOKEN', value: 'ghp-xyz' },
+    ]);
+  });
 });
 
 describe('removeDotEnvEntries', () => {
@@ -116,5 +126,11 @@ describe('removeDotEnvEntries', () => {
     const content = 'KEEP=1\nOPENAI_API_KEY=sk-abc';
     const result = removeDotEnvEntries(content, ['OPENAI_API_KEY']);
     expect(result).toBe('KEEP=1');
+  });
+
+  it('malformed input: removing a name after an unterminated quote never mangles the lines that follow it', () => {
+    const content = 'BROKEN="never closed\nOPENAI_API_KEY=sk-abc\nGITHUB_TOKEN=ghp-xyz\n';
+    const result = removeDotEnvEntries(content, ['OPENAI_API_KEY']);
+    expect(result).toBe('BROKEN="never closed\nGITHUB_TOKEN=ghp-xyz\n');
   });
 });

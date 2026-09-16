@@ -1609,13 +1609,19 @@ function scanAssignments(lines, block) {
           closed = true;
           break;
         }
-        endIdx++;
-        if (endIdx >= lines.length || block && endIdx >= block.beginIdx && endIdx <= block.endIdx) break;
+        const nextIdx = endIdx + 1;
+        if (nextIdx >= lines.length || block && nextIdx >= block.beginIdx && nextIdx <= block.endIdx) break;
+        endIdx = nextIdx;
         joined += `
 ${lines[endIdx]}`;
       }
-      assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), startIdx: i, endIdx: closed ? endIdx : i });
-      i = (closed ? endIdx : i) + 1;
+      if (closed) {
+        assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), startIdx: i, endIdx });
+        i = endIdx + 1;
+      } else {
+        assignments.push({ name, value: rest.trim(), valid: NAME_PATTERN.test(name), startIdx: i, endIdx: i });
+        i++;
+      }
       continue;
     }
     assignments.push({ name, value: rest.trim(), valid: NAME_PATTERN.test(name), startIdx: i, endIdx: i });

@@ -75,7 +75,10 @@ function scanAssignments(lines: string[], block: { beginIdx: number; endIdx: num
     const quote = rest[0];
 
     if (quote === '"' || quote === "'") {
-      // Scan forward (joining physical lines with \n) for the matching unescaped closing quote.
+      // Scan forward (joining physical lines with \n) for the matching unescaped closing
+      // quote, bounded by EOF or the managed block. An unterminated quote (malformed or
+      // hostile input) must NOT swallow the rest of the file: falls back to parsing just
+      // this one line raw, so every later line is still scanned fresh and independently.
       let joined = rest.slice(1);
       let endIdx = i;
       let closed = false;
@@ -86,12 +89,18 @@ function scanAssignments(lines: string[], block: { beginIdx: number; endIdx: num
           closed = true;
           break;
         }
-        endIdx++;
-        if (endIdx >= lines.length || (block && endIdx >= block.beginIdx && endIdx <= block.endIdx)) break;
+        const nextIdx = endIdx + 1;
+        if (nextIdx >= lines.length || (block && nextIdx >= block.beginIdx && nextIdx <= block.endIdx)) break;
+        endIdx = nextIdx;
         joined += `\n${lines[endIdx]}`;
       }
-      assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), startIdx: i, endIdx: closed ? endIdx : i });
-      i = (closed ? endIdx : i) + 1;
+      if (closed) {
+        assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), startIdx: i, endIdx });
+        i = endIdx + 1;
+      } else {
+        assignments.push({ name, value: rest.trim(), valid: NAME_PATTERN.test(name), startIdx: i, endIdx: i });
+        i++;
+      }
       continue;
     }
 
