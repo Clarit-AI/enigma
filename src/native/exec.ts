@@ -44,10 +44,17 @@ export function execWithStdin(
       });
     }, opts.timeoutMs);
 
+    // stdout and stderr share opts.maxBufferBytes as one combined budget rather
+    // than each getting their own cap: a per-stream cap would let a child push
+    // combined memory usage up to 2x the intended limit by splitting output
+    // across both streams without either single stream ever breaching its cap.
+    const exceedsMaxBuffer = (): boolean =>
+      Buffer.byteLength(stdout, 'utf8') + Buffer.byteLength(stderr, 'utf8') > opts.maxBufferBytes;
+
     child.stdout.on('data', (chunk: Buffer) => {
       if (settled) return;
       stdout += chunk.toString('utf8');
-      if (Buffer.byteLength(stdout, 'utf8') > opts.maxBufferBytes) {
+      if (exceedsMaxBuffer()) {
         finish(() => {
           child.kill('SIGKILL');
           reject(new EnigmaError({ code: 'E_UI_UNAVAILABLE', message: `${command} output exceeded max buffer` }));
@@ -56,7 +63,14 @@ export function execWithStdin(
     });
 
     child.stderr.on('data', (chunk: Buffer) => {
+      if (settled) return;
       stderr += chunk.toString('utf8');
+      if (exceedsMaxBuffer()) {
+        finish(() => {
+          child.kill('SIGKILL');
+          reject(new EnigmaError({ code: 'E_UI_UNAVAILABLE', message: `${command} output exceeded max buffer` }));
+        });
+      }
     });
 
     child.on('error', () => {

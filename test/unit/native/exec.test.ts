@@ -63,10 +63,33 @@ describe('execWithStdin', () => {
     expect(result).toEqual({ code: 1, stdout: 'ab', stderr: 'err' });
   });
 
-  it('rejects with E_UI_UNAVAILABLE and kills the child when maxBufferBytes is exceeded', async () => {
+  it('rejects with E_UI_UNAVAILABLE and kills the child when maxBufferBytes is exceeded on stdout', async () => {
     const promise = execWithStdin('cmd', [], '', { timeoutMs: 1000, maxBufferBytes: 4 });
     queueMicrotask(() => {
       child.stdout.emit('data', Buffer.from('too much output'));
+    });
+
+    await expect(promise).rejects.toThrow(expect.objectContaining({ code: 'E_UI_UNAVAILABLE' }));
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('rejects with E_UI_UNAVAILABLE and kills the child when maxBufferBytes is exceeded on stderr', async () => {
+    const promise = execWithStdin('cmd', [], '', { timeoutMs: 1000, maxBufferBytes: 4 });
+    queueMicrotask(() => {
+      child.stderr.emit('data', Buffer.from('too much output'));
+    });
+
+    const err = await promise.catch((e: unknown) => e);
+    expect(err).toEqual(expect.objectContaining({ code: 'E_UI_UNAVAILABLE' }));
+    expect(String((err as Error).message)).toBe('cmd output exceeded max buffer');
+    expect(child.kill).toHaveBeenCalledWith('SIGKILL');
+  });
+
+  it('rejects when stdout and stderr together exceed maxBufferBytes, even though neither alone does', async () => {
+    const promise = execWithStdin('cmd', [], '', { timeoutMs: 1000, maxBufferBytes: 4 });
+    queueMicrotask(() => {
+      child.stdout.emit('data', Buffer.from('abc')); // 3 bytes, under the cap alone
+      child.stderr.emit('data', Buffer.from('abc')); // combined 6 bytes, over the shared cap
     });
 
     await expect(promise).rejects.toThrow(expect.objectContaining({ code: 'E_UI_UNAVAILABLE' }));
