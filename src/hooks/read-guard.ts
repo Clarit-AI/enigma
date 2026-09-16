@@ -6,14 +6,29 @@
 //
 // This module never touches a secret VALUE — only secret NAMES (to recognize
 // `echo $NAME`) and file paths. Names are safe to inspect freely per the glossary.
+//
+// Known, accepted gap: a copy-then-read (`cp .env x && cat x`) defeats every
+// filename heuristic here, since the second command never mentions `.env`. The
+// PostToolUse tripwire is the only backstop, and only for secrets Enigma
+// already tracks — this guard cannot and does not chase that pattern.
 import { basename, resolve, sep } from 'node:path';
+import { existsSync, statSync } from 'node:fs';
 import { enigmaHome } from '../core/paths.js';
 import { readIndex } from '../core/index-store.js';
 import type { PreToolUseInput, PreToolUseOutput } from './types.js';
 
 const DOTENV_EXEMPT = new Set(['.env.example']);
-const DOTENV_UTILITIES = new Set(['cat', 'grep', 'sed', 'awk', 'head', 'tail']);
 const BARE_ENV_DUMP_COMMANDS = new Set(['env', 'printenv']);
+/** Commands that touch a .env path without reading its content into this
+ * session (metadata/lifecycle operations, or existence checks) — referencing
+ * `.env` as an argument to one of these is not a leak. */
+const NON_READING_BASH_VERBS = new Set(['rm', 'mv', 'touch', 'chmod', 'stat', 'ls', 'find', 'test']);
+/** A recursive Grep needs its own `.env` exclusion (see `grepDotEnvExclusion`);
+ * this is the pattern injected via `updatedInput.glob`. */
+const DOTENV_EXCLUDE_GLOB = '!.env*';
+/** Bounds how deep `$(...)`/`` `...` `` command-substitution unwrapping goes,
+ * so a pathological command can't recurse unboundedly. */
+const MAX_SUBSTITUTION_DEPTH = 3;
 
 const USE_INSTEAD = 'Use `enigma_request` to collect it from the user, or `enigma run -- <command>` to inject the real value into a child process without it ever entering this session.';
 
@@ -48,15 +63,67 @@ function splitSegments(command: string): string[] {
     .filter((s) => s.length > 0);
 }
 
+/**
+ * Extracts the inner text of every `$(...)` and `` `...` `` span in `command`,
+ * recursively (bounded), so `eval "$(cat .env)"` is checked the same as a
+ * plain `cat .env` segment — command substitution must not be a way around
+ * every other rule below. Not a shell parser: a stray unmatched backtick or
+ * paren just stops that one scan early, which fails toward "allow" (missing a
+ * substitution), the same safe direction as `tokenize`.
+ */
+function extractSubstitutions(command: string): string[] {
+  const results: string[] = [];
+  let i = 0;
+  while (i < command.length) {
+    if (command[i] === '$' && command[i + 1] === '(') {
+      let depth = 1;
+      let j = i + 2;
+      while (j < command.length && depth > 0) {
+        if (command[j] === '(') depth++;
+        else if (command[j] === ')') depth--;
+        j++;
+      }
+      if (depth === 0) results.push(command.slice(i + 2, j - 1));
+      i = j;
+      continue;
+    }
+    if (command[i] === '`') {
+      const end = command.indexOf('`', i + 1);
+      if (end === -1) break;
+      results.push(command.slice(i + 1, end));
+      i = end + 1;
+      continue;
+    }
+    i++;
+  }
+  return results;
+}
+
+function allCommandTexts(command: string, depth = MAX_SUBSTITUTION_DEPTH): string[] {
+  if (depth <= 0) return [command];
+  const subs = extractSubstitutions(command);
+  return [command, ...subs.flatMap((s) => allCommandTexts(s, depth - 1))];
+}
+
 function commandName(token: string): string {
   const parts = token.split('/');
   return parts[parts.length - 1] ?? token;
 }
 
-function segmentTargetsDotEnvViaUtility(segment: string): boolean {
+/** Target-based, not utility-gated: ANY command referencing a `.env` path as a
+ * non-flag argument is denied, whatever that command is (`less`, `xxd`,
+ * `strings`, `source`, `.` …) — except the small allowlist of commands that
+ * touch the file without reading its content into this session. */
+function segmentTargetsDotEnvByPath(segment: string): boolean {
   const [head, ...rest] = tokenize(segment);
-  if (!head || !DOTENV_UTILITIES.has(commandName(head))) return false;
+  if (head && NON_READING_BASH_VERBS.has(commandName(head))) return false;
   return rest.some((t) => !t.startsWith('-') && targetsDotEnv(t));
+}
+
+function segmentTargetsEnigmaConfigByPath(segment: string, cwd: string): boolean {
+  const [head, ...rest] = tokenize(segment);
+  if (!head) return false;
+  return rest.some((t) => !t.startsWith('-') && targetsEnigmaConfig(t, cwd));
 }
 
 function segmentIsBareEnvDump(segment: string): boolean {
@@ -77,12 +144,6 @@ function segmentIsKeychainRead(segment: string): boolean {
 function segmentIsOpRead(segment: string): boolean {
   const [head, sub] = tokenize(segment);
   return commandName(head ?? '') === 'op' && sub === 'read';
-}
-
-function segmentTargetsEnigmaConfigViaUtility(segment: string, cwd: string): boolean {
-  const [head, ...rest] = tokenize(segment);
-  if (!head) return false;
-  return rest.some((t) => !t.startsWith('-') && targetsEnigmaConfig(t, cwd));
 }
 
 /** Names Enigma actually tracks, from every scope — a bare `echo $NAME` is only
@@ -109,10 +170,64 @@ const PATH_TOOL_FIELDS: Record<string, string[]> = {
   Glob: ['path', 'pattern'],
 };
 
+/** True when `pathLike` is known, right now, to name an existing non-directory
+ * (a specific file) — in which case a Grep glob filter wouldn't even apply
+ * (ripgrep searches an explicit file target directly, ignoring `--glob`), so
+ * there's nothing for `grepDotEnvExclusion` to usefully add. Anything else
+ * (omitted, a directory, or a path that doesn't exist yet) is treated as a
+ * recursive search and gets the exclusion, which is the safe default. */
+function isKnownNonDirectoryPath(pathLike: string | undefined, cwd: string): boolean {
+  if (!pathLike) return false;
+  try {
+    const resolved = resolve(cwd, pathLike.trim());
+    return existsSync(resolved) && !statSync(resolved).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Grep recurses over a directory by default, and the per-path checks above
+ * only catch a call that names a `.env` file directly — the common miss is
+ * `Grep(pattern, path: ".")`, which walks straight through `.env` with no
+ * Bash involved at all. Adding a `.env*` exclusion glob is a no-op when
+ * nothing under `path` matches it, so it's added unconditionally for any
+ * directory-rooted (or omitted-path) search rather than first checking
+ * whether a `.env` actually exists there.
+ *
+ * The one case this can't handle: ripgrep's `--glob` takes one pattern per
+ * flag, and the Grep tool only exposes a single `glob` string, so there is no
+ * way to express "this include AND that exclude" in the same field. When the
+ * caller already set `glob`, this falls back to deny rather than silently
+ * dropping the caller's filter or guessing whether it would have matched
+ * `.env` anyway.
+ */
+function grepDotEnvExclusion(toolInput: Record<string, unknown>, cwd: string): PreToolUseOutput | undefined {
+  if (isKnownNonDirectoryPath(stringField(toolInput, 'path'), cwd)) return undefined;
+
+  const existingGlob = stringField(toolInput, 'glob');
+  if (existingGlob) {
+    return deny(
+      `This Grep call already filters by --glob "${existingGlob}", which can't be safely combined with an exclusion for .env files in the same call. Retry without --glob, or use \`enigma list\`/\`enigma doctor\` if you're looking for what Enigma has stored.`,
+    );
+  }
+
+  return {
+    hookSpecificOutput: {
+      hookEventName: 'PreToolUse',
+      permissionDecision: 'allow',
+      permissionDecisionReason: 'Added a glob exclusion for .env files so this search can proceed without exposing a secret value in its results.',
+      updatedInput: { ...toolInput, glob: DOTENV_EXCLUDE_GLOB },
+    },
+  };
+}
+
 /**
  * Rules 1-2 inspect the tool's own structured input (file paths, patterns) for
- * Read/Grep/Glob. Rules 3+ inspect the Bash command string. Order doesn't matter —
- * each rule is independent and the first match wins.
+ * Read/Grep/Glob, followed by Grep's directory-search exclusion. Rules 3+
+ * inspect the Bash command string (including inside command substitution).
+ * Order doesn't matter for the Bash rules — each is independent and the first
+ * match wins.
  */
 export function runReadGuard(input: PreToolUseInput): PreToolUseOutput | undefined {
   const cwd = input.cwd ?? process.cwd();
@@ -132,17 +247,23 @@ export function runReadGuard(input: PreToolUseInput): PreToolUseOutput | undefin
         );
       }
     }
+
+    if (input.tool_name === 'Grep') {
+      const exclusion = grepDotEnvExclusion(toolInput, cwd);
+      if (exclusion) return exclusion;
+    }
   }
 
   if (input.tool_name === 'Bash') {
     const command = stringField(toolInput, 'command');
     if (command) {
       const known = knownSecretNames();
-      for (const segment of splitSegments(command)) {
-        if (segmentTargetsDotEnvViaUtility(segment)) {
+      const segments = allCommandTexts(command).flatMap(splitSegments);
+      for (const segment of segments) {
+        if (segmentTargetsDotEnvByPath(segment)) {
           return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${USE_INSTEAD}`);
         }
-        if (segmentTargetsEnigmaConfigViaUtility(segment, cwd)) {
+        if (segmentTargetsEnigmaConfigByPath(segment, cwd)) {
           return deny(
             "Enigma's config directory holds the encrypted vault, index, and audit log. Use `enigma list` or `enigma doctor` instead of reading it directly.",
           );

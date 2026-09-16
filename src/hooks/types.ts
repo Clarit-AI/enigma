@@ -39,8 +39,25 @@ export interface PreToolUseDenyOutput {
   };
 }
 
+/**
+ * Rewrites the tool call before it runs instead of blocking it outright — used
+ * when a safe version of the call can be expressed (e.g. adding a glob
+ * exclusion to a recursive Grep so it can't walk into a .env file), which
+ * keeps the agent's work moving instead of denying a call that had nothing to
+ * do with reading a secret. `updatedInput` replaces the tool's `tool_input`
+ * wholesale, mirroring how the caller's own fields are spread into it.
+ */
+export interface PreToolUseAllowWithUpdatedInputOutput {
+  hookSpecificOutput: {
+    hookEventName: 'PreToolUse';
+    permissionDecision: 'allow';
+    permissionDecisionReason: string;
+    updatedInput: Record<string, unknown>;
+  };
+}
+
 /** `undefined` means "no output" — Claude Code proceeds with its normal permission flow. */
-export type PreToolUseOutput = PreToolUseDenyOutput;
+export type PreToolUseOutput = PreToolUseDenyOutput | PreToolUseAllowWithUpdatedInputOutput;
 
 export interface PostToolUseOutput {
   systemMessage: string;
