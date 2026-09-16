@@ -77,6 +77,8 @@ NAME=value
 ```
 Each `NAME` line is one dotenv-compatible entry, `ref` is the bare `NAME` (no scope prefix — the file is already scoped by `projectPath`). A value is written bare when it contains none of whitespace, `#`, `"`, `'`, `\`, or `$`; otherwise it is written double-quoted with `\`→`\\`, `"`→`\"`, CR→`\r`, and LF→`\n` (so a multi-line value, e.g. a PEM key, is stored as a single quoted line and a value that happens to contain the literal text `# enigma:end` can never be mistaken for the block terminator). Reading the block applies the exact inverse. This matches Node's built-in `util.parseEnv` for the common case (values whose only escape is an embedded newline); values containing a literal backslash or double quote round-trip correctly only through Enigma's own reader.
 
+**Depository limits**: the `keychain` depository's `set` computes, before spawning anything, the plaintext value byte length that still fits `security -i`'s 4096-byte batch-line budget once the fixed command overhead and the given `ref` are subtracted; a value over that ceiling is rejected with `E_VALUE_TOO_LARGE` (the ceiling and a recommendation to use the `encrypted` depository for large material such as PEM keys are in the message; the value itself never is). `keychain` and `secret-service` both reject a `ref` containing characters outside `[A-Za-z0-9_./-]`, or longer than 512 characters, with `E_REF_INVALID`, checked at the depository boundary before any process is spawned. `E_WRITE_FAILED` reports a failed `set`, distinct from `E_READ_FAILED` for a failed `resolve`/`delete`.
+
 ## 5. Hook contracts (`dist/hooks.mjs <event>`)
 
 - `SessionStart`: stdout JSON `{ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "<names only>" } }`.
