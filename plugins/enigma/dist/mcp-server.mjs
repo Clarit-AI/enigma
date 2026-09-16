@@ -44675,17 +44675,32 @@ async function handleImportFormPost(req, res, id) {
     ambiguous: ambiguousNames.has(name),
     ambiguousReason: ambiguousReasons[name]
   }));
-  const commitResult = await commitImport({
-    entries,
-    depository: chosenDepository,
-    scope,
-    cwd,
-    projectPath,
-    envFilePath: record2.envFilePath ?? `${projectPath}/.env`,
-    actor: "user",
-    rotate: submission.rotate,
-    createVault: submission.confirmCreateVault
-  });
+  let commitResult;
+  try {
+    commitResult = await commitImport({
+      entries,
+      depository: chosenDepository,
+      scope,
+      cwd,
+      projectPath,
+      envFilePath: record2.envFilePath ?? `${projectPath}/.env`,
+      actor: "user",
+      rotate: submission.rotate,
+      createVault: submission.confirmCreateVault
+    });
+  } catch (err) {
+    const errorCode = err instanceof EnigmaError ? err.code : "E_UNKNOWN";
+    const results2 = record2.names.map((name) => ({ name, ok: false, errorCode }));
+    record2.importOutcome = { fileRewritten: false, warnings: [], skippedMismatch: [], depository: chosenDepository };
+    RequestStore.fulfill(id, results2);
+    sendErrorPage(
+      res,
+      500,
+      "Import failed",
+      "Something went wrong while completing the import. Some secrets may already be stored \u2014 run `enigma list` or `enigma doctor` to check before retrying."
+    );
+    return;
+  }
   const results = [
     // reason is populated ONLY for the ambiguity refusal — static structural text computed
     // by the parser before any value is looked at (see RequestNameResult's doc comment).
