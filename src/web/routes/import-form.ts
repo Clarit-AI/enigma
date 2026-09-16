@@ -123,7 +123,13 @@ export async function handleImportFormPost(req: IncomingMessage, res: ServerResp
   const scope: Scope = record.scope ?? 'project';
   const values = record.values ?? {};
   const ambiguousNames = new Set(record.ambiguousNames ?? []);
-  const entries = record.names.map((name) => ({ name, value: values[name] ?? '', ambiguous: ambiguousNames.has(name) }));
+  const ambiguousReasons = record.ambiguousReasons ?? {};
+  const entries = record.names.map((name) => ({
+    name,
+    value: values[name] ?? '',
+    ambiguous: ambiguousNames.has(name),
+    ambiguousReason: ambiguousReasons[name],
+  }));
 
   const commitResult = await commitImport({
     entries,

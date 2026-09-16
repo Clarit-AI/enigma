@@ -37,8 +37,10 @@ export interface RequestRecord {
   values?: Record<string, string>;
   /** kind 'import' only: the source `.env`-format file to rewrite once every name is stored. */
   envFilePath?: string;
-  /** kind 'import' only: names whose unquoted value contained an ambiguous inline-comment-like " #" at parse time — the web POST handler must refuse these exactly as the direct --depository path does (Issue #13 review, round 2, A2), never silently drop the flag going into the picker. */
+  /** kind 'import' only: names flagged ambiguous at parse time (an inline-comment-like value, or a duplicated key) — the web POST handler must refuse these exactly as the direct --depository path does (Issue #13 review, round 2 A2 / round 3 item 1), never silently drop the flag going into the picker. */
   ambiguousNames?: string[];
+  /** kind 'import' only: the specific reason for each name in `ambiguousNames`, so the picker path's refusal message names the same thing (a duplicated key vs. an ambiguous inline comment) as the direct --depository path (Issue #13 review, round 4). */
+  ambiguousReasons?: Record<string, string>;
   /** kind 'import' only: set by the web POST handler alongside `results`, read back by the CLI/MCP caller after the waiter resolves. */
   importOutcome?: { fileRewritten: boolean; warnings: string[]; skippedMismatch: string[]; depository?: DepositoryId };
 }
@@ -59,6 +61,8 @@ export interface CreateRequestOptions {
   envFilePath?: string;
   /** kind 'import' only. */
   ambiguousNames?: string[];
+  /** kind 'import' only. */
+  ambiguousReasons?: Record<string, string>;
 }
 
 const REQUEST_TTL_MS = 15 * 60 * 1000;
@@ -149,6 +153,7 @@ export const RequestStore = {
       values: opts.values ? { ...opts.values } : undefined,
       envFilePath: opts.envFilePath,
       ambiguousNames: opts.ambiguousNames ? [...opts.ambiguousNames] : undefined,
+      ambiguousReasons: opts.ambiguousReasons ? { ...opts.ambiguousReasons } : undefined,
     };
     records.set(id, record);
     startSweeper();

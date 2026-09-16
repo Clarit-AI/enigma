@@ -85,6 +85,9 @@ export function registerImportTool(server: McpServer): void {
         names: parsed.entries.map((e) => e.name),
         values: Object.fromEntries(parsed.entries.map((e) => [e.name, e.value])),
         ambiguousNames: parsed.entries.filter((e) => e.ambiguous).map((e) => e.name),
+        ambiguousReasons: Object.fromEntries(
+          parsed.entries.filter((e) => e.ambiguous && e.ambiguousReason).map((e) => [e.name, e.ambiguousReason!]),
+        ),
         scope: 'project',
         envFilePath: absPath,
       });

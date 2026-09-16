@@ -186,6 +186,32 @@ describe('GET/POST /i/:id', () => {
     expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
   });
 
+  it('POST refuses a duplicated key carried in via the picker, naming it in the same way as the direct --depository path (Issue #13 review, round 4)', async () => {
+    const original = 'API_KEY=real-production-key\nAPI_KEY=placeholder\n';
+    writeFileSync(envPath(), original);
+    const record = RequestStore.create({
+      kind: 'import',
+      names: ['API_KEY'],
+      values: { API_KEY: 'placeholder' },
+      ambiguousNames: ['API_KEY'],
+      ambiguousReasons: { API_KEY: 'API_KEY is assigned more than once in this file — remove the duplicate line(s) and rerun import' },
+      envFilePath: envPath(),
+    });
+
+    const resp = await fetch(`${origin}/i/${record.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+    });
+    const html = await resp.text();
+
+    expect(resp.status).toBe(200);
+    expect(html).toContain('failed');
+    expect(RequestStore.get(record.id)?.results).toEqual([{ name: 'API_KEY', ok: false, errorCode: 'E_VALUE_AMBIGUOUS' }]);
+    expect(readFileSync(envPath(), 'utf8')).toBe(original);
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+  });
+
   it('replaying a used id returns 410 and performs no second write', async () => {
     writeFileSync(envPath(), 'OPENAI_API_KEY=x\n');
     const record = RequestStore.create({ kind: 'import', names: ['OPENAI_API_KEY'], values: { OPENAI_API_KEY: 'x' }, envFilePath: envPath() });

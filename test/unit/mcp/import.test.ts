@@ -92,6 +92,23 @@ describe('enigma_import', () => {
     await pair.close();
   });
 
+  it('duplicate key: refuses through the loud-abort path, names the key, never stores or removes either line (Issue #13 review, round 4)', async () => {
+    const original = 'API_KEY=real-production-key\nAPI_KEY=placeholder\n';
+    writeFileSync(envFilePath, original);
+    const pair = await connectWithCapabilities({});
+
+    const result = await pair.client.callTool({ name: 'enigma_import', arguments: { depository: 'encrypted' } });
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+    expect(result.isError).toBe(true);
+    expect(text).toContain('API_KEY');
+    expect(text).toContain('E_VALUE_AMBIGUOUS');
+    expect(text).toContain('assigned more than once');
+    expect(readFileSync(envFilePath, 'utf8')).toBe(original);
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+    await pair.close();
+  });
+
   it('without elicitation.url support, falls back to a request_id/url/expiresAt shape (never a value)', async () => {
     writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
     const pair = await connectWithCapabilities({});

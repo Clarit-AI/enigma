@@ -62,6 +62,7 @@ async function runBrowserFlow(
     names: entries.map((e) => e.name),
     values: Object.fromEntries(entries.map((e) => [e.name, e.value])),
     ambiguousNames: entries.filter((e) => e.ambiguous).map((e) => e.name),
+    ambiguousReasons: Object.fromEntries(entries.filter((e) => e.ambiguous && e.ambiguousReason).map((e) => [e.name, e.ambiguousReason!])),
     scope: 'project',
     envFilePath: opts.absPath,
   });

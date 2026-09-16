@@ -145,6 +145,34 @@ describe('cmdImport', () => {
     expect(stored.map((e) => e.name)).toEqual(['TOKEN']);
   });
 
+  it('duplicate key: text output refuses through the loud-abort path, names the key, exits 1, and leaves both lines untouched (Issue #13 review, round 4)', async () => {
+    const original = 'API_KEY=real-production-key\nAPI_KEY=placeholder\n';
+    writeFileSync(envFilePath, original);
+
+    const code = await cmdImport(['.env', '--depository', 'encrypted']);
+
+    expect(code).toBe(1);
+    const output = stdoutText();
+    expect(output).toContain('API_KEY');
+    expect(output).toContain('assigned more than once');
+    expect(readFileSync(envFilePath, 'utf8')).toBe(original);
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+  });
+
+  it('duplicate key: --json surfaces the same refusal in failed[] with the key named (Issue #13 review, round 4)', async () => {
+    const original = 'API_KEY=real-production-key\nAPI_KEY=placeholder\n';
+    writeFileSync(envFilePath, original);
+
+    const code = await cmdImport(['.env', '--depository', 'encrypted', '--json']);
+
+    expect(code).toBe(1);
+    const parsed = JSON.parse(stdoutText()) as { failed: Array<{ name: string; errorCode: string; message?: string }> };
+    expect(parsed.failed).toEqual([
+      { name: 'API_KEY', errorCode: 'E_VALUE_AMBIGUOUS', message: expect.stringContaining('assigned more than once') },
+    ]);
+    expect(readFileSync(envFilePath, 'utf8')).toBe(original);
+  });
+
   it('AC3: without --depository, starts the server, prints a URL, and completes once the picker is submitted', async () => {
     writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
 
