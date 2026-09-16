@@ -77,6 +77,21 @@ describe('enigma_import', () => {
     await pair.close();
   });
 
+  it('A2: refuses an ambiguous unquoted value ("PORT=3000 # dev port") through the loud-abort path, matching the CLI', async () => {
+    writeFileSync(envFilePath, 'PORT=3000 # dev port\n');
+    const pair = await connectWithCapabilities({});
+
+    const result = await pair.client.callTool({ name: 'enigma_import', arguments: { depository: 'encrypted' } });
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+    expect(result.isError).toBe(true);
+    expect(text).toContain('E_VALUE_AMBIGUOUS');
+    expect(text).toContain('quote the value');
+    expect(readFileSync(envFilePath, 'utf8')).toBe('PORT=3000 # dev port\n');
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+    await pair.close();
+  });
+
   it('without elicitation.url support, falls back to a request_id/url/expiresAt shape (never a value)', async () => {
     writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
     const pair = await connectWithCapabilities({});

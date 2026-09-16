@@ -122,7 +122,8 @@ export async function handleImportFormPost(req: IncomingMessage, res: ServerResp
   const projectPath = findProjectPath(cwd);
   const scope: Scope = record.scope ?? 'project';
   const values = record.values ?? {};
-  const entries = record.names.map((name) => ({ name, value: values[name] ?? '' }));
+  const ambiguousNames = new Set(record.ambiguousNames ?? []);
+  const entries = record.names.map((name) => ({ name, value: values[name] ?? '', ambiguous: ambiguousNames.has(name) }));
 
   const commitResult = await commitImport({
     entries,
@@ -142,7 +143,12 @@ export async function handleImportFormPost(req: IncomingMessage, res: ServerResp
     ...commitResult.succeeded.map((name): RequestNameResult => ({ name, ok: true })),
   ];
 
-  record.importOutcome = { fileRewritten: commitResult.fileRewritten, warnings: commitResult.warnings, depository: chosenDepository };
+  record.importOutcome = {
+    fileRewritten: commitResult.fileRewritten,
+    warnings: commitResult.warnings,
+    skippedMismatch: commitResult.skippedMismatch,
+    depository: chosenDepository,
+  };
   RequestStore.fulfill(id, results);
 
   let html = requestDoneHtml;

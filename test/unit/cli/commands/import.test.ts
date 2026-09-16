@@ -122,6 +122,29 @@ describe('cmdImport', () => {
     expect(readFileSync(envFilePath, 'utf8')).toBe('OPENAI_API_KEY=second\nGITHUB_TOKEN=ghp-xyz\n');
   });
 
+  it('A2: an ambiguous unquoted value (space-hash) refuses through the loud-abort path, .env untouched, exit 1', async () => {
+    writeFileSync(envFilePath, 'PORT=3000 # dev port\n');
+
+    const code = await cmdImport(['.env', '--depository', 'encrypted', '--json']);
+
+    expect(code).toBe(1);
+    const parsed = JSON.parse(stdoutText()) as { failed: Array<{ name: string; errorCode: string; message?: string }> };
+    expect(parsed.failed).toEqual([{ name: 'PORT', errorCode: 'E_VALUE_AMBIGUOUS', message: expect.stringContaining('quote the value') }]);
+    expect(readFileSync(envFilePath, 'utf8')).toBe('PORT=3000 # dev port\n');
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+  });
+
+  it('A2: a quoted value containing "#" migrates intact and is unaffected by the ambiguity check', async () => {
+    writeFileSync(envFilePath, 'TOKEN="abc#def"\n');
+
+    const code = await cmdImport(['.env', '--depository', 'encrypted']);
+
+    expect(code).toBe(0);
+    expect(readFileSync(envFilePath, 'utf8')).not.toContain('abc#def');
+    const stored = listSecrets({ scope: 'all', cwd: tmpProject });
+    expect(stored.map((e) => e.name)).toEqual(['TOKEN']);
+  });
+
   it('AC3: without --depository, starts the server, prints a URL, and completes once the picker is submitted', async () => {
     writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
 

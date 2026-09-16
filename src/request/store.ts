@@ -37,8 +37,10 @@ export interface RequestRecord {
   values?: Record<string, string>;
   /** kind 'import' only: the source `.env`-format file to rewrite once every name is stored. */
   envFilePath?: string;
+  /** kind 'import' only: names whose unquoted value contained an ambiguous inline-comment-like " #" at parse time — the web POST handler must refuse these exactly as the direct --depository path does (Issue #13 review, round 2, A2), never silently drop the flag going into the picker. */
+  ambiguousNames?: string[];
   /** kind 'import' only: set by the web POST handler alongside `results`, read back by the CLI/MCP caller after the waiter resolves. */
-  importOutcome?: { fileRewritten: boolean; warnings: string[]; depository?: DepositoryId };
+  importOutcome?: { fileRewritten: boolean; warnings: string[]; skippedMismatch: string[]; depository?: DepositoryId };
 }
 
 export interface CreateRequestOptions {
@@ -55,6 +57,8 @@ export interface CreateRequestOptions {
   values?: Record<string, string>;
   /** kind 'import' only. */
   envFilePath?: string;
+  /** kind 'import' only. */
+  ambiguousNames?: string[];
 }
 
 const REQUEST_TTL_MS = 15 * 60 * 1000;
@@ -144,6 +148,7 @@ export const RequestStore = {
       expiresAt: now + (opts.ttlMs ?? defaultTtlMs(opts.kind)),
       values: opts.values ? { ...opts.values } : undefined,
       envFilePath: opts.envFilePath,
+      ambiguousNames: opts.ambiguousNames ? [...opts.ambiguousNames] : undefined,
     };
     records.set(id, record);
     startSweeper();

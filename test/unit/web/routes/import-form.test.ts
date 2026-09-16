@@ -147,7 +147,12 @@ describe('GET/POST /i/:id', () => {
     expect(html).not.toContain(SENTINEL);
     expect(html).toContain('stored');
     expect(RequestStore.get(record.id)?.usedAt).toBeDefined();
-    expect(RequestStore.get(record.id)?.importOutcome).toEqual({ fileRewritten: true, warnings: expect.any(Array), depository: 'encrypted' });
+    expect(RequestStore.get(record.id)?.importOutcome).toEqual({
+      fileRewritten: true,
+      warnings: expect.any(Array),
+      skippedMismatch: [],
+      depository: 'encrypted',
+    });
 
     const rewritten = readFileSync(envPath(), 'utf8');
     expect(rewritten).not.toContain(SENTINEL);
@@ -155,6 +160,30 @@ describe('GET/POST /i/:id', () => {
 
     const stored = listSecrets({ scope: 'all', cwd: tmpProject });
     expect(stored.map((e) => e.name)).toEqual(['OPENAI_API_KEY']);
+  });
+
+  it('POST refuses an ambiguous value carried in via the picker, exactly as the direct --depository path does (Issue #13 review, round 2, A2)', async () => {
+    writeFileSync(envPath(), 'PORT=3000 # dev port\n');
+    const record = RequestStore.create({
+      kind: 'import',
+      names: ['PORT'],
+      values: { PORT: '3000 # dev port' },
+      ambiguousNames: ['PORT'],
+      envFilePath: envPath(),
+    });
+
+    const resp = await fetch(`${origin}/i/${record.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+    });
+    const html = await resp.text();
+
+    expect(resp.status).toBe(200);
+    expect(html).toContain('failed');
+    expect(RequestStore.get(record.id)?.results).toEqual([{ name: 'PORT', ok: false, errorCode: 'E_VALUE_AMBIGUOUS' }]);
+    expect(readFileSync(envPath(), 'utf8')).toBe('PORT=3000 # dev port\n');
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
   });
 
   it('replaying a used id returns 410 and performs no second write', async () => {

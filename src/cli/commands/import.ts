@@ -7,7 +7,9 @@ import { renderOutcome } from '../../mcp/result-text.js';
 import type { RequestNameResult } from '../../request/store.js';
 import { RequestStore } from '../../request/store.js';
 import { parseDotEnv } from '../../storage/dotenv-file.js';
+import type { ParsedDotEnvEntry } from '../../storage/dotenv-file.js';
 import { commitImport } from '../../storage/import-commit.js';
+import type { ImportCommitFailure } from '../../storage/import-commit.js';
 import type { DepositoryId } from '../../storage/interfaces.js';
 import { startServer } from '../../web/server.js';
 
@@ -15,9 +17,10 @@ const USAGE = 'enigma import [PATH] [--depository ID] [--json]';
 
 interface ImportReport {
   imported: string[];
-  failed: Array<{ name: string; errorCode: string }>;
+  failed: ImportCommitFailure[];
   notAttempted: string[];
   skippedInvalid: string[];
+  skippedMismatch: string[];
   warnings: string[];
   fileRewritten: boolean;
   depository?: DepositoryId;
@@ -36,8 +39,10 @@ function report(data: ImportReport, json: boolean, cwd: string, note?: string): 
       ];
       lines.push(renderOutcome(results, cwd).text);
     }
+    for (const f of data.failed) if (f.message) lines.push(`${f.name}: ${f.message}`);
     for (const name of data.notAttempted) lines.push(`${name}: not attempted (aborted after an earlier failure)`);
     for (const name of data.skippedInvalid) lines.push(`${name}: skipped (invalid secret name)`);
+    for (const name of data.skippedMismatch) lines.push(`${name}: migrated, but its .env line was left in place (see warnings)`);
     for (const warning of data.warnings) lines.push(`warning: ${warning}`);
     if (data.failed.length > 0 && !data.fileRewritten) {
       lines.push('.env was left untouched because not every key succeeded.');
@@ -48,7 +53,7 @@ function report(data: ImportReport, json: boolean, cwd: string, note?: string): 
 }
 
 async function runBrowserFlow(
-  entries: Array<{ name: string; value: string }>,
+  entries: ParsedDotEnvEntry[],
   opts: { cwd: string; absPath: string; json: boolean; skippedInvalid: string[] },
 ): Promise<number> {
   const handle = await startServer();
@@ -56,6 +61,7 @@ async function runBrowserFlow(
     kind: 'import',
     names: entries.map((e) => e.name),
     values: Object.fromEntries(entries.map((e) => [e.name, e.value])),
+    ambiguousNames: entries.filter((e) => e.ambiguous).map((e) => e.name),
     scope: 'project',
     envFilePath: opts.absPath,
   });
@@ -73,6 +79,7 @@ async function runBrowserFlow(
         failed: [],
         notAttempted: entries.map((e) => e.name),
         skippedInvalid: opts.skippedInvalid,
+        skippedMismatch: [],
         warnings: [],
         fileRewritten: false,
       },
@@ -89,9 +96,12 @@ async function runBrowserFlow(
   return report(
     {
       imported: results.filter((r) => r.ok).map((r) => r.name),
-      failed: results.filter((r) => !r.ok && r.errorCode !== 'E_NOT_ATTEMPTED').map((r) => ({ name: r.name, errorCode: r.errorCode ?? 'E_UNKNOWN' })),
+      failed: results
+        .filter((r) => !r.ok && r.errorCode !== 'E_NOT_ATTEMPTED')
+        .map((r) => ({ name: r.name, errorCode: r.errorCode ?? 'E_UNKNOWN' })),
       notAttempted: results.filter((r) => r.errorCode === 'E_NOT_ATTEMPTED').map((r) => r.name),
       skippedInvalid: opts.skippedInvalid,
+      skippedMismatch: outcome?.skippedMismatch ?? [],
       warnings: outcome?.warnings ?? [],
       fileRewritten: outcome?.fileRewritten ?? false,
       depository: outcome?.depository,
@@ -122,7 +132,15 @@ export async function cmdImport(argv: string[]): Promise<number> {
 
   if (parsed.entries.length === 0) {
     return report(
-      { imported: [], failed: [], notAttempted: [], skippedInvalid: parsed.invalidNames, warnings: [], fileRewritten: false },
+      {
+        imported: [],
+        failed: [],
+        notAttempted: [],
+        skippedInvalid: parsed.invalidNames,
+        skippedMismatch: [],
+        warnings: [],
+        fileRewritten: false,
+      },
       json,
       cwd,
       'No importable secrets found.',
@@ -149,6 +167,7 @@ export async function cmdImport(argv: string[]): Promise<number> {
       failed: result.failed,
       notAttempted: result.notAttempted,
       skippedInvalid: parsed.invalidNames,
+      skippedMismatch: result.skippedMismatch,
       warnings: result.warnings,
       fileRewritten: result.fileRewritten,
       depository,
