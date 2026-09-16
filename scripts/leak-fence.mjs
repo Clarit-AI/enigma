@@ -1,12 +1,14 @@
 #!/usr/bin/env node
-// Static scan: fails if `resolve(` is reachable from the scanned directories (ADR-001).
-// This is a backstop, not a guarantee — it catches an obvious textual pattern, not every
+// Static scan: fails if a sanctioned value-returning call shape is reachable from the
+// scanned directories (ADR-001) — `resolveSecret(` (the storage layer's value-returning
+// call) or a depository-style `.resolve(` method call, excluding `Promise.resolve(`.
+// This is a backstop, not a guarantee — it catches obvious textual patterns, not every
 // way a secret value could leak. Review and the runtime boundary are the real defenses.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
 const ALLOW_PREFIX = '// enigma:leak-fence-allow:';
-const LEAK_PATTERN = /\bresolve\s*\(/;
+const LEAK_PATTERN = /\bresolveSecret\s*\(|(?<!\bPromise\s*)\.\s*resolve\s*\(/;
 const SCAN_DIRS = ['src/mcp', 'src/web'];
 
 function walk(dir) {

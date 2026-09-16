@@ -11,10 +11,7 @@ export class PayloadTooLargeError extends Error {
 
 /** Reads the whole body up to `maxBytes`; destroys the socket and rejects once the limit is crossed, so a large upload never sits fully in memory. */
 export function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promise<Buffer> {
-  // Named `done`/`fail` rather than `resolve`/`reject`: `src/web` is scanned
-  // by the leak-fence (ADR-001), whose regex matches the bare word "resolve"
-  // followed by "(" — including an ordinary Promise executor parameter.
-  return new Promise((done, fail) => {
+  return new Promise((resolve, reject) => {
     const chunks: Buffer[] = [];
     let total = 0;
     let settled = false;
@@ -22,7 +19,7 @@ export function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promi
     const settleError = (err: unknown) => {
       if (settled) return;
       settled = true;
-      fail(err);
+      reject(err);
     };
 
     req.on('data', (chunk: Buffer) => {
@@ -40,7 +37,7 @@ export function readBody(req: IncomingMessage, maxBytes = MAX_BODY_BYTES): Promi
     req.on('end', () => {
       if (settled) return;
       settled = true;
-      done(Buffer.concat(chunks));
+      resolve(Buffer.concat(chunks));
     });
     req.on('error', settleError);
   });
