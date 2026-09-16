@@ -891,12 +891,249 @@ var macosKeychainDepositoryModule = {
   create: createKeychainDepository
 };
 
+// src/storage/depositories/onepassword.ts
+import { execFile as execFile3 } from "node:child_process";
+import { basename } from "node:path";
+var OP_BIN = "op";
+var VAULT = "Enigma";
+var MIN_MAJOR_VERSION = 2;
+var EXEC_TIMEOUT_MS3 = 15e3;
+var EXEC_MAX_BUFFER_BYTES3 = 1024 * 1024;
+var REF_PATTERN3 = /^[A-Za-z0-9_./-]+$/;
+var REF_MAX_LENGTH3 = 512;
+var VAULT_MISSING_PATTERN = /isn't a vault|no vault named|could not find vault/i;
+var ITEM_MISSING_PATTERN = /isn't an item|could not find item|item.*not found/i;
+function runOp(args) {
+  return new Promise((resolve2, reject) => {
+    execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error, stdout, stderr) => {
+      if (error) {
+        reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
+        return;
+      }
+      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    });
+  });
+}
+function runOpWithStdin(args, stdinData) {
+  return new Promise((resolve2, reject) => {
+    const child = execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error, stdout, stderr) => {
+      if (error) {
+        reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
+        return;
+      }
+      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    });
+    child.on("error", reject);
+    if (!child.stdin) {
+      child.kill();
+      reject(new Error("op: stdin unavailable"));
+      return;
+    }
+    child.stdin.on("error", reject);
+    if (child.stdin.write(stdinData)) {
+      child.stdin.end();
+    } else {
+      child.stdin.once("drain", () => child.stdin?.end());
+    }
+  });
+}
+function isTimeout(failure) {
+  return failure.killed === true || failure.signal != null;
+}
+function refInvalid3() {
+  throw new EnigmaError({
+    code: "E_REF_INVALID",
+    message: `invalid depository ref: expected ${REF_PATTERN3} and at most ${REF_MAX_LENGTH3} characters`,
+    depository: "1password"
+  });
+}
+function validateRef3(ref) {
+  if (ref.length === 0 || ref.length > REF_MAX_LENGTH3 || !REF_PATTERN3.test(ref)) {
+    refInvalid3();
+  }
+}
+function writeFailed3(reason) {
+  throw new EnigmaError({
+    code: "E_WRITE_FAILED",
+    message: reason ?? "failed to write secret to 1password depository",
+    depository: "1password"
+  });
+}
+function readFailed4(reason) {
+  throw new EnigmaError({
+    code: "E_READ_FAILED",
+    message: reason ?? "failed to read secret from 1password depository",
+    depository: "1password"
+  });
+}
+function notFound3() {
+  throw new EnigmaError({ code: "E_NOT_FOUND", message: "secret not found", depository: "1password" });
+}
+function vaultMissing() {
+  throw new EnigmaError({
+    code: "E_VAULT_MISSING",
+    message: `the "${VAULT}" vault does not exist in 1Password; pass createVault to create it`,
+    depository: "1password"
+  });
+}
+function timedOut(op) {
+  const message = `1password depository timed out waiting for the op CLI after ${EXEC_TIMEOUT_MS3}ms; run "op signin" or unlock 1Password and try again`;
+  if (op === "read") readFailed4(message);
+  writeFailed3(message);
+}
+function nameFromRef(ref) {
+  const idx = ref.lastIndexOf("/");
+  return idx === -1 ? ref : ref.slice(idx + 1);
+}
+function buildTitle(ref, ctx) {
+  const name = nameFromRef(ref);
+  const isGlobal = ref === name || ref.startsWith("global/");
+  if (isGlobal || !ctx.projectPath) return name;
+  return `${name} \xB7 ${basename(ctx.projectPath)}`;
+}
+function itemTemplate(title, value) {
+  return JSON.stringify({
+    title,
+    category: "API_CREDENTIAL",
+    fields: [{ id: "credential", type: "CONCEALED", label: "credential", value }]
+  });
+}
+async function createVault() {
+  try {
+    await runOp(["vault", "create", VAULT, "--format", "json"]);
+  } catch (err) {
+    const failure = err;
+    if (isTimeout(failure)) timedOut("write");
+    writeFailed3(`failed to create the "${VAULT}" vault in 1Password`);
+  }
+}
+async function createItem(title, value) {
+  const { stdout } = await runOpWithStdin(["item", "create", "--vault", VAULT, "--format", "json", "-"], itemTemplate(title, value));
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return writeFailed3("op item create returned a response that could not be parsed");
+  }
+  if (typeof parsed.id !== "string" || parsed.id.length === 0) {
+    return writeFailed3("op item create did not return an item id");
+  }
+  return parsed.id;
+}
+function createOnepasswordDepository(ctx) {
+  return {
+    id: "1password",
+    promptProfile: "prompts-each-read",
+    async set(ref, value) {
+      validateRef3(ref);
+      const title = buildTitle(ref, ctx);
+      try {
+        return await createItem(title, value);
+      } catch (err) {
+        const failure = err;
+        if (isTimeout(failure)) timedOut("write");
+        if (VAULT_MISSING_PATTERN.test(failure.stderr ?? "")) {
+          if (!ctx.createVault) vaultMissing();
+          await createVault();
+          try {
+            return await createItem(title, value);
+          } catch (retryErr) {
+            const retryFailure = retryErr;
+            if (isTimeout(retryFailure)) timedOut("write");
+            return writeFailed3();
+          }
+        }
+        return writeFailed3();
+      }
+    },
+    async resolve(ref) {
+      validateRef3(ref);
+      try {
+        const { stdout } = await runOp(["read", `op://${VAULT}/${ref}/credential`]);
+        return stdout.replace(/\n$/, "");
+      } catch (err) {
+        const failure = err;
+        if (isTimeout(failure)) timedOut("read");
+        if (ITEM_MISSING_PATTERN.test(failure.stderr ?? "")) notFound3();
+        return readFailed4();
+      }
+    },
+    async delete(ref) {
+      validateRef3(ref);
+      try {
+        await runOp(["item", "delete", ref, "--vault", VAULT]);
+      } catch (err) {
+        const failure = err;
+        if (isTimeout(failure)) timedOut("read");
+        if (ITEM_MISSING_PATTERN.test(failure.stderr ?? "")) return;
+        readFailed4();
+      }
+    },
+    async has(ref) {
+      validateRef3(ref);
+      try {
+        await runOp(["item", "get", ref, "--vault", VAULT]);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  };
+}
+function parseMajorVersion(stdout) {
+  const match = /^(\d+)\./.exec(stdout.trim());
+  return match ? Number(match[1]) : void 0;
+}
+var onepasswordDepositoryModule = {
+  id: "1password",
+  promptProfile: "prompts-each-read",
+  /**
+   * Available only when `op --version` is 2.x+ and `op whoami` succeeds —
+   * both fail fast and never prompt. Vault existence is deliberately not
+   * checked here (that's a `set`-time concern, AC2) since any vault-touching
+   * `op` subcommand risks the ~60s authorization-timeout hang this module
+   * otherwise avoids.
+   */
+  async detect() {
+    let versionOut;
+    try {
+      versionOut = (await runOp(["--version"])).stdout;
+    } catch (err) {
+      const failure = err;
+      const reason = failure.code === "ENOENT" ? "op CLI not installed" : "op --version failed";
+      return { id: "1password", promptProfile: "prompts-each-read", available: false, reason };
+    }
+    const major = parseMajorVersion(versionOut);
+    if (major === void 0 || major < MIN_MAJOR_VERSION) {
+      return {
+        id: "1password",
+        promptProfile: "prompts-each-read",
+        available: false,
+        reason: `op CLI version ${versionOut.trim() || "unknown"} is older than the required ${MIN_MAJOR_VERSION}.x`
+      };
+    }
+    try {
+      await runOp(["whoami"]);
+    } catch {
+      return {
+        id: "1password",
+        promptProfile: "prompts-each-read",
+        available: false,
+        reason: "op CLI is not signed in (run `op signin`)"
+      };
+    }
+    return { id: "1password", promptProfile: "prompts-each-read", available: true };
+  },
+  create: createOnepasswordDepository
+};
+
 // src/storage/detect.ts
 var DEPOSITORY_MODULES = [
   encryptedDepositoryModule,
   envDepositoryModule,
   macosKeychainDepositoryModule,
-  linuxSecretServiceDepositoryModule
+  linuxSecretServiceDepositoryModule,
+  onepasswordDepositoryModule
 ];
 async function detectAll() {
   return Promise.all(DEPOSITORY_MODULES.map((mod) => mod.detect()));
@@ -914,8 +1151,8 @@ function getDepositoryModule(id) {
   }
   return mod;
 }
-function createDepository(id, projectPath) {
-  return getDepositoryModule(id).create({ projectPath });
+function createDepository(id, ctx = {}) {
+  return getDepositoryModule(id).create(ctx);
 }
 function projectPathFor(entry, cwd) {
   if (entry.scope === "project") return entry.projectPath;
@@ -943,7 +1180,7 @@ async function setSecret(opts) {
     });
   }
   const providedRef = opts.depository === "env" ? opts.name : buildRef(opts.name, opts.scope, pid);
-  const depository = createDepository(opts.depository, opts.depository === "env" ? projectPath : void 0);
+  const depository = createDepository(opts.depository, { projectPath, createVault: opts.createVault });
   const op = existing ? "rotated" : "set";
   let ref;
   try {
@@ -979,7 +1216,7 @@ async function deleteSecret(name, opts) {
   const pid = opts.cwd ? projectId(opts.cwd) : void 0;
   const index = readIndex();
   const { index: updated, removed } = removeIndexEntry(index, name, opts.scope, pid);
-  const depository = createDepository(removed.depository, projectPathFor(removed, opts.cwd));
+  const depository = createDepository(removed.depository, { projectPath: projectPathFor(removed, opts.cwd) });
   try {
     await depository.delete(removed.ref);
   } catch (err) {
@@ -997,7 +1234,7 @@ async function resolveSecret(name, opts) {
     throw new EnigmaError({ code: "E_NOT_FOUND", message: `${name} not found`, secretName: name });
   }
   const op = opts.auditOp ?? "read";
-  const depository = createDepository(entry.depository, projectPathFor(entry, opts.cwd));
+  const depository = createDepository(entry.depository, { projectPath: projectPathFor(entry, opts.cwd) });
   try {
     const value = await depository.resolve(entry.ref);
     appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: true, error: null });
@@ -1039,11 +1276,11 @@ async function cmdAdd(argv, streams = {}) {
 }
 
 // src/cli/commands/doctor.ts
-import { execFile as execFile3 } from "node:child_process";
+import { execFile as execFile4 } from "node:child_process";
 import { existsSync as existsSync7 } from "node:fs";
 import { platform, release } from "node:os";
 import { promisify } from "node:util";
-var execFileAsync = promisify(execFile3);
+var execFileAsync = promisify(execFile4);
 async function opStatus() {
   try {
     const { stdout } = await execFileAsync("op", ["--version"], { timeout: 2e3, maxBuffer: 1024 });
