@@ -7,9 +7,39 @@ const BEGIN_MARKER = '# enigma:begin';
 const END_MARKER = '# enigma:end';
 const FILE_MODE = 0o600;
 const GITIGNORE_ENV_PATTERNS = new Set(['.env', '.env*', '*.env', '**/.env', '.env**']);
+const NEEDS_QUOTING = /[\s#"'\\$]/;
 
 function detectEol(content: string): '\r\n' | '\n' {
   return content.includes('\r\n') ? '\r\n' : '\n';
+}
+
+/** Dotenv-compatible encoding: bare when safe, else double-quoted with `\`, `"`, CR, and LF escaped. */
+function encodeValue(value: string): string {
+  if (!NEEDS_QUOTING.test(value)) return value;
+  const escaped = value
+    .replace(/\\/g, '\\\\')
+    .replace(/"/g, '\\"')
+    .replace(/\r/g, '\\r')
+    .replace(/\n/g, '\\n');
+  return `"${escaped}"`;
+}
+
+/** Exact inverse of encodeValue: unwraps a double-quoted value and unescapes `\\`, `\"`, `\r`, `\n`. */
+function decodeValue(raw: string): string {
+  if (raw.length < 2 || !raw.startsWith('"') || !raw.endsWith('"')) return raw;
+  const inner = raw.slice(1, -1);
+  return inner.replace(/\\\\|\\"|\\r|\\n/g, (escape) => {
+    switch (escape) {
+      case '\\\\':
+        return '\\';
+      case '\\"':
+        return '"';
+      case '\\r':
+        return '\r';
+      default:
+        return '\n';
+    }
+  });
 }
 
 function findBlock(lines: string[]): { beginIdx: number; endIdx: number } | undefined {
@@ -31,13 +61,14 @@ function upsertManagedBlock(content: string, name: string, value: string): strin
   const lines = content.length === 0 ? [] : content.split(eol);
   const block = findBlock(lines);
 
+  const encoded = encodeValue(value);
   if (block) {
     const blockLines = lines.slice(block.beginIdx + 1, block.endIdx);
     const existingIdx = blockLines.findIndex((l) => l.startsWith(`${name}=`));
     if (existingIdx !== -1) {
-      blockLines[existingIdx] = `${name}=${value}`;
+      blockLines[existingIdx] = `${name}=${encoded}`;
     } else {
-      blockLines.push(`${name}=${value}`);
+      blockLines.push(`${name}=${encoded}`);
     }
     const newLines = [...lines.slice(0, block.beginIdx + 1), ...blockLines, ...lines.slice(block.endIdx)];
     return newLines.join(eol);
@@ -45,7 +76,7 @@ function upsertManagedBlock(content: string, name: string, value: string): strin
 
   const needsNewline = content.length > 0 && !content.endsWith(eol);
   const prefix = needsNewline ? content + eol : content;
-  return `${prefix}${BEGIN_MARKER}${eol}${name}=${value}${eol}${END_MARKER}${eol}`;
+  return `${prefix}${BEGIN_MARKER}${eol}${name}=${encoded}${eol}${END_MARKER}${eol}`;
 }
 
 function extractManagedValue(content: string, name: string): string | undefined {
@@ -54,7 +85,7 @@ function extractManagedValue(content: string, name: string): string | undefined 
   const block = findBlock(lines);
   if (!block) return undefined;
   const match = lines.slice(block.beginIdx + 1, block.endIdx).find((l) => l.startsWith(`${name}=`));
-  return match ? match.slice(name.length + 1) : undefined;
+  return match ? decodeValue(match.slice(name.length + 1)) : undefined;
 }
 
 function removeManagedValue(content: string, name: string): string {
@@ -105,6 +136,7 @@ function createEnvDepository(ctx: DepositoryContext): Depository {
     // ref is the bare NAME for env — the file itself is located via DepositoryContext.projectPath.
     async set(ref, value) {
       writeFileSync(envFilePath, upsertManagedBlock(readEnvFile(), ref, value), { mode: FILE_MODE });
+      return ref;
     },
 
     async resolve(ref) {

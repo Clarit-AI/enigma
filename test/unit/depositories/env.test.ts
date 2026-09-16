@@ -5,6 +5,10 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { checkEnvGitignore, envDepositoryModule } from '../../../src/storage/depositories/env.js';
 import { EnigmaError } from '../../../src/core/errors.js';
 
+const nodeUtil = await import('node:util');
+const parseEnv: ((raw: string) => Record<string, string | undefined>) | undefined =
+  typeof nodeUtil.parseEnv === 'function' ? nodeUtil.parseEnv : undefined;
+
 const SENTINEL = 'sk-sentinel-value-should-never-appear';
 
 describe('env depository', () => {
@@ -95,6 +99,58 @@ describe('env depository', () => {
 
     const content = readFileSync(join(tmpProject, '.env'), 'utf8');
     expect(content).toBe('# enigma:begin\nSECOND=b\n# enigma:end\n');
+  });
+
+  it('set resolves to the input ref unchanged (B3)', async () => {
+    const depo = envDepositoryModule.create({ projectPath: tmpProject });
+    await expect(depo.set('OPENAI_API_KEY', SENTINEL)).resolves.toBe('OPENAI_API_KEY');
+  });
+
+  describe('dotenv-compatible quoting (B2)', () => {
+    it('writes a bare value with no special characters unquoted', async () => {
+      const depo = envDepositoryModule.create({ projectPath: tmpProject });
+      await depo.set('PLAIN', 'abc123');
+
+      const content = readFileSync(join(tmpProject, '.env'), 'utf8');
+      expect(content).toBe('# enigma:begin\nPLAIN=abc123\n# enigma:end\n');
+    });
+
+    it('round-trips a PEM-style multi-line value, quoted with escaped newlines', async () => {
+      const pem = '-----BEGIN PRIVATE KEY-----\nMIIBVQIBADANBgkqhkiG9w0\n-----END PRIVATE KEY-----\n';
+      const depo = envDepositoryModule.create({ projectPath: tmpProject });
+      await depo.set('PEM_KEY', pem);
+
+      const content = readFileSync(join(tmpProject, '.env'), 'utf8');
+      expect(content).toBe(
+        '# enigma:begin\nPEM_KEY="-----BEGIN PRIVATE KEY-----\\nMIIBVQIBADANBgkqhkiG9w0\\n-----END PRIVATE KEY-----\\n"\n# enigma:end\n',
+      );
+      await expect(depo.resolve('PEM_KEY')).resolves.toBe(pem);
+
+      if (parseEnv) {
+        const parsed = parseEnv(content);
+        expect(parsed.PEM_KEY).toBe(pem);
+      }
+    });
+
+    it('round-trips a value containing backslashes and double quotes', async () => {
+      const value = 'a\\path\\with "quotes" and \\ backslashes';
+      const depo = envDepositoryModule.create({ projectPath: tmpProject });
+      await depo.set('TRICKY', value);
+
+      await expect(depo.resolve('TRICKY')).resolves.toBe(value);
+    });
+
+    it('a value containing "# enigma:end" is quoted and cannot terminate the block', async () => {
+      const value = '# enigma:end';
+      const depo = envDepositoryModule.create({ projectPath: tmpProject });
+      await depo.set('SNEAKY', value);
+      await depo.set('AFTER', 'still-inside-block');
+
+      const content = readFileSync(join(tmpProject, '.env'), 'utf8');
+      expect(content).toBe('# enigma:begin\nSNEAKY="# enigma:end"\nAFTER=still-inside-block\n# enigma:end\n');
+      await expect(depo.resolve('SNEAKY')).resolves.toBe(value);
+      await expect(depo.resolve('AFTER')).resolves.toBe('still-inside-block');
+    });
   });
 });
 
