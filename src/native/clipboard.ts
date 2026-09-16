@@ -65,11 +65,13 @@ export async function clipboardReveal(name: string, opts: ClipboardRevealOptions
     throw new EnigmaError({ code: 'E_NOT_FOUND', message: `${name} not found`, secretName: name });
   }
 
-  const value = await resolveSecret(name, { scope: entry.scope, cwd, actor });
+  const value = await resolveSecret(name, { scope: entry.scope, cwd, actor, auditOp: 'reveal' });
 
   try {
     await writeClipboard(value);
   } catch (err) {
+    // resolveSecret already audited the successful reveal; a pbcopy failure
+    // after that is a distinct, unaudited failure mode and needs its own line.
     appendAuditEvent({
       op: 'reveal',
       name,
@@ -81,16 +83,6 @@ export async function clipboardReveal(name: string, opts: ClipboardRevealOptions
     });
     throw err;
   }
-
-  appendAuditEvent({
-    op: 'reveal',
-    name,
-    scope: entry.scope,
-    depository: entry.depository,
-    actor,
-    ok: true,
-    error: null,
-  });
 
   scheduleClear(value);
   return 'Copied to clipboard; clears in 60 s';

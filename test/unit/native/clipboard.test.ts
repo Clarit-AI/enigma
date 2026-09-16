@@ -110,7 +110,7 @@ describe('clipboardReveal', () => {
     expect(spawnMock.mock.calls[1]![0]).toBe('pbpaste');
   });
 
-  it('audits the disclosure with op reveal, the actor, and the depository, and never the value', async () => {
+  it('audits the disclosure with exactly one reveal line, no stray read line, and never the value', async () => {
     await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
     const children: FakeChild[] = [];
     mockClipboardBinaries(children);
@@ -121,9 +121,12 @@ describe('clipboardReveal', () => {
       .trim()
       .split('\n')
       .map((line) => JSON.parse(line) as Record<string, unknown>);
-    const revealLine = auditLines.find((line) => line.op === 'reveal');
+    const revealLines = auditLines.filter((line) => line.op === 'reveal');
+    const readLines = auditLines.filter((line) => line.op === 'read');
 
-    expect(revealLine).toMatchObject({
+    expect(revealLines).toHaveLength(1);
+    expect(readLines).toHaveLength(0);
+    expect(revealLines[0]).toMatchObject({
       op: 'reveal',
       name: 'OPENAI_API_KEY',
       scope: 'global',
@@ -132,6 +135,35 @@ describe('clipboardReveal', () => {
       ok: true,
       error: null,
     });
+    expect(JSON.stringify(auditLines)).not.toContain(SENTINEL);
+  });
+
+  it('audits a second failure line when pbcopy fails after a successful resolve, without leaking the value', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
+    spawnMock.mockImplementation((command: string) => {
+      const child = new FakeChild();
+      queueMicrotask(() => {
+        if (command === 'pbcopy') child.emit('error', new Error('spawn failed'));
+        else child.emit('close', 0);
+      });
+      return child;
+    });
+
+    await expect(clipboardReveal('OPENAI_API_KEY', { scope: 'global', actor: 'user' })).rejects.toThrow(
+      expect.objectContaining({ code: 'E_UI_UNAVAILABLE' }),
+    );
+
+    const auditLines = readFileSync(auditLogPath(), 'utf8')
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const revealLines = auditLines.filter((line) => line.op === 'reveal');
+
+    // resolveSecret's own audit (ok: true) plus the pbcopy failure it can't see (ok: false).
+    expect(revealLines).toHaveLength(2);
+    expect(revealLines[0]).toMatchObject({ ok: true, error: null });
+    expect(revealLines[1]).toMatchObject({ ok: false });
+    expect(String(revealLines[1]!.error)).not.toContain(SENTINEL);
     expect(JSON.stringify(auditLines)).not.toContain(SENTINEL);
   });
 
