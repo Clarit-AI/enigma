@@ -54,12 +54,53 @@ describe('enigma_await', () => {
     const callPromise = pair.client.callTool({ name: 'enigma_await', arguments: { request_id: record.id } });
 
     await setSecret({ name: 'OPENAI_API_KEY', value: 'sentinel-value', scope: 'global', depository: 'encrypted', actor: 'user' });
-    RequestStore.setResults(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
     RequestStore.tryMarkUsed(record.id);
+    RequestStore.fulfill(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
 
     const result = await callPromise;
     expect(result.isError).toBeFalsy();
     expect((result.content as Array<{ text: string }>)[0]?.text).toBe('Stored OPENAI_API_KEY in encrypted (global)');
+    await pair.close();
+  });
+
+  it('when every name failed, reports isError:true and names the failures', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'] });
+    const pair = await connectWithCapabilities({});
+
+    const callPromise = pair.client.callTool({ name: 'enigma_await', arguments: { request_id: record.id } });
+
+    RequestStore.tryMarkUsed(record.id);
+    RequestStore.fulfill(record.id, [
+      { name: 'OPENAI_API_KEY', ok: false, errorCode: 'E_EXISTS' },
+      { name: 'GITHUB_TOKEN', ok: false, errorCode: 'E_WRITE_FAILED' },
+    ]);
+
+    const result = await callPromise;
+    expect(result.isError).toBe(true);
+    expect((result.content as Array<{ text: string }>)[0]?.text).toBe(
+      'OPENAI_API_KEY: failed (E_EXISTS)\nGITHUB_TOKEN: failed (E_WRITE_FAILED)',
+    );
+    await pair.close();
+  });
+
+  it('when some names succeeded and some failed, reports isError:false with failures led and named first', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'] });
+    const pair = await connectWithCapabilities({});
+
+    const callPromise = pair.client.callTool({ name: 'enigma_await', arguments: { request_id: record.id } });
+
+    await setSecret({ name: 'GITHUB_TOKEN', value: 'sentinel-value', scope: 'global', depository: 'encrypted', actor: 'user' });
+    RequestStore.tryMarkUsed(record.id);
+    RequestStore.fulfill(record.id, [
+      { name: 'OPENAI_API_KEY', ok: false, errorCode: 'E_EXISTS' },
+      { name: 'GITHUB_TOKEN', ok: true },
+    ]);
+
+    const result = await callPromise;
+    expect(result.isError).toBeFalsy();
+    expect((result.content as Array<{ text: string }>)[0]?.text).toBe(
+      'OPENAI_API_KEY: failed (E_EXISTS)\nStored GITHUB_TOKEN in encrypted (global)',
+    );
     await pair.close();
   });
 });

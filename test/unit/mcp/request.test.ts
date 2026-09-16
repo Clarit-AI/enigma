@@ -114,6 +114,55 @@ describe('enigma_request', () => {
     },
   );
 
+  it('partial failure over the real HTTP round trip: isError:false, failures led and named first, successes still rendered', async () => {
+    const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+    pair.client.setRequestHandler(ElicitRequestSchema, async (request) => {
+      if (request.params.mode !== 'url') throw new Error('expected url mode');
+      // Leaves GITHUB_TOKEN blank — request-form.ts's parseSubmission records
+      // that as E_MISSING_VALUE, a genuine per-name failure produced by the
+      // real HTTP route, not simulated.
+      await fetch(request.params.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ OPENAI_API_KEY: SENTINEL, GITHUB_TOKEN: '', depository: 'encrypted', scope: 'global' }).toString(),
+      });
+      return { action: 'accept' };
+    });
+
+    const result = await pair.client.callTool({
+      name: 'enigma_request',
+      arguments: { names: ['GITHUB_TOKEN', 'OPENAI_API_KEY'], reason: 'test', usage: 'interactive', scope: 'global' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+    expect(text).toBe('GITHUB_TOKEN: failed (E_MISSING_VALUE)\nStored OPENAI_API_KEY in encrypted (global)');
+    expect(text).not.toContain(SENTINEL);
+    await pair.close();
+  });
+
+  it('every name failing over the real HTTP round trip: isError:true', async () => {
+    const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+    pair.client.setRequestHandler(ElicitRequestSchema, async (request) => {
+      if (request.params.mode !== 'url') throw new Error('expected url mode');
+      await fetch(request.params.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ GITHUB_TOKEN: '', depository: 'encrypted', scope: 'global' }).toString(),
+      });
+      return { action: 'accept' };
+    });
+
+    const result = await pair.client.callTool({
+      name: 'enigma_request',
+      arguments: { names: ['GITHUB_TOKEN'], reason: 'test', usage: 'interactive', scope: 'global' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect((result.content as Array<{ text: string }>)[0]?.text).toBe('GITHUB_TOKEN: failed (E_MISSING_VALUE)');
+    await pair.close();
+  });
+
   it('decline/cancel: returns a cancelled status and never blocks on the request store', async () => {
     const pair = await connectWithCapabilities({ elicitation: { url: {} } });
     pair.client.setRequestHandler(ElicitRequestSchema, async () => ({ action: 'decline' }));
@@ -178,6 +227,60 @@ describe('enigma_request', () => {
     expect(text).toBe('Stored OPENAI_API_KEY in encrypted (global)');
     expect(text).not.toContain(SENTINEL);
 
+    await pair.close();
+  });
+
+  it('ui:"native" partial failure (second dialog cancelled): isError:false, the failure led and named, the earlier success still reported', async () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const children = [new FakeChild(), new FakeChild()];
+    let call = 0;
+    spawnMock.mockImplementation(() => {
+      const index = call;
+      call += 1;
+      const child = children[index]!;
+      queueMicrotask(() => {
+        if (index === 0) {
+          child.stdout.emit('data', Buffer.from(`${SENTINEL}\n`));
+          child.emit('close', 0);
+        } else {
+          child.stderr.emit('data', Buffer.from('35:36: execution error: User canceled. (-128)\n'));
+          child.emit('close', 1);
+        }
+      });
+      return child;
+    });
+
+    const pair = await connectWithCapabilities({});
+    const result = await pair.client.callTool({
+      name: 'enigma_request',
+      arguments: { names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'], reason: 'test', usage: 'interactive', scope: 'global', depository: 'encrypted', ui: 'native' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+    expect(text).toBe('GITHUB_TOKEN: failed (E_REQUEST_CANCELLED)\nStored OPENAI_API_KEY in encrypted (global)');
+    await pair.close();
+  });
+
+  it('ui:"native" all failed (first dialog cancelled): isError:true', async () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const child = new FakeChild();
+    spawnMock.mockImplementation(() => {
+      queueMicrotask(() => {
+        child.stderr.emit('data', Buffer.from('35:36: execution error: User canceled. (-128)\n'));
+        child.emit('close', 1);
+      });
+      return child;
+    });
+
+    const pair = await connectWithCapabilities({});
+    const result = await pair.client.callTool({
+      name: 'enigma_request',
+      arguments: { names: ['OPENAI_API_KEY'], reason: 'test', usage: 'interactive', scope: 'global', depository: 'encrypted', ui: 'native' },
+    });
+
+    expect(result.isError).toBe(true);
+    expect((result.content as Array<{ text: string }>)[0]?.text).toBe('OPENAI_API_KEY: failed (E_REQUEST_CANCELLED)');
     await pair.close();
   });
 });
