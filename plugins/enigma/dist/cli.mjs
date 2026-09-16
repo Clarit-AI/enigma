@@ -1294,6 +1294,22 @@ import { execFile as execFile4 } from "node:child_process";
 import { existsSync as existsSync7 } from "node:fs";
 import { platform, release } from "node:os";
 import { promisify } from "node:util";
+
+// src/core/manifest-gaps.ts
+function computeManifestGaps(cwd) {
+  const projectPath = findProjectPath(cwd);
+  const pid = projectId(cwd);
+  const entries = listSecrets({ scope: "all", cwd: projectPath }).filter(
+    (e) => e.scope === "global" || e.projectId === pid
+  );
+  const registeredNames = [...new Set(entries.map((e) => e.name))].sort();
+  const manifest = loadProjectManifest(projectPath);
+  const known = new Set(registeredNames);
+  const gaps = Object.keys(manifest.secrets).filter((name) => !known.has(name)).sort();
+  return { registeredNames, gaps };
+}
+
+// src/cli/commands/doctor.ts
 var execFileAsync = promisify(execFile4);
 async function opStatus() {
   try {
@@ -1323,10 +1339,7 @@ async function cmdDoctor(argv) {
     keyPresent: existsSync7(keyPath()),
     secretsFilePresent: existsSync7(secretsPath())
   };
-  const cwd = process.cwd();
-  const manifest = loadProjectManifest(findProjectPath(cwd));
-  const registeredNames = new Set(listSecrets({ scope: "all", cwd }).map((e) => e.name));
-  const manifestGaps = Object.keys(manifest.secrets).filter((name) => !registeredNames.has(name));
+  const { gaps: manifestGaps } = computeManifestGaps(process.cwd());
   const report2 = {
     platform: `${platform()} ${release()}`,
     depositories,
@@ -1482,7 +1495,8 @@ var RequestStore = {
       createdAt: now,
       expiresAt: now + (opts.ttlMs ?? defaultTtlMs(opts.kind)),
       values: opts.values ? { ...opts.values } : void 0,
-      envFilePath: opts.envFilePath
+      envFilePath: opts.envFilePath,
+      ambiguousNames: opts.ambiguousNames ? [...opts.ambiguousNames] : void 0
     };
     records.set(id, record);
     startSweeper();
@@ -1565,6 +1579,9 @@ var RequestStore = {
 // src/storage/dotenv-file.ts
 var BEGIN_MARKER2 = "# enigma:begin";
 var END_MARKER2 = "# enigma:end";
+function isAmbiguousUnquoted(raw) {
+  return / #/.test(raw);
+}
 function detectEol2(content) {
   return content.includes("\r\n") ? "\r\n" : "\n";
 }
@@ -1616,15 +1633,29 @@ function scanAssignments(lines, block) {
 ${lines[endIdx]}`;
       }
       if (closed) {
-        assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), startIdx: i, endIdx });
+        assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), ambiguous: false, startIdx: i, endIdx });
         i = endIdx + 1;
       } else {
-        assignments.push({ name, value: rest.trim(), valid: NAME_PATTERN.test(name), startIdx: i, endIdx: i });
+        assignments.push({
+          name,
+          value: rest.trim(),
+          valid: NAME_PATTERN.test(name),
+          ambiguous: isAmbiguousUnquoted(rest),
+          startIdx: i,
+          endIdx: i
+        });
         i++;
       }
       continue;
     }
-    assignments.push({ name, value: rest.trim(), valid: NAME_PATTERN.test(name), startIdx: i, endIdx: i });
+    assignments.push({
+      name,
+      value: rest.trim(),
+      valid: NAME_PATTERN.test(name),
+      ambiguous: isAmbiguousUnquoted(rest),
+      startIdx: i,
+      endIdx: i
+    });
     i++;
   }
   return assignments;
@@ -1642,6 +1673,7 @@ function parseDotEnv(content) {
   const assignments = scanAssignments(lines, block);
   const order = [];
   const values = /* @__PURE__ */ new Map();
+  const ambiguousFlags = /* @__PURE__ */ new Map();
   const invalidSeen = /* @__PURE__ */ new Set();
   const duplicateSeen = /* @__PURE__ */ new Set();
   for (const a of assignments) {
@@ -1652,9 +1684,10 @@ function parseDotEnv(content) {
     if (values.has(a.name)) duplicateSeen.add(a.name);
     else order.push(a.name);
     values.set(a.name, a.value);
+    ambiguousFlags.set(a.name, a.ambiguous);
   }
   return {
-    entries: order.map((name) => ({ name, value: values.get(name) })),
+    entries: order.map((name) => ({ name, value: values.get(name), ambiguous: ambiguousFlags.get(name) })),
     invalidNames: [...invalidSeen],
     duplicateNames: [...duplicateSeen]
   };
@@ -1684,13 +1717,27 @@ function removeDotEnvEntries(content, names, opts = {}) {
 }
 
 // src/storage/import-commit.ts
-import { existsSync as existsSync8, readFileSync as readFileSync5, writeFileSync as writeFileSync4 } from "node:fs";
+import { randomBytes as randomBytes4 } from "node:crypto";
+import { existsSync as existsSync8, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync4 } from "node:fs";
 var FILE_MODE4 = 384;
+function writeFileAtomic(path, content, mode) {
+  const tmpPath = `${path}.${randomBytes4(6).toString("hex")}.tmp`;
+  writeFileSync4(tmpPath, content, { mode });
+  renameSync2(tmpPath, path);
+}
+function ambiguousValueError(entry, envFilePath) {
+  return new EnigmaError({
+    code: "E_VALUE_AMBIGUOUS",
+    message: `value for ${entry.name} in ${envFilePath} contains an unquoted " #", which could start a comment or be part of the secret \u2014 quote the value if the # belongs to it, then rerun import`,
+    secretName: entry.name
+  });
+}
 async function commitImport(opts) {
   const succeeded = [];
   const failed = [];
   for (const entry of opts.entries) {
     try {
+      if (entry.ambiguous) throw ambiguousValueError(entry, opts.envFilePath);
       await setSecret({
         name: entry.name,
         value: entry.value,
@@ -1704,7 +1751,11 @@ async function commitImport(opts) {
       });
       succeeded.push(entry.name);
     } catch (err) {
-      failed.push({ name: entry.name, errorCode: err instanceof EnigmaError ? err.code : "E_UNKNOWN" });
+      failed.push({
+        name: entry.name,
+        errorCode: err instanceof EnigmaError ? err.code : "E_UNKNOWN",
+        message: err instanceof EnigmaError ? err.message : void 0
+      });
       break;
     }
   }
@@ -1717,14 +1768,29 @@ async function commitImport(opts) {
         `${succeeded.length} secret(s) (${succeeded.join(", ")}) were already written into the .env managed block before the failure on ${failed[0].name}; the original plaintext line(s) were deliberately left in place. Fix the issue and rerun import, or remove them from .env manually.`
       );
     }
-    return { succeeded, failed, notAttempted, fileRewritten: false, warnings };
+    return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
   const currentContent = existsSync8(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
-  const movedComment = opts.depository === "env" ? void 0 : `# Moved to Enigma (${opts.depository}) by \`enigma import\` on ${(/* @__PURE__ */ new Date()).toISOString()}: ${succeeded.join(", ")}`;
-  const rewritten = removeDotEnvEntries(currentContent, succeeded, { comment: movedComment });
+  const valueByName = new Map(opts.entries.map((e) => [e.name, e.value]));
+  const currentValueByName = new Map(parseDotEnv(currentContent).entries.map((e) => [e.name, e.value]));
+  const toRemove = [];
+  const skippedMismatch = [];
+  for (const name of succeeded) {
+    const currentValue = currentValueByName.get(name);
+    if (currentValue === void 0) continue;
+    if (currentValue === valueByName.get(name)) toRemove.push(name);
+    else skippedMismatch.push(name);
+  }
+  for (const name of skippedMismatch) {
+    warnings.push(
+      `${name} was migrated, but its value in .env changed before the file could be rewritten \u2014 left in place rather than guessing which copy is current. Rerun import to migrate the new value, or remove the line manually.`
+    );
+  }
+  const movedComment = toRemove.length === 0 || opts.depository === "env" ? void 0 : `# Moved to Enigma (${opts.depository}) by \`enigma import\` on ${(/* @__PURE__ */ new Date()).toISOString()}: ${toRemove.join(", ")}`;
+  const rewritten = toRemove.length > 0 ? removeDotEnvEntries(currentContent, toRemove, { comment: movedComment }) : currentContent;
   const fileRewritten = rewritten !== currentContent;
-  if (fileRewritten) writeFileSync4(opts.envFilePath, rewritten, { mode: FILE_MODE4 });
-  return { succeeded, failed: [], notAttempted: [], fileRewritten, warnings };
+  if (fileRewritten) writeFileAtomic(opts.envFilePath, rewritten, FILE_MODE4);
+  return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten, warnings };
 }
 
 // src/web/server.ts
@@ -2206,7 +2272,8 @@ async function handleImportFormPost(req, res, id) {
   const projectPath = findProjectPath(cwd);
   const scope = record.scope ?? "project";
   const values = record.values ?? {};
-  const entries = record.names.map((name) => ({ name, value: values[name] ?? "" }));
+  const ambiguousNames = new Set(record.ambiguousNames ?? []);
+  const entries = record.names.map((name) => ({ name, value: values[name] ?? "", ambiguous: ambiguousNames.has(name) }));
   const commitResult = await commitImport({
     entries,
     depository: chosenDepository,
@@ -2223,7 +2290,12 @@ async function handleImportFormPost(req, res, id) {
     ...commitResult.notAttempted.map((name) => ({ name, ok: false, errorCode: "E_NOT_ATTEMPTED" })),
     ...commitResult.succeeded.map((name) => ({ name, ok: true }))
   ];
-  record.importOutcome = { fileRewritten: commitResult.fileRewritten, warnings: commitResult.warnings, depository: chosenDepository };
+  record.importOutcome = {
+    fileRewritten: commitResult.fileRewritten,
+    warnings: commitResult.warnings,
+    skippedMismatch: commitResult.skippedMismatch,
+    depository: chosenDepository
+  };
   RequestStore.fulfill(id, results);
   let html = request_done_default;
   html = renderRepeatingBlock(
@@ -2589,8 +2661,10 @@ function report(data, json, cwd, note) {
       ];
       lines.push(renderOutcome(results, cwd).text);
     }
+    for (const f of data.failed) if (f.message) lines.push(`${f.name}: ${f.message}`);
     for (const name of data.notAttempted) lines.push(`${name}: not attempted (aborted after an earlier failure)`);
     for (const name of data.skippedInvalid) lines.push(`${name}: skipped (invalid secret name)`);
+    for (const name of data.skippedMismatch) lines.push(`${name}: migrated, but its .env line was left in place (see warnings)`);
     for (const warning of data.warnings) lines.push(`warning: ${warning}`);
     if (data.failed.length > 0 && !data.fileRewritten) {
       lines.push(".env was left untouched because not every key succeeded.");
@@ -2606,6 +2680,7 @@ async function runBrowserFlow(entries, opts) {
     kind: "import",
     names: entries.map((e) => e.name),
     values: Object.fromEntries(entries.map((e) => [e.name, e.value])),
+    ambiguousNames: entries.filter((e) => e.ambiguous).map((e) => e.name),
     scope: "project",
     envFilePath: opts.absPath
   });
@@ -2623,6 +2698,7 @@ async function runBrowserFlow(entries, opts) {
         failed: [],
         notAttempted: entries.map((e) => e.name),
         skippedInvalid: opts.skippedInvalid,
+        skippedMismatch: [],
         warnings: [],
         fileRewritten: false
       },
@@ -2640,6 +2716,7 @@ async function runBrowserFlow(entries, opts) {
       failed: results.filter((r) => !r.ok && r.errorCode !== "E_NOT_ATTEMPTED").map((r) => ({ name: r.name, errorCode: r.errorCode ?? "E_UNKNOWN" })),
       notAttempted: results.filter((r) => r.errorCode === "E_NOT_ATTEMPTED").map((r) => r.name),
       skippedInvalid: opts.skippedInvalid,
+      skippedMismatch: outcome?.skippedMismatch ?? [],
       warnings: outcome?.warnings ?? [],
       fileRewritten: outcome?.fileRewritten ?? false,
       depository: outcome?.depository
@@ -2664,7 +2741,15 @@ async function cmdImport(argv) {
   const parsed = parseDotEnv(content);
   if (parsed.entries.length === 0) {
     return report(
-      { imported: [], failed: [], notAttempted: [], skippedInvalid: parsed.invalidNames, warnings: [], fileRewritten: false },
+      {
+        imported: [],
+        failed: [],
+        notAttempted: [],
+        skippedInvalid: parsed.invalidNames,
+        skippedMismatch: [],
+        warnings: [],
+        fileRewritten: false
+      },
       json,
       cwd,
       "No importable secrets found."
@@ -2688,6 +2773,7 @@ async function cmdImport(argv) {
       failed: result.failed,
       notAttempted: result.notAttempted,
       skippedInvalid: parsed.invalidNames,
+      skippedMismatch: result.skippedMismatch,
       warnings: result.warnings,
       fileRewritten: result.fileRewritten,
       depository
