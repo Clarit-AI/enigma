@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -5,30 +6,50 @@ import { EnigmaError } from '../../../src/core/errors.js';
 
 const SENTINEL = 'sk-sentinel-value-should-never-appear';
 
+interface FakeStdin extends EventEmitter {
+  write: (data: string) => boolean;
+  end: () => void;
+}
+
 interface FakeCall {
   file: string;
   args: string[];
   stdinData: string;
+  stdin: FakeStdin;
+  writeReturn: boolean;
 }
 
+type RespondResult = {
+  error?: (NodeJS.ErrnoException & { stdout?: string; stderr?: string }) | null;
+  stdout?: string;
+  stderr?: string;
+  /** When set, the mock emits this as an 'error' event on the child's stdin instead of invoking the exec callback. */
+  stdinError?: Error;
+};
+
 const calls: FakeCall[] = [];
-let respond: (call: FakeCall) => { error?: (NodeJS.ErrnoException & { stdout?: string; stderr?: string }) | null; stdout?: string; stderr?: string };
+let respond: (call: FakeCall) => RespondResult;
 
 vi.mock('node:child_process', () => ({
   execFile: (file: string, args: string[], _options: unknown, callback: (...cbArgs: unknown[]) => void) => {
-    const call: FakeCall = { file, args, stdinData: '' };
+    const stdin = new EventEmitter() as FakeStdin;
+    const call: FakeCall = { file, args, stdinData: '', stdin, writeReturn: true };
+    stdin.write = (data: string) => {
+      call.stdinData += data;
+      return call.writeReturn;
+    };
+    stdin.end = () => {};
     calls.push(call);
     const result = respond(call);
-    queueMicrotask(() => callback(result.error ?? null, result.stdout ?? '', result.stderr ?? ''));
-    return {
-      stdin: {
-        write: (data: string) => {
-          call.stdinData += data;
-        },
-        end: () => {},
-      },
-      kill: () => {},
-    };
+    if (result.stdinError) {
+      queueMicrotask(() => stdin.emit('error', result.stdinError));
+    } else {
+      queueMicrotask(() => callback(result.error ?? null, result.stdout ?? '', result.stderr ?? ''));
+    }
+    const child = new EventEmitter() as EventEmitter & { stdin: FakeStdin; kill: () => void };
+    child.stdin = stdin;
+    child.kill = () => {};
+    return child;
   },
 }));
 
@@ -38,7 +59,7 @@ vi.mock('node:fs', async (importOriginal) => {
   return { ...actual, existsSync: (...args: unknown[]) => existsSyncMock(...args) };
 });
 
-const { macosKeychainDepositoryModule, encodeSecretHex, decodeSecretOutput } = await import(
+const { macosKeychainDepositoryModule, encodeSecretHex, decodeSecretOutput, maxValueBytes } = await import(
   '../../../src/storage/depositories/macos-keychain.js'
 );
 
@@ -49,6 +70,12 @@ function okResult(stdout = ''): ReturnType<typeof respond> {
 function notFoundError(): ReturnType<typeof respond> {
   const error = new Error('security: SecKeychainSearchCopyNext: The specified item could not be found in the keychain.') as NodeJS.ErrnoException;
   return { error, stderr: 'The specified item could not be found in the keychain.\n' };
+}
+
+/** errSecItemNotFound (44) with a non-English, non-matching stderr string — proves detection uses the exit status, not locale text. */
+function notFoundByExitCodeError(): ReturnType<typeof respond> {
+  const error = Object.assign(new Error('security: some localized failure text'), { code: 44 }) as NodeJS.ErrnoException & { code: number };
+  return { error, stderr: 'un texte localisé sans rapport\n' };
 }
 
 function genericError(): ReturnType<typeof respond> {
@@ -76,6 +103,17 @@ describe('macos-keychain depository', () => {
   describe('encodeSecretHex / decodeSecretOutput', () => {
     it('round-trips a plain value', () => {
       expect(decodeSecretOutput(`${encodeSecretHex('plain-value')}\n`)).toBe('plain-value');
+    });
+
+    it('throws E_READ_FAILED instead of guessing when stdout is not hex-and-marker encoded', () => {
+      expect(() => decodeSecretOutput('not-hex-output\n')).toThrow(
+        expect.objectContaining({ code: 'E_READ_FAILED', depository: 'keychain' }),
+      );
+    });
+
+    it('throws E_READ_FAILED for well-formed hex missing the trailing marker byte', () => {
+      const unmarked = Buffer.from('plain-value', 'utf8').toString('hex');
+      expect(() => decodeSecretOutput(`${unmarked}\n`)).toThrow(expect.objectContaining({ code: 'E_READ_FAILED' }));
     });
 
     it('round-trips quotes, backslashes, and dollar signs', () => {
@@ -133,13 +171,85 @@ describe('macos-keychain depository', () => {
       expect(decodeSecretOutput(`${hexMatch![1]}\n`)).toBe(value);
     });
 
-    it('throws E_READ_FAILED naming keychain when the security command fails', async () => {
+    it('throws E_WRITE_FAILED naming keychain when the security command fails', async () => {
       respond = () => genericError();
       const depo = macosKeychainDepositoryModule.create({});
 
       await expect(depo.set('global/NAME', SENTINEL)).rejects.toThrow(
-        expect.objectContaining({ code: 'E_READ_FAILED', depository: 'keychain' }),
+        expect.objectContaining({ code: 'E_WRITE_FAILED', depository: 'keychain' }),
       );
+    });
+
+    it('rejects instead of crashing when the child exits before stdin drains (EPIPE)', async () => {
+      respond = () => ({ stdinError: Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }) });
+      const depo = macosKeychainDepositoryModule.create({});
+
+      await expect(depo.set('global/NAME', SENTINEL)).rejects.toThrow(
+        expect.objectContaining({ code: 'E_WRITE_FAILED', depository: 'keychain' }),
+      );
+    });
+  });
+
+  describe('set — value size limit', () => {
+    it('accepts a value exactly at the batch-line byte boundary', async () => {
+      respond = () => okResult();
+      const depo = macosKeychainDepositoryModule.create({});
+      const ref = 'global/NAME';
+      const limit = maxValueBytes(ref);
+
+      await expect(depo.set(ref, 'A'.repeat(limit))).resolves.toBe(ref);
+      expect(calls).toHaveLength(1);
+    });
+
+    it('rejects a value one byte past the boundary with E_VALUE_TOO_LARGE, before spawning anything', async () => {
+      const depo = macosKeychainDepositoryModule.create({});
+      const ref = 'global/NAME';
+      const limit = maxValueBytes(ref);
+      const value = 'A'.repeat(limit + 1);
+
+      try {
+        await depo.set(ref, value);
+        expect.unreachable();
+      } catch (err) {
+        expect(err).toBeInstanceOf(EnigmaError);
+        expect((err as EnigmaError).code).toBe('E_VALUE_TOO_LARGE');
+        expect((err as EnigmaError).depository).toBe('keychain');
+        expect((err as EnigmaError).message).toContain(String(limit));
+        expect((err as EnigmaError).message).toContain('encrypted');
+        expect((err as EnigmaError).message).not.toContain(value);
+      }
+    });
+
+    it('leaves no keychain item behind after a rejected oversized write', async () => {
+      const depo = macosKeychainDepositoryModule.create({});
+      const ref = 'global/NAME';
+      const limit = maxValueBytes(ref);
+
+      await expect(depo.set(ref, 'A'.repeat(limit + 1))).rejects.toThrow(
+        expect.objectContaining({ code: 'E_VALUE_TOO_LARGE' }),
+      );
+      expect(calls).toHaveLength(0);
+    });
+  });
+
+  describe('ref validation', () => {
+    it('rejects an invalid ref on set/resolve/delete/has before spawning anything', async () => {
+      const depo = macosKeychainDepositoryModule.create({});
+      const invalidRef = 'global/NAME; rm -rf /';
+
+      await expect(depo.set(invalidRef, SENTINEL)).rejects.toThrow(expect.objectContaining({ code: 'E_REF_INVALID' }));
+      await expect(depo.resolve(invalidRef)).rejects.toThrow(expect.objectContaining({ code: 'E_REF_INVALID' }));
+      await expect(depo.delete(invalidRef)).rejects.toThrow(expect.objectContaining({ code: 'E_REF_INVALID' }));
+      await expect(depo.has(invalidRef)).rejects.toThrow(expect.objectContaining({ code: 'E_REF_INVALID' }));
+      expect(calls).toHaveLength(0);
+    });
+
+    it('rejects a ref longer than the sane cap', async () => {
+      const depo = macosKeychainDepositoryModule.create({});
+      const longRef = `global/${'A'.repeat(600)}`;
+
+      await expect(depo.set(longRef, SENTINEL)).rejects.toThrow(expect.objectContaining({ code: 'E_REF_INVALID' }));
+      expect(calls).toHaveLength(0);
     });
   });
 
@@ -159,6 +269,13 @@ describe('macos-keychain depository', () => {
 
     it('throws E_NOT_FOUND when the item is missing', async () => {
       respond = () => notFoundError();
+      const depo = macosKeychainDepositoryModule.create({});
+
+      await expect(depo.resolve('global/MISSING')).rejects.toThrow(expect.objectContaining({ code: 'E_NOT_FOUND' }));
+    });
+
+    it('throws E_NOT_FOUND from the exit status (44) even when stderr text does not match, regardless of locale', async () => {
+      respond = () => notFoundByExitCodeError();
       const depo = macosKeychainDepositoryModule.create({});
 
       await expect(depo.resolve('global/MISSING')).rejects.toThrow(expect.objectContaining({ code: 'E_NOT_FOUND' }));
@@ -192,6 +309,13 @@ describe('macos-keychain depository', () => {
 
     it('is idempotent when the item is missing', async () => {
       respond = () => notFoundError();
+      const depo = macosKeychainDepositoryModule.create({});
+
+      await expect(depo.delete('global/MISSING')).resolves.toBeUndefined();
+    });
+
+    it('is idempotent when the item is missing, detected via exit status regardless of locale', async () => {
+      respond = () => notFoundByExitCodeError();
       const depo = macosKeychainDepositoryModule.create({});
 
       await expect(depo.delete('global/MISSING')).resolves.toBeUndefined();
@@ -288,6 +412,21 @@ describe.runIf(RUN_E2E)('macos-keychain E2E (real OS)', () => {
       await depo.delete(ref);
     }
 
+    await expect(depo.has(ref)).resolves.toBe(false);
+  });
+
+  it('rejects an oversized value and leaves no orphan item in the real keychain', async () => {
+    vi.doUnmock('node:child_process');
+    vi.doUnmock('node:fs');
+    vi.resetModules();
+    const real = await import('../../../src/storage/depositories/macos-keychain.js');
+    const depo = real.macosKeychainDepositoryModule.create({});
+    const ref = `global/ENIGMA_E2E_TOOLARGE_${Date.now()}`;
+    const limit = real.maxValueBytes(ref);
+
+    await expect(depo.set(ref, 'A'.repeat(limit + 1))).rejects.toThrow(
+      expect.objectContaining({ code: 'E_VALUE_TOO_LARGE' }),
+    );
     await expect(depo.has(ref)).resolves.toBe(false);
   });
 });

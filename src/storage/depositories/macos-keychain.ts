@@ -8,6 +8,15 @@ const SERVICE = 'enigma';
 const EXEC_TIMEOUT_MS = 10_000;
 const EXEC_MAX_BUFFER_BYTES = 1024 * 1024;
 const NOT_FOUND_PATTERN = /could not be found/i;
+/** `security`'s exit status for errSecItemNotFound — stable across system languages, unlike its stderr text. */
+const ERR_SEC_ITEM_NOT_FOUND = 44;
+
+/** `security -i` reads each batch command as a single line capped at this many bytes. */
+const BATCH_LINE_MAX_BYTES = 4096;
+
+/** `ref` is a depository-boundary input; validated before any process is spawned (Issue #6 will pass externally-derived ids here). */
+const REF_PATTERN = /^[A-Za-z0-9_./-]+$/;
+const REF_MAX_LENGTH = 512;
 
 /**
  * A trailing sentinel byte appended to every stored value. `security -i`'s
@@ -46,7 +55,14 @@ function runSecurity(args: string[]): Promise<ExecResult> {
   });
 }
 
-/** Runs `security -i` (batch/interactive mode) with `line` as its one command, supplied on stdin — never argv. */
+/**
+ * Runs `security -i` (batch/interactive mode) with `line` as its one command,
+ * supplied on stdin — never argv. `error` listeners on both the child and
+ * its stdin turn a pipe failure (e.g. the child exiting before stdin
+ * drains) into a rejected promise instead of an uncaught exception that
+ * would crash the process; `write()`'s backpressure signal is honoured
+ * rather than ending stdin while a write is still buffered.
+ */
 function runSecurityBatch(line: string): Promise<ExecResult> {
   return new Promise((resolve, reject) => {
     const child = execFile(SECURITY_BIN, ['-i'], { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error, stdout, stderr) => {
@@ -56,13 +72,18 @@ function runSecurityBatch(line: string): Promise<ExecResult> {
       }
       resolve({ stdout: String(stdout ?? ''), stderr: String(stderr ?? '') });
     });
+    child.on('error', reject);
     if (!child.stdin) {
       child.kill();
       reject(new Error('security -i: stdin unavailable'));
       return;
     }
-    child.stdin.write(`${line}\n`);
-    child.stdin.end();
+    child.stdin.on('error', reject);
+    if (child.stdin.write(`${line}\n`)) {
+      child.stdin.end();
+    } else {
+      child.stdin.once('drain', () => child.stdin?.end());
+    }
   });
 }
 
@@ -86,7 +107,24 @@ export function decodeSecretOutput(stdout: string): string {
       return bytes.subarray(0, bytes.length - 1).toString('utf8');
     }
   }
-  return trimmed;
+  return readFailed();
+}
+
+/**
+ * The exact byte overhead of the `add-generic-password` batch line around
+ * its hex payload, for a given `ref`. Computing this before spawning
+ * anything lets `set` reject an oversized value up front instead of
+ * leaving a truncated, marker-less orphan item behind once `security -i`
+ * truncates the line mid-command.
+ */
+function batchLineOverheadBytes(ref: string): number {
+  return Buffer.byteLength(`add-generic-password -a ${ref} -s ${SERVICE} -X  -U\n`, 'utf8');
+}
+
+/** Maximum plaintext value byte length that fits within the batch-line budget for `ref`. */
+export function maxValueBytes(ref: string): number {
+  const hexBudget = BATCH_LINE_MAX_BYTES - batchLineOverheadBytes(ref);
+  return Math.floor(hexBudget / 2) - 1; // 2 hex chars/byte, minus the trailing marker byte
 }
 
 function readFailed(): never {
@@ -97,8 +135,46 @@ function readFailed(): never {
   });
 }
 
+function writeFailed(): never {
+  throw new EnigmaError({
+    code: 'E_WRITE_FAILED',
+    message: 'failed to write secret to keychain depository',
+    depository: 'keychain',
+  });
+}
+
 function notFound(): never {
   throw new EnigmaError({ code: 'E_NOT_FOUND', message: 'secret not found', depository: 'keychain' });
+}
+
+function refInvalid(): never {
+  throw new EnigmaError({
+    code: 'E_REF_INVALID',
+    message: `invalid depository ref: expected ${REF_PATTERN} and at most ${REF_MAX_LENGTH} characters`,
+    depository: 'keychain',
+  });
+}
+
+function valueTooLarge(limitBytes: number): never {
+  throw new EnigmaError({
+    code: 'E_VALUE_TOO_LARGE',
+    message: `value exceeds the keychain depository's ${limitBytes}-byte limit; use the "encrypted" depository for large material such as PEM keys`,
+    depository: 'keychain',
+  });
+}
+
+function validateRef(ref: string): void {
+  if (ref.length === 0 || ref.length > REF_MAX_LENGTH || !REF_PATTERN.test(ref)) {
+    refInvalid();
+  }
+}
+
+function isItemNotFound(failure: ExecFailure): boolean {
+  return (
+    failure.code === ERR_SEC_ITEM_NOT_FOUND ||
+    NOT_FOUND_PATTERN.test(failure.stderr ?? '') ||
+    NOT_FOUND_PATTERN.test(failure.message ?? '')
+  );
 }
 
 function createKeychainDepository(): Depository {
@@ -107,22 +183,28 @@ function createKeychainDepository(): Depository {
     promptProfile: 'may-prompt',
 
     async set(ref, value) {
+      validateRef(ref);
+      const limit = maxValueBytes(ref);
+      if (Buffer.byteLength(value, 'utf8') > limit) {
+        valueTooLarge(limit);
+      }
       const hex = encodeSecretHex(value);
       try {
         await runSecurityBatch(`add-generic-password -a ${ref} -s ${SERVICE} -X ${hex} -U`);
       } catch {
-        readFailed();
+        writeFailed();
       }
       return ref;
     },
 
     async resolve(ref) {
+      validateRef(ref);
       try {
         const { stdout } = await runSecurity(['find-generic-password', '-a', ref, '-s', SERVICE, '-w']);
         return decodeSecretOutput(stdout);
       } catch (err) {
         const failure = err as ExecFailure;
-        if (NOT_FOUND_PATTERN.test(failure.stderr ?? '') || NOT_FOUND_PATTERN.test(failure.message ?? '')) {
+        if (isItemNotFound(failure)) {
           notFound();
         }
         return readFailed();
@@ -130,11 +212,12 @@ function createKeychainDepository(): Depository {
     },
 
     async delete(ref) {
+      validateRef(ref);
       try {
         await runSecurity(['delete-generic-password', '-a', ref, '-s', SERVICE]);
       } catch (err) {
         const failure = err as ExecFailure;
-        if (NOT_FOUND_PATTERN.test(failure.stderr ?? '') || NOT_FOUND_PATTERN.test(failure.message ?? '')) {
+        if (isItemNotFound(failure)) {
           return;
         }
         readFailed();
@@ -142,6 +225,7 @@ function createKeychainDepository(): Depository {
     },
 
     async has(ref) {
+      validateRef(ref);
       try {
         await runSecurity(['find-generic-password', '-a', ref, '-s', SERVICE]);
         return true;
