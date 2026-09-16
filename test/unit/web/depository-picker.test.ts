@@ -66,7 +66,7 @@ describe('needsAvailabilityConfirmation', () => {
     expect(needsAvailabilityConfirmation(DETECTIONS, 'keychain')).toBe(true);
   });
 
-  it('is true for a depository not present in the detection list at all (e.g. 1password before Issue #6 lands)', () => {
+  it('is true for a depository id not present in the given detection list at all (e.g. an id the caller passed but detectAll() never reported)', () => {
     expect(needsAvailabilityConfirmation(DETECTIONS, '1password')).toBe(true);
   });
 

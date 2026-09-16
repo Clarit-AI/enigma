@@ -94,6 +94,11 @@ describe('macos-keychain depository', () => {
     calls.length = 0;
     respond = () => okResult();
     originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    // Cleared per-test so a detect() assertion about this test's own calls
+    // isn't perturbed by an unrelated caller (e.g. another registered
+    // depository's detect() probing the filesystem) that also runs through
+    // this shared mock within the same process.
+    existsSyncMock.mockClear();
   });
 
   afterEach(() => {

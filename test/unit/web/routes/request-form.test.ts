@@ -1,10 +1,34 @@
+import { EventEmitter } from 'node:events';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { startServer, stopServer } from '../../../../src/web/server.js';
-import { RequestStore } from '../../../../src/request/store.js';
-import { setSecret } from '../../../../src/storage/manager.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+/**
+ * The `1password` depository these routes can now select is a real external
+ * CLI (`op`), unlike the other depositories this file exercises. Mocking
+ * `child_process` to always fail with ENOENT keeps the whole file
+ * deterministic — identical on a Linux CI box with no `op`, this signed-out
+ * Mac, or a contributor's signed-in laptop — rather than depending on
+ * whatever state happens to be installed on the machine running the suite.
+ */
+vi.mock('node:child_process', () => ({
+  execFile: (_file: string, _args: string[], _options: unknown, callback: (...cbArgs: unknown[]) => void) => {
+    const stdin = new EventEmitter() as EventEmitter & { write: (d: string) => boolean; end: () => void };
+    stdin.write = () => true;
+    stdin.end = () => {};
+    const error = Object.assign(new Error('spawn op ENOENT'), { code: 'ENOENT' });
+    queueMicrotask(() => callback(error, '', ''));
+    const child = new EventEmitter() as EventEmitter & { stdin: typeof stdin; kill: () => void };
+    child.stdin = stdin;
+    child.kill = () => {};
+    return child;
+  },
+}));
+
+const { startServer, stopServer } = await import('../../../../src/web/server.js');
+const { RequestStore } = await import('../../../../src/request/store.js');
+const { setSecret } = await import('../../../../src/storage/manager.js');
 
 describe('GET/POST /r/:id', () => {
   let tmpHome: string;
@@ -101,7 +125,7 @@ describe('GET/POST /r/:id', () => {
     expect(await resp.text()).toContain('failed');
     expect(RequestStore.get(record.id)?.usedAt).toBeDefined();
     expect(RequestStore.get(record.id)?.results).toEqual([
-      { name: 'OPENAI_API_KEY', ok: false, errorCode: 'E_DEPOSITORY_UNAVAILABLE' },
+      { name: 'OPENAI_API_KEY', ok: false, errorCode: 'E_WRITE_FAILED' },
     ]);
   });
 

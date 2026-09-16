@@ -1,12 +1,57 @@
+import { EventEmitter } from 'node:events';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
+import { basename } from 'node:path';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { deleteSecret, hasSecret, listSecrets, resolveSecret, setSecret } from '../../src/storage/manager.js';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EnigmaError } from '../../src/core/errors.js';
 import { auditLogPath } from '../../src/core/paths.js';
 
 const SENTINEL = 'sk-sentinel-value-should-never-appear';
+
+/**
+ * `1password` is the only depository that reads `DepositoryContext` at
+ * construction time for something other than `env`'s file location, so it's
+ * the concrete case used below to pin that `setSecret` actually forwards
+ * `projectPath`/`createVault` through to the depository rather than only to
+ * `env` (manager.ts previously special-cased `env` alone here — a latent
+ * gap `resolveSecret`/`deleteSecret` never had). Mocking `child_process`
+ * keeps this deterministic regardless of whether `op` is installed/signed
+ * in on the machine running the suite.
+ */
+interface FakeCall {
+  args: string[];
+  stdinData: string;
+}
+const opCalls: FakeCall[] = [];
+let respondToOp: (call: FakeCall) => { stdout?: string; stderr?: string; fail?: boolean };
+
+vi.mock('node:child_process', () => ({
+  execFile: (_file: string, args: string[], _options: unknown, callback: (...cbArgs: unknown[]) => void) => {
+    const stdin = new EventEmitter() as EventEmitter & { write: (d: string) => boolean; end: () => void };
+    const call: FakeCall = { args, stdinData: '' };
+    stdin.write = (data: string) => {
+      call.stdinData += data;
+      return true;
+    };
+    stdin.end = () => {};
+    opCalls.push(call);
+    const result = respondToOp(call);
+    queueMicrotask(() => {
+      if (result.fail) {
+        callback(Object.assign(new Error('op failure'), {}), result.stdout ?? '', result.stderr ?? '');
+      } else {
+        callback(null, result.stdout ?? '', result.stderr ?? '');
+      }
+    });
+    const child = new EventEmitter() as EventEmitter & { stdin: typeof stdin; kill: () => void };
+    child.stdin = stdin;
+    child.kill = () => {};
+    return child;
+  },
+}));
+
+const { deleteSecret, hasSecret, listSecrets, resolveSecret, setSecret } = await import('../../src/storage/manager.js');
 
 describe('storage manager', () => {
   let tmpHome: string;
@@ -19,6 +64,13 @@ describe('storage manager', () => {
     process.env.ENIGMA_HOME = tmpHome;
     tmpProject = mkdtempSync(join(tmpdir(), 'enigma-project-'));
     mkdirSync(join(tmpProject, '.git'));
+    opCalls.length = 0;
+    respondToOp = (call) => {
+      if (call.args[0] === 'item' && call.args[1] === 'create') {
+        return { stdout: JSON.stringify({ id: 'opitemid', title: 'x', category: 'API_CREDENTIAL' }) };
+      }
+      return { stdout: '' };
+    };
   });
 
   afterEach(() => {
@@ -138,5 +190,49 @@ describe('storage manager', () => {
 
     const lines = readFileSync(auditLogPath(), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { op: string });
     expect(lines.at(-1)?.op).toBe('reveal');
+  });
+
+  it('setSecret forwards projectPath to a non-env, project-scoped depository (Issue #6 — was previously env-only, a latent gap versus resolveSecret/deleteSecret)', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'project', depository: '1password', cwd: tmpProject, actor: 'cli' });
+
+    const itemCreateCall = opCalls.find((c) => c.args[0] === 'item' && c.args[1] === 'create');
+    expect(itemCreateCall).toBeDefined();
+    const template = JSON.parse(itemCreateCall!.stdinData) as { title: string };
+    expect(template.title).toBe(`OPENAI_API_KEY · ${basename(tmpProject)}`);
+  });
+
+  it('setSecret rejects with E_VAULT_MISSING and creates nothing when the vault is missing and createVault was not passed', async () => {
+    respondToOp = (call) => {
+      if (call.args[0] === 'item' && call.args[1] === 'create') {
+        return { fail: true, stderr: '"Enigma" isn\'t a vault in this account' };
+      }
+      return { stdout: '' };
+    };
+
+    await expect(
+      setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: '1password', actor: 'cli' }),
+    ).rejects.toThrow(expect.objectContaining({ code: 'E_VAULT_MISSING' }));
+    expect(opCalls.some((c) => c.args[0] === 'vault' && c.args[1] === 'create')).toBe(false);
+  });
+
+  it('setSecret end-to-end: createVault reaches the depository via DepositoryContext and creates the vault exactly once', async () => {
+    let itemCreateAttempts = 0;
+    respondToOp = (call) => {
+      if (call.args[0] === 'vault' && call.args[1] === 'create') {
+        return { stdout: JSON.stringify({ id: 'vaultid', name: 'Enigma' }) };
+      }
+      if (call.args[0] === 'item' && call.args[1] === 'create') {
+        itemCreateAttempts += 1;
+        if (itemCreateAttempts === 1) return { fail: true, stderr: '"Enigma" isn\'t a vault in this account' };
+        return { stdout: JSON.stringify({ id: 'opitemid', title: 'x', category: 'API_CREDENTIAL' }) };
+      }
+      return { stdout: '' };
+    };
+
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: '1password', createVault: true, actor: 'cli' });
+
+    expect(opCalls.filter((c) => c.args[0] === 'vault' && c.args[1] === 'create')).toHaveLength(1);
+    const [entry] = listSecrets({ scope: 'global' });
+    expect(entry?.ref).toBe('opitemid');
   });
 });

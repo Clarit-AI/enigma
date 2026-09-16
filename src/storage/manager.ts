@@ -22,7 +22,7 @@ import {
 import type { IndexEntry, IndexEntryView, Scope } from '../core/index-store.js';
 import { DEPOSITORY_MODULES } from './detect.js';
 import { checkEnvGitignore } from './depositories/env.js';
-import type { Depository, DepositoryId } from './interfaces.js';
+import type { Depository, DepositoryContext, DepositoryId } from './interfaces.js';
 
 function getDepositoryModule(id: DepositoryId) {
   const mod = DEPOSITORY_MODULES.find((m) => m.id === id);
@@ -36,8 +36,8 @@ function getDepositoryModule(id: DepositoryId) {
   return mod;
 }
 
-function createDepository(id: DepositoryId, projectPath?: string): Depository {
-  return getDepositoryModule(id).create({ projectPath });
+function createDepository(id: DepositoryId, ctx: DepositoryContext = {}): Depository {
+  return getDepositoryModule(id).create(ctx);
 }
 
 /** The project path a depository instance needs, given where an index entry says it lives. */
@@ -57,6 +57,8 @@ export interface SetSecretOptions {
   usage?: 'interactive' | 'unattended';
   rotate?: boolean;
   actor: AuditActor;
+  /** Explicit, one-time user confirmation to create a depository's backing collection when missing (consumed only by `1password`; never a default). */
+  createVault?: boolean;
 }
 
 export interface SetSecretResult {
@@ -91,7 +93,7 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
 
   // env's ref is the bare NAME — the .env file is already located via DepositoryContext.projectPath (D1.9).
   const providedRef = opts.depository === 'env' ? opts.name : buildRef(opts.name, opts.scope, pid);
-  const depository = createDepository(opts.depository, opts.depository === 'env' ? projectPath : undefined);
+  const depository = createDepository(opts.depository, { projectPath, createVault: opts.createVault });
   const op = existing ? 'rotated' : 'set';
 
   let ref: string;
@@ -148,7 +150,7 @@ export async function deleteSecret(name: string, opts: DeleteSecretOptions): Pro
   const index = readIndex();
   const { index: updated, removed } = removeIndexEntry(index, name, opts.scope, pid);
 
-  const depository = createDepository(removed.depository, projectPathFor(removed, opts.cwd));
+  const depository = createDepository(removed.depository, { projectPath: projectPathFor(removed, opts.cwd) });
   try {
     await depository.delete(removed.ref);
   } catch (err) {
@@ -182,7 +184,7 @@ export async function resolveSecret(name: string, opts: ResolveSecretOptions): P
   }
 
   const op = opts.auditOp ?? 'read';
-  const depository = createDepository(entry.depository, projectPathFor(entry, opts.cwd));
+  const depository = createDepository(entry.depository, { projectPath: projectPathFor(entry, opts.cwd) });
   try {
     const value = await depository.resolve(entry.ref);
     appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: true, error: null });
