@@ -2,6 +2,7 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { EnigmaError } from '../../core/errors.js';
 import { RequestStore } from '../../request/store.js';
+import { takeRemoteNote } from '../../remote/index.js';
 import { resolveRequestOutcome } from '../request-outcome.js';
 import { errorResult, textResult } from '../result-text.js';
 
@@ -27,7 +28,12 @@ export function registerAwaitTool(server: McpServer): void {
 
       try {
         const outcome = await resolveRequestOutcome(args.request_id, cwd);
-        return textResult(outcome.text, outcome.isError);
+        // S2.3: this is the one channel a client without URL-mode
+        // elicitation has for learning a tunnel died mid-request — by
+        // mechanism name only, never the URL (docs/api-contracts.md).
+        const remoteNote = takeRemoteNote(args.request_id);
+        const text = remoteNote ? `${outcome.text}\n${remoteNote}` : outcome.text;
+        return textResult(text, outcome.isError);
       } catch {
         return errorResult(
           new EnigmaError({ code: 'E_REQUEST_EXPIRED', message: `request ${args.request_id} expired before it was fulfilled` }),
