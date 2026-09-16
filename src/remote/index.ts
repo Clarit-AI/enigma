@@ -192,7 +192,13 @@ export function __resetForTests(): void {
 
 function stopAllActiveTunnels(): void {
   for (const entry of active.values()) {
-    entry.tunnel?.stop();
+    try {
+      entry.tunnel?.stop();
+    } catch {
+      // One tunnel's stop() throwing must never abandon the rest — that is
+      // exactly the leak this handler exists to prevent, now triggered by
+      // the handler itself (QA finding on PR #35, round 3).
+    }
   }
 }
 
@@ -228,8 +234,18 @@ export function registerShutdownHandlers(): void {
 
   for (const signal of ['SIGINT', 'SIGTERM'] as const) {
     process.once(signal, () => {
-      stopAllActiveTunnels();
-      process.kill(process.pid, signal);
+      // The re-raise must happen no matter what — `finally`, not sequence,
+      // is what actually guarantees that (stopAllActiveTunnels already
+      // isolates each tunnel's own stop() above, but this is the second,
+      // independent layer of protection the round-3 finding asked for: even
+      // if something in this handler threw regardless, the process must
+      // still terminate normally rather than have Ctrl-C silently stop
+      // working).
+      try {
+        stopAllActiveTunnels();
+      } finally {
+        process.kill(process.pid, signal);
+      }
     });
   }
 }

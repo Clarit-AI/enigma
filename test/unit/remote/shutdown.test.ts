@@ -113,4 +113,49 @@ describe('process-level tunnel shutdown', () => {
     expect(tunnelB.stop).toHaveBeenCalled();
     RequestStore.__resetForTests();
   });
+
+  it('on "exit", a first tunnel whose stop() throws does not prevent the second tunnel being stopped (QA finding, round 3)', async () => {
+    const { registerActiveTunnel } = await import('../../../src/remote/index.js');
+    const { RequestStore } = await import('../../../src/request/store.js');
+    RequestStore.__resetForTests();
+
+    const recordA = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    const recordB = RequestStore.create({ kind: 'request', names: ['GITHUB_TOKEN'] });
+    const throwingTunnel: RemoteTunnel = {
+      ...fakeTunnel('https://a.trycloudflare.com'),
+      stop: vi.fn(() => {
+        throw new Error('stop() failed');
+      }),
+    };
+    const secondTunnel = fakeTunnel('https://b.trycloudflare.com');
+    registerActiveTunnel(recordA.id, { tunnel: throwingTunnel });
+    registerActiveTunnel(recordB.id, { tunnel: secondTunnel });
+
+    expect(() => registered.get('exit')?.()).not.toThrow();
+
+    expect(throwingTunnel.stop).toHaveBeenCalled();
+    expect(secondTunnel.stop).toHaveBeenCalled();
+    RequestStore.__resetForTests();
+  });
+
+  it('on SIGINT, a tunnel whose stop() throws does not prevent the signal from being re-raised (QA finding, round 3)', async () => {
+    const { registerActiveTunnel } = await import('../../../src/remote/index.js');
+    const { RequestStore } = await import('../../../src/request/store.js');
+    RequestStore.__resetForTests();
+
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    const throwingTunnel: RemoteTunnel = {
+      ...fakeTunnel('https://x.trycloudflare.com'),
+      stop: vi.fn(() => {
+        throw new Error('stop() failed');
+      }),
+    };
+    registerActiveTunnel(record.id, { tunnel: throwingTunnel });
+
+    expect(() => registered.get('SIGINT')?.()).not.toThrow();
+
+    expect(throwingTunnel.stop).toHaveBeenCalled();
+    expect(killMock).toHaveBeenCalledWith(process.pid, 'SIGINT');
+    RequestStore.__resetForTests();
+  });
 });
