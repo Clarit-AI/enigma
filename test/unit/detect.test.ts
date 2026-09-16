@@ -32,8 +32,8 @@ describe('DEPOSITORY_MODULES', () => {
     if (originalPlatform) Object.defineProperty(process, 'platform', originalPlatform);
   });
 
-  it('registers encrypted, env, keychain, and secret-service', () => {
-    expect(DEPOSITORY_MODULES.map((m) => m.id)).toEqual(['encrypted', 'env', 'keychain', 'secret-service']);
+  it('registers encrypted, env, keychain, secret-service, and 1password', () => {
+    expect(DEPOSITORY_MODULES.map((m) => m.id)).toEqual(['encrypted', 'env', 'keychain', 'secret-service', '1password']);
   });
 
   it('registers keychain and secret-service with prompt profile may-prompt', () => {
@@ -50,12 +50,17 @@ describe('DEPOSITORY_MODULES', () => {
     expect(env?.promptProfile).toBe('none');
   });
 
+  it('registers 1password with prompt profile prompts-each-read', () => {
+    const onepassword = DEPOSITORY_MODULES.find((m) => m.id === '1password');
+    expect(onepassword?.promptProfile).toBe('prompts-each-read');
+  });
+
   it('detectAll reports one result per registered module without prompting', async () => {
     setPlatform('darwin');
     const results = await detectAll();
 
-    expect(results).toHaveLength(4);
-    expect(results.map((r) => r.id).sort()).toEqual(['encrypted', 'env', 'keychain', 'secret-service'].sort());
+    expect(results).toHaveLength(5);
+    expect(results.map((r) => r.id).sort()).toEqual(['encrypted', 'env', 'keychain', 'secret-service', '1password'].sort());
   });
 
   it('detectAll marks keychain available and secret-service unavailable on darwin', async () => {
