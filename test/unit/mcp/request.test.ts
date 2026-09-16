@@ -17,9 +17,25 @@ class FakeChild extends EventEmitter {
 }
 
 const spawnMock = vi.fn();
+/**
+ * Defaults to "cloudflared not found" (matches the fresh-Mac/CI common case,
+ * Issue #12) so every pre-existing test in this file — none of which pass
+ * `remote` — is unaffected: `resolveRemotePreference(undefined)` is `"none"`,
+ * which never calls execFile at all. Only the remote-specific tests below
+ * override this per test.
+ */
+const execFileMock = vi.fn();
+execFileMock.mockImplementation(((_file: string, _args: string[], _opts: unknown, cb: (...cbArgs: unknown[]) => void) => {
+  queueMicrotask(() => cb(Object.assign(new Error('not found'), { code: 'ENOENT' }), '', ''));
+  return new EventEmitter();
+}) as never);
 vi.mock('node:child_process', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:child_process')>();
-  return { ...actual, spawn: (...args: unknown[]) => spawnMock(...args) };
+  return {
+    ...actual,
+    spawn: (...args: unknown[]) => spawnMock(...args),
+    execFile: (...args: unknown[]) => execFileMock(...args),
+  };
 });
 
 const { connectWithCapabilities } = await import('./harness.js');
@@ -39,6 +55,11 @@ describe('enigma_request', () => {
     originalPlatform = process.platform;
     RequestStore.__resetForTests();
     spawnMock.mockReset();
+    execFileMock.mockReset();
+    execFileMock.mockImplementation((_file: string, _args: string[], _opts: unknown, cb: (...cbArgs: unknown[]) => void) => {
+      queueMicrotask(() => cb(Object.assign(new Error('not found'), { code: 'ENOENT' }), '', ''));
+      return new EventEmitter();
+    });
   });
 
   afterEach(async () => {
@@ -281,6 +302,170 @@ describe('enigma_request', () => {
 
     expect(result.isError).toBe(true);
     expect((result.content as Array<{ text: string }>)[0]?.text).toBe('OPENAI_API_KEY: failed (E_REQUEST_CANCELLED)');
+    await pair.close();
+  });
+});
+
+describe('enigma_request remote access (Issue #12)', () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), 'enigma-home-'));
+    originalHome = process.env.ENIGMA_HOME;
+    process.env.ENIGMA_HOME = tmpHome;
+    RequestStore.__resetForTests();
+    spawnMock.mockReset();
+    execFileMock.mockReset();
+  });
+
+  afterEach(async () => {
+    await stopServer();
+    RequestStore.__resetForTests();
+    if (originalHome === undefined) delete process.env.ENIGMA_HOME;
+    else process.env.ENIGMA_HOME = originalHome;
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  function stubCloudflaredMissing(): void {
+    execFileMock.mockImplementation((_file: string, _args: string[], _opts: unknown, cb: (...cbArgs: unknown[]) => void) => {
+      queueMicrotask(() => cb(Object.assign(new Error('not found'), { code: 'ENOENT' }), '', ''));
+      return new EventEmitter();
+    });
+  }
+
+  /** cloudflared's `--version` probe succeeds; its `tunnel --url ...` spawn (via `spawn`, not `execFile`) prints a trycloudflare URL on stderr. */
+  function stubCloudflaredAvailable(): FakeChild {
+    execFileMock.mockImplementation((_file: string, _args: string[], _opts: unknown, cb: (...cbArgs: unknown[]) => void) => {
+      queueMicrotask(() => cb(null, 'cloudflared version 2024.1.0', ''));
+      return new EventEmitter();
+    });
+    const tunnelChild = new FakeChild();
+    spawnMock.mockImplementation(() => {
+      queueMicrotask(() => {
+        tunnelChild.stderr.emit('data', Buffer.from('https://remote-words.trycloudflare.com\n'));
+      });
+      return tunnelChild;
+    });
+    return tunnelChild;
+  }
+
+  it('remote:true + cloudflared missing: E_REMOTE_UNAVAILABLE naming cloudflared, no request created, nothing elicited', async () => {
+    stubCloudflaredMissing();
+    const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+    const elicitHandler = vi.fn();
+    pair.client.setRequestHandler(ElicitRequestSchema, elicitHandler);
+
+    const result = await pair.client.callTool({
+      name: 'enigma_request',
+      arguments: { names: ['OPENAI_API_KEY'], reason: 'test', usage: 'interactive', scope: 'global', remote: true },
+    });
+
+    expect(result.isError).toBe(true);
+    expect((result.content as Array<{ text: string }>)[0]?.text).toContain('E_REMOTE_UNAVAILABLE');
+    expect((result.content as Array<{ text: string }>)[0]?.text).toContain('cloudflared');
+    expect(elicitHandler).not.toHaveBeenCalled();
+    await pair.close();
+  });
+
+  it('remote:"prefer" + cloudflared missing: proceeds locally over the real HTTP round trip and names the fallback in the final text', async () => {
+    stubCloudflaredMissing();
+    const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+    let elicitedUrl = '';
+    pair.client.setRequestHandler(ElicitRequestSchema, async (request) => {
+      if (request.params.mode !== 'url') throw new Error('expected url mode');
+      elicitedUrl = request.params.url;
+      await fetch(request.params.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ OPENAI_API_KEY: SENTINEL, depository: 'encrypted', scope: 'global' }).toString(),
+      });
+      return { action: 'accept' };
+    });
+
+    const result = await pair.client.callTool({
+      name: 'enigma_request',
+      arguments: { names: ['OPENAI_API_KEY'], reason: 'test', usage: 'interactive', scope: 'global', remote: 'prefer' },
+    });
+
+    expect(elicitedUrl).toContain('127.0.0.1');
+    expect(result.isError).toBeFalsy();
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+    expect(text).toContain('Stored OPENAI_API_KEY in encrypted (global)');
+    expect(text).toContain('Remote access unavailable');
+    expect(text).toContain('cloudflared');
+    await pair.close();
+  });
+
+  it('remote:true + cloudflared available: elicits the tunnel URL, and the final text reports remote access was used', async () => {
+    stubCloudflaredAvailable();
+    const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+    let elicitedUrl = '';
+    pair.client.setRequestHandler(ElicitRequestSchema, async (request) => {
+      if (request.params.mode !== 'url') throw new Error('expected url mode');
+      elicitedUrl = request.params.url;
+      return { action: 'accept' };
+    });
+
+    // The tunnel URL (https://remote-words.trycloudflare.com/r/<id>) is a
+    // scrape target, not a real server that can proxy an HTTP round trip in
+    // this test — read back the request id the tool elicited and fulfil it
+    // directly through the store instead, exactly the way the real /r/:id
+    // route does once a human submits the form.
+    const resultPromise = pair.client.callTool({
+      name: 'enigma_request',
+      arguments: { names: ['OPENAI_API_KEY'], reason: 'test', usage: 'interactive', scope: 'global', depository: 'encrypted', remote: true },
+    });
+
+    await vi.waitFor(() => expect(elicitedUrl).toContain('trycloudflare.com'));
+    expect(elicitedUrl).toMatch(/^https:\/\/remote-words\.trycloudflare\.com\/r\/[0-9a-f]{32}$/);
+    const requestId = elicitedUrl.split('/r/')[1]!;
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'user' });
+    RequestStore.fulfill(requestId, [{ name: 'OPENAI_API_KEY', ok: true }]);
+
+    const result = await resultPromise;
+    expect(result.isError).toBeFalsy();
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+    expect(text).toContain('Remote access via cloudflared was used for this request.');
+    expect(text).not.toContain(SENTINEL);
+    await pair.close();
+  });
+
+  it('remote:true + tunnel dies mid-request: the local link still works and the final text names the loss, never the URL', async () => {
+    const tunnelChild = stubCloudflaredAvailable();
+    const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+    let elicitedUrl = '';
+    pair.client.setRequestHandler(ElicitRequestSchema, async (request) => {
+      if (request.params.mode !== 'url') throw new Error('expected url mode');
+      elicitedUrl = request.params.url;
+      return { action: 'accept' };
+    });
+
+    const resultPromise = pair.client.callTool({
+      name: 'enigma_request',
+      arguments: { names: ['OPENAI_API_KEY'], reason: 'test', usage: 'interactive', scope: 'global', depository: 'encrypted', remote: true },
+    });
+
+    await vi.waitFor(() => expect(elicitedUrl).toContain('trycloudflare.com'));
+    const requestId = elicitedUrl.split('/r/')[1]!;
+
+    // The tunnel process dies on its own (not via stop()) before the human
+    // ever submits the form — S2.3.
+    tunnelChild.emit('exit', 137);
+    await Promise.resolve();
+    await Promise.resolve();
+
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'user' });
+    RequestStore.fulfill(requestId, [{ name: 'OPENAI_API_KEY', ok: true }]);
+
+    const result = await resultPromise;
+    expect(result.isError).toBeFalsy();
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+    expect(text).toContain('Stored OPENAI_API_KEY in encrypted (global)');
+    expect(text).toContain('cloudflared');
+    expect(text.toLowerCase()).toContain('lost');
+    expect(text).not.toContain('trycloudflare.com');
+    expect(text).not.toContain(SENTINEL);
     await pair.close();
   });
 });
