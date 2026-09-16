@@ -80,6 +80,21 @@ describe('cmdRun', () => {
     expect(code).toBe(7);
   });
 
+  it('resolves to 128 + signal number when the child is killed by a signal', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
+    const child = new FakeChild();
+    spawnMock.mockImplementation(() => {
+      queueMicrotask(() => child.emit('exit', null, 'SIGTERM'));
+      return child;
+    });
+
+    const code = await cmdRun(['--scope', 'global', '--', 'sleep', '5']);
+
+    const { constants: osConstants } = await import('node:os');
+    const signum = (osConstants.signals as Record<string, number>).SIGTERM!;
+    expect(code).toBe(128 + signum);
+  });
+
   it('aborts before spawning when a --only name cannot be resolved', async () => {
     await expect(cmdRun(['--only', 'NEVER_SET', '--', 'echo', 'hi'])).rejects.toThrow(
       expect.objectContaining({ code: 'E_NOT_FOUND' }),
