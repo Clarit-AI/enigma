@@ -25,14 +25,16 @@ const EMPTY_SECRETS_FILE: SecretsFile = { version: 1, entries: {} };
 
 function readKey(): Buffer | undefined {
   if (!existsSync(keyPath())) return undefined;
-  return readFileSync(keyPath());
+  const key = Buffer.from(readFileSync(keyPath(), 'utf8'), 'base64');
+  if (key.length !== KEY_BYTES) readFailed();
+  return key;
 }
 
 function getOrCreateKey(): Buffer {
   const existing = readKey();
   if (existing) return existing;
   const key = randomBytes(KEY_BYTES);
-  writeFileSync(keyPath(), key, { mode: FILE_MODE });
+  writeFileSync(keyPath(), key.toString('base64'), { mode: FILE_MODE });
   return key;
 }
 
@@ -77,6 +79,7 @@ function createEncryptedDepository(): Depository {
       const file = readSecretsFile();
       file.entries[ref] = encryptValue(value, key);
       writeSecretsFile(file);
+      return ref;
     },
 
     async resolve(ref) {
