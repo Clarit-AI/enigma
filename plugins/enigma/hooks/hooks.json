@@ -9,7 +9,7 @@
     ],
     "PreToolUse": [
       {
-        "matcher": ".*",
+        "matcher": "Read|Bash|Grep|Glob",
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/hooks.mjs\" PreToolUse" }
         ]
@@ -17,7 +17,7 @@
     ],
     "PostToolUse": [
       {
-        "matcher": ".*",
+        "matcher": "Bash|Read|Grep|mcp__.*",
         "hooks": [
           { "type": "command", "command": "node \"${CLAUDE_PLUGIN_ROOT}/dist/hooks.mjs\" PostToolUse" }
         ]
