@@ -1579,6 +1579,7 @@ var RequestStore = {
 // src/storage/dotenv-file.ts
 var BEGIN_MARKER2 = "# enigma:begin";
 var END_MARKER2 = "# enigma:end";
+var INLINE_COMMENT_REASON = 'the unquoted value contains a space then "#", which could start a comment or be part of the secret \u2014 quote the value if the # belongs to it, then rerun import';
 function isAmbiguousUnquoted(raw) {
   return / #/.test(raw);
 }
@@ -1636,11 +1637,13 @@ ${lines[endIdx]}`;
         assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), ambiguous: false, startIdx: i, endIdx });
         i = endIdx + 1;
       } else {
+        const ambiguous = isAmbiguousUnquoted(rest);
         assignments.push({
           name,
           value: rest.trim(),
           valid: NAME_PATTERN.test(name),
-          ambiguous: isAmbiguousUnquoted(rest),
+          ambiguous,
+          ambiguousReason: ambiguous ? INLINE_COMMENT_REASON : void 0,
           startIdx: i,
           endIdx: i
         });
@@ -1648,15 +1651,19 @@ ${lines[endIdx]}`;
       }
       continue;
     }
-    assignments.push({
-      name,
-      value: rest.trim(),
-      valid: NAME_PATTERN.test(name),
-      ambiguous: isAmbiguousUnquoted(rest),
-      startIdx: i,
-      endIdx: i
-    });
-    i++;
+    {
+      const ambiguous = isAmbiguousUnquoted(rest);
+      assignments.push({
+        name,
+        value: rest.trim(),
+        valid: NAME_PATTERN.test(name),
+        ambiguous,
+        ambiguousReason: ambiguous ? INLINE_COMMENT_REASON : void 0,
+        startIdx: i,
+        endIdx: i
+      });
+      i++;
+    }
   }
   return assignments;
 }
@@ -1674,6 +1681,7 @@ function parseDotEnv(content) {
   const order = [];
   const values = /* @__PURE__ */ new Map();
   const ambiguousFlags = /* @__PURE__ */ new Map();
+  const ambiguousReasons = /* @__PURE__ */ new Map();
   const invalidSeen = /* @__PURE__ */ new Set();
   const duplicateSeen = /* @__PURE__ */ new Set();
   for (const a of assignments) {
@@ -1685,9 +1693,18 @@ function parseDotEnv(content) {
     else order.push(a.name);
     values.set(a.name, a.value);
     ambiguousFlags.set(a.name, a.ambiguous);
+    ambiguousReasons.set(a.name, a.ambiguousReason);
   }
   return {
-    entries: order.map((name) => ({ name, value: values.get(name), ambiguous: ambiguousFlags.get(name) })),
+    entries: order.map((name) => {
+      const isDuplicate = duplicateSeen.has(name);
+      return {
+        name,
+        value: values.get(name),
+        ambiguous: isDuplicate || ambiguousFlags.get(name),
+        ambiguousReason: isDuplicate ? `${name} is assigned more than once in this file \u2014 remove the duplicate line(s) and rerun import` : ambiguousReasons.get(name)
+      };
+    }),
     invalidNames: [...invalidSeen],
     duplicateNames: [...duplicateSeen]
   };
@@ -1718,17 +1735,28 @@ function removeDotEnvEntries(content, names, opts = {}) {
 
 // src/storage/import-commit.ts
 import { randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync8, readFileSync as readFileSync5, renameSync as renameSync2, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync5, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 var FILE_MODE4 = 384;
 function writeFileAtomic(path, content, mode) {
   const tmpPath = `${path}.${randomBytes4(6).toString("hex")}.tmp`;
-  writeFileSync4(tmpPath, content, { mode });
-  renameSync2(tmpPath, path);
+  try {
+    writeFileSync4(tmpPath, content, { mode });
+    renameSync2(tmpPath, path);
+    return { ok: true };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    try {
+      if (existsSync8(tmpPath)) unlinkSync(tmpPath);
+      return { ok: false, error };
+    } catch {
+      return { ok: false, error, leftoverPath: tmpPath };
+    }
+  }
 }
 function ambiguousValueError(entry, envFilePath) {
   return new EnigmaError({
     code: "E_VALUE_AMBIGUOUS",
-    message: `value for ${entry.name} in ${envFilePath} contains an unquoted " #", which could start a comment or be part of the secret \u2014 quote the value if the # belongs to it, then rerun import`,
+    message: `${entry.name} in ${envFilePath} is ambiguous: ${entry.ambiguousReason ?? "the value or its assignment could not be resolved unambiguously"}`,
     secretName: entry.name
   });
 }
@@ -1788,9 +1816,23 @@ async function commitImport(opts) {
   }
   const movedComment = toRemove.length === 0 || opts.depository === "env" ? void 0 : `# Moved to Enigma (${opts.depository}) by \`enigma import\` on ${(/* @__PURE__ */ new Date()).toISOString()}: ${toRemove.join(", ")}`;
   const rewritten = toRemove.length > 0 ? removeDotEnvEntries(currentContent, toRemove, { comment: movedComment }) : currentContent;
-  const fileRewritten = rewritten !== currentContent;
-  if (fileRewritten) writeFileAtomic(opts.envFilePath, rewritten, FILE_MODE4);
-  return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten, warnings };
+  const needsWrite = rewritten !== currentContent;
+  if (!needsWrite) {
+    return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: false, warnings };
+  }
+  const writeResult = writeFileAtomic(opts.envFilePath, rewritten, FILE_MODE4);
+  if (!writeResult.ok) {
+    warnings.push(
+      `Failed to rewrite ${opts.envFilePath} (${writeResult.error}). The migrated secret(s) (${toRemove.join(", ")}) are safely stored, but their plaintext line(s) were left in place because the file could not be rewritten \u2014 rerun import once the issue is fixed, or remove them from .env manually.`
+    );
+    if (writeResult.leftoverPath) {
+      warnings.push(
+        `A temporary file containing the full rewritten .env content was left behind at ${writeResult.leftoverPath} and could not be removed automatically \u2014 delete it manually as soon as possible.`
+      );
+    }
+    return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: false, warnings };
+  }
+  return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: true, warnings };
 }
 
 // src/web/server.ts
