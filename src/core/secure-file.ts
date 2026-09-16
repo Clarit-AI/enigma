@@ -1,6 +1,7 @@
 import { mkdirSync, appendFileSync, chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { randomBytes } from 'node:crypto';
+import { EnigmaError, type EnigmaErrorCode } from './errors.js';
 
 const FILE_MODE = 0o600;
 const DIR_MODE = 0o700;
@@ -11,9 +12,20 @@ function ensureParentDir(path: string): void {
   chmodSync(dir, DIR_MODE);
 }
 
-export function readJsonFile<T>(path: string, fallback: T): T {
+/**
+ * Reads and parses a JSON file, returning `fallback` when it doesn't exist.
+ * When `corruptErrorCode` is given, an unparsable file throws an
+ * `EnigmaError` with that code instead of a raw `SyntaxError`.
+ */
+export function readJsonFile<T>(path: string, fallback: T, corruptErrorCode?: EnigmaErrorCode): T {
   if (!existsSync(path)) return fallback;
-  return JSON.parse(readFileSync(path, 'utf8')) as T;
+  const raw = readFileSync(path, 'utf8');
+  try {
+    return JSON.parse(raw) as T;
+  } catch (err) {
+    if (!corruptErrorCode) throw err;
+    throw new EnigmaError({ code: corruptErrorCode, message: `failed to parse ${path}: not valid JSON` });
+  }
 }
 
 /** Writes JSON atomically (tmp file + rename) at mode 0600, creating the parent dir at 0700. */

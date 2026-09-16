@@ -1,4 +1,4 @@
-import { mkdtempSync, readFileSync, rmSync, statSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -51,6 +51,18 @@ describe('index-store', () => {
 
   it('reads an empty index when the file does not exist', () => {
     expect(readIndex()).toEqual({ version: 1, entries: [] });
+  });
+
+  it('a corrupt index.json throws EnigmaError E_INDEX_CORRUPT, never a raw SyntaxError (A3)', () => {
+    writeFileSync(indexPath(), '{ not valid json');
+
+    try {
+      readIndex();
+      expect.unreachable('readIndex should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(EnigmaError);
+      expect((err as EnigmaError).code).toBe('E_INDEX_CORRUPT');
+    }
   });
 
   it('writes index.json at mode 0600 (dir 0700) and never contains a value', () => {

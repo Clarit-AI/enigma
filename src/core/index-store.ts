@@ -38,7 +38,7 @@ export function buildRef(name: string, scope: Scope, projectId?: string): string
 }
 
 export function readIndex(): IndexFile {
-  return readJsonFile(indexPath(), EMPTY_INDEX);
+  return readJsonFile(indexPath(), EMPTY_INDEX, 'E_INDEX_CORRUPT');
 }
 
 export function writeIndex(index: IndexFile): void {

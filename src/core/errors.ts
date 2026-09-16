@@ -6,7 +6,9 @@ export type EnigmaErrorCode =
   | 'E_READ_FAILED'
   | 'E_REQUEST_EXPIRED'
   | 'E_REQUEST_USED'
-  | 'E_AMBIGUOUS_SCOPE';
+  | 'E_AMBIGUOUS_SCOPE'
+  | 'E_SCOPE_INVALID'
+  | 'E_INDEX_CORRUPT';
 
 export interface EnigmaErrorOptions {
   code: EnigmaErrorCode;
