@@ -22,9 +22,16 @@ describe('parseDotEnv', () => {
     expect(result.entries).toEqual([{ name: 'OPENAI_API_KEY', value: 'sk-abc', ambiguous: false }]);
   });
 
-  it('duplicate key: last value wins, and the name is reported as a duplicate', () => {
+  it('duplicate key: reported as a duplicate AND flagged ambiguous (Issue #13 review, round 3, item 1) — neither occurrence is silently chosen', () => {
     const result = parseDotEnv('OPENAI_API_KEY=first\nOPENAI_API_KEY=second\n');
-    expect(result.entries).toEqual([{ name: 'OPENAI_API_KEY', value: 'second', ambiguous: false }]);
+    expect(result.entries).toEqual([
+      {
+        name: 'OPENAI_API_KEY',
+        value: 'second',
+        ambiguous: true,
+        ambiguousReason: expect.stringContaining('assigned more than once'),
+      },
+    ]);
     expect(result.duplicateNames).toEqual(['OPENAI_API_KEY']);
   });
 
@@ -76,12 +83,16 @@ describe('parseDotEnv', () => {
   describe('ambiguous inline-comment-like values (Issue #13 review, round 2, A2)', () => {
     it('an unquoted value with " #" is flagged ambiguous, refusing to guess whether it is a comment or part of the secret', () => {
       const result = parseDotEnv('PORT=3000 # dev port\n');
-      expect(result.entries).toEqual([{ name: 'PORT', value: '3000 # dev port', ambiguous: true }]);
+      expect(result.entries).toEqual([
+        { name: 'PORT', value: '3000 # dev port', ambiguous: true, ambiguousReason: expect.stringContaining('quote the value') },
+      ]);
     });
 
     it('a passphrase-shaped value with " #" is flagged ambiguous too, rather than being silently truncated', () => {
       const result = parseDotEnv('PASSPHRASE=hunter2 #1\n');
-      expect(result.entries).toEqual([{ name: 'PASSPHRASE', value: 'hunter2 #1', ambiguous: true }]);
+      expect(result.entries).toEqual([
+        { name: 'PASSPHRASE', value: 'hunter2 #1', ambiguous: true, ambiguousReason: expect.stringContaining('quote the value') },
+      ]);
     });
 
     it('a quoted value containing "#" is never ambiguous, whatever it contains', () => {
@@ -104,9 +115,34 @@ describe('parseDotEnv', () => {
       expect(result.entries).toEqual([{ name: 'TOKEN', value: 'abc#def', ambiguous: false }]);
     });
 
-    it('the duplicate-key last-value-wins rule also carries the LAST occurrence\'s ambiguity flag', () => {
+    it('a duplicated name is ambiguous on the duplicate-key trigger even before considering its value', () => {
       const result = parseDotEnv('PORT=3000\nPORT=8080 # overridden\n');
-      expect(result.entries).toEqual([{ name: 'PORT', value: '8080 # overridden', ambiguous: true }]);
+      expect(result.entries).toEqual([
+        { name: 'PORT', value: '8080 # overridden', ambiguous: true, ambiguousReason: expect.stringContaining('assigned more than once') },
+      ]);
+    });
+  });
+
+  describe('duplicate keys (Issue #13 review, round 3, item 1)', () => {
+    it('a duplicated key with two DIFFERENT values is flagged ambiguous — neither the first (never migrated) nor the last is silently chosen', () => {
+      const content = 'API_KEY=real-production-key\nAPI_KEY=placeholder\n';
+      const result = parseDotEnv(content);
+      expect(result.entries).toEqual([
+        {
+          name: 'API_KEY',
+          value: 'placeholder',
+          ambiguous: true,
+          ambiguousReason: expect.stringContaining('assigned more than once'),
+        },
+      ]);
+      expect(result.duplicateNames).toEqual(['API_KEY']);
+    });
+
+    it('three or more occurrences of the same name are still just one ambiguous entry', () => {
+      const result = parseDotEnv('KEY=a\nKEY=b\nKEY=c\n');
+      expect(result.entries).toHaveLength(1);
+      expect(result.entries[0]?.ambiguous).toBe(true);
+      expect(result.duplicateNames).toEqual(['KEY']);
     });
   });
 });
@@ -124,11 +160,18 @@ describe('removeDotEnvEntries', () => {
     expect(result).toBe('KEEP_ME=1\n# moved\nALSO_KEEP=2\n');
   });
 
-  it('removes every occurrence of a duplicated key', () => {
-    const content = 'OPENAI_API_KEY=first\nKEEP=1\nOPENAI_API_KEY=second\n';
-    const result = removeDotEnvEntries(content, ['OPENAI_API_KEY']);
-    expect(result).toBe('KEEP=1\n');
-  });
+  it(
+    'a low-level, "do what it\'s told" primitive: given an explicit name, it removes every physical occurrence, ' +
+      'with no awareness of duplication or migration safety. This is NOT how the product handles a duplicated ' +
+      'key in real use — parseDotEnv flags a duplicated name ambiguous and commitImport refuses it before this ' +
+      'function is ever asked to remove it for that reason (Issue #13 review, round 3, item 1: an earlier version ' +
+      "of this test asserted duplicate-key removal as the product's real behavior, which was itself the defect).",
+    () => {
+      const content = 'OPENAI_API_KEY=first\nKEEP=1\nOPENAI_API_KEY=second\n';
+      const result = removeDotEnvEntries(content, ['OPENAI_API_KEY']);
+      expect(result).toBe('KEEP=1\n');
+    },
+  );
 
   it('removes every physical line of a multi-line quoted value as one unit', () => {
     const content = 'KEEP=1\nPRIVATE_KEY="line1\nline2\nline3"\nALSO_KEEP=2\n';

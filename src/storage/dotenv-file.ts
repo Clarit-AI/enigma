@@ -11,22 +11,36 @@ export interface ParsedDotEnvEntry {
   name: string;
   value: string;
   /**
-   * True when an UNQUOTED value contains a space followed by `#` (e.g.
-   * `PORT=3000 # dev port`) — ambiguous whether the `#` starts a trailing
-   * comment or is itself part of the secret (e.g. a passphrase like
-   * `hunter2 #1`). Never auto-resolved either way (Issue #13 review, round
-   * 2, A2): the caller must refuse the entry rather than guess. A quoted
-   * value is never ambiguous — its boundary is already explicit.
+   * True when this entry is ambiguous and must be refused rather than
+   * guessed at (Issue #13 review, round 2/3) — one mechanism, two triggers:
+   *
+   * - an UNQUOTED value contains a space followed by `#` (e.g.
+   *   `PORT=3000 # dev port`) — ambiguous whether the `#` starts a trailing
+   *   comment or is itself part of the secret (e.g. a passphrase like
+   *   `hunter2 #1`); or
+   * - the name is assigned more than once in the file. Folding to the last
+   *   value and removing every physical line (the original design) silently
+   *   discards an earlier occurrence's value with no depository copy
+   *   anywhere; removing only the last occurrence is worse, not better — it
+   *   promotes the shadowed earlier line to the file's only value for that
+   *   name, silently changing what the application loads. Every removal
+   *   choice is wrong, so none is taken: refuse instead.
+   *
+   * A quoted value is never ambiguous on the first trigger — its boundary
+   * is already explicit — but IS still ambiguous on the second if its name
+   * is duplicated.
    */
   ambiguous: boolean;
+  /** Set iff `ambiguous`: a short, user-facing reason a caller can surface verbatim in a refusal message. */
+  ambiguousReason?: string;
 }
 
 export interface ParseDotEnvResult {
-  /** One entry per distinct valid name, in first-seen order, holding the LAST value assigned to it (shell/dotenv semantics). */
+  /** One entry per distinct valid name, in first-seen order, holding the LAST value assigned to it (shell/dotenv semantics) — except a duplicated name, which is flagged `ambiguous` instead of resolved either way; see `ParsedDotEnvEntry.ambiguousReason`. */
   entries: ParsedDotEnvEntry[];
   /** Names that don't match the canonical `^[A-Z][A-Z0-9_]*$` pattern (src/core/naming.ts) — never imported, their line(s) left untouched. */
   invalidNames: string[];
-  /** Valid names assigned more than once; every occurrence is still removed on migration (only the last value is imported). */
+  /** Valid names assigned more than once. Reported for visibility; the corresponding entry is also `ambiguous` and refused rather than migrated. */
   duplicateNames: string[];
 }
 
@@ -35,10 +49,14 @@ interface ScannedAssignment {
   value: string;
   valid: boolean;
   ambiguous: boolean;
+  ambiguousReason?: string;
   startIdx: number;
   /** Inclusive. */
   endIdx: number;
 }
+
+const INLINE_COMMENT_REASON =
+  'the unquoted value contains a space then "#", which could start a comment or be part of the secret — quote the value if the # belongs to it, then rerun import';
 
 /** An unquoted raw remainder is ambiguous when it contains a space immediately before `#` — the classic inline-comment signal most dotenv readers use, so we must not guess which side of it the user meant. */
 function isAmbiguousUnquoted(raw: string): boolean {
@@ -114,11 +132,13 @@ function scanAssignments(lines: string[], block: { beginIdx: number; endIdx: num
         assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), ambiguous: false, startIdx: i, endIdx });
         i = endIdx + 1;
       } else {
+        const ambiguous = isAmbiguousUnquoted(rest);
         assignments.push({
           name,
           value: rest.trim(),
           valid: NAME_PATTERN.test(name),
-          ambiguous: isAmbiguousUnquoted(rest),
+          ambiguous,
+          ambiguousReason: ambiguous ? INLINE_COMMENT_REASON : undefined,
           startIdx: i,
           endIdx: i,
         });
@@ -127,15 +147,19 @@ function scanAssignments(lines: string[], block: { beginIdx: number; endIdx: num
       continue;
     }
 
-    assignments.push({
-      name,
-      value: rest.trim(),
-      valid: NAME_PATTERN.test(name),
-      ambiguous: isAmbiguousUnquoted(rest),
-      startIdx: i,
-      endIdx: i,
-    });
-    i++;
+    {
+      const ambiguous = isAmbiguousUnquoted(rest);
+      assignments.push({
+        name,
+        value: rest.trim(),
+        valid: NAME_PATTERN.test(name),
+        ambiguous,
+        ambiguousReason: ambiguous ? INLINE_COMMENT_REASON : undefined,
+        startIdx: i,
+        endIdx: i,
+      });
+      i++;
+    }
   }
   return assignments;
 }
@@ -158,6 +182,7 @@ export function parseDotEnv(content: string): ParseDotEnvResult {
   const order: string[] = [];
   const values = new Map<string, string>();
   const ambiguousFlags = new Map<string, boolean>();
+  const ambiguousReasons = new Map<string, string | undefined>();
   const invalidSeen = new Set<string>();
   const duplicateSeen = new Set<string>();
 
@@ -170,23 +195,41 @@ export function parseDotEnv(content: string): ParseDotEnvResult {
     else order.push(a.name);
     values.set(a.name, a.value);
     ambiguousFlags.set(a.name, a.ambiguous);
+    ambiguousReasons.set(a.name, a.ambiguousReason);
   }
 
   return {
-    entries: order.map((name) => ({ name, value: values.get(name)!, ambiguous: ambiguousFlags.get(name)! })),
+    entries: order.map((name) => {
+      const isDuplicate = duplicateSeen.has(name);
+      return {
+        name,
+        value: values.get(name)!,
+        ambiguous: isDuplicate || ambiguousFlags.get(name)!,
+        ambiguousReason: isDuplicate
+          ? `${name} is assigned more than once in this file — remove the duplicate line(s) and rerun import`
+          : ambiguousReasons.get(name),
+      };
+    }),
     invalidNames: [...invalidSeen],
     duplicateNames: [...duplicateSeen],
   };
 }
 
 /**
- * Removes every raw assignment line for each name in `names` (every
- * occurrence, per the duplicate-key decision above), preserving every other
- * line byte-identical — including the file's EOL style and whether it ends
- * with a trailing newline. When `opts.comment` is given, the first removed
- * line's position is replaced with that single comment line instead of being
- * elided entirely; omit it to remove silently (the `env` depository case,
- * where the managed block itself already documents the move).
+ * Removes every raw assignment line for each name in `names`, preserving
+ * every other line byte-identical — including the file's EOL style and
+ * whether it ends with a trailing newline. When `opts.comment` is given, the
+ * first removed line's position is replaced with that single comment line
+ * instead of being elided entirely; omit it to remove silently (the `env`
+ * depository case, where the managed block itself already documents the
+ * move).
+ *
+ * This is a low-level, "do what it's told" primitive: it removes every
+ * physical occurrence of a name without judging whether that's safe. The
+ * real safety property — a duplicated name is never migrated or removed in
+ * the first place — lives one layer up, in `parseDotEnv` flagging it
+ * `ambiguous` and `commitImport` refusing it (Issue #13 review, round 3):
+ * this function is never asked to remove a duplicated name via that path.
  */
 export function removeDotEnvEntries(content: string, names: string[], opts: { comment?: string } = {}): string {
   const eol = detectEol(content);
