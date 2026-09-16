@@ -36,7 +36,7 @@ describe('cli main dispatch', () => {
     expect(stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toContain("unknown command 'bogus'");
   });
 
-  it.each(['request', 'reveal', 'import', 'install'])('exits 2 for the out-of-scope command %s', async (command) => {
+  it.each(['request', 'reveal', 'install'])('exits 2 for the out-of-scope command %s', async (command) => {
     const code = await main([command]);
     expect(code).toBe(2);
     expect(stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toContain(`enigma ${command}: not yet implemented`);
@@ -45,6 +45,12 @@ describe('cli main dispatch', () => {
   it('maps a UsageError to exit code 2', async () => {
     const code = await main(['remove']); // missing NAME
     expect(code).toBe(2);
+  });
+
+  it('maps import\'s E_NOT_FOUND to exit code 1 (import is implemented, Issue #13)', async () => {
+    const code = await main(['import', 'nonexistent.env', '--depository', 'encrypted']);
+    expect(code).toBe(1);
+    expect(stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toContain('E_NOT_FOUND');
   });
 
   it('maps an EnigmaError to exit code 1 with its code printed', async () => {

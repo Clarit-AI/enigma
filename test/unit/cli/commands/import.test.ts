@@ -1,0 +1,155 @@
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cmdImport } from '../../../../src/cli/commands/import.js';
+import { RequestStore } from '../../../../src/request/store.js';
+import { listSecrets } from '../../../../src/storage/manager.js';
+import { startServer, stopServer } from '../../../../src/web/server.js';
+
+const SENTINEL = 'sk-sentinel-value-should-never-appear';
+
+describe('cmdImport', () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+  let tmpProject: string;
+  let originalCwd: string;
+  let envFilePath: string;
+  let stdoutSpy: ReturnType<typeof vi.spyOn>;
+  let stderrSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), 'enigma-home-'));
+    originalHome = process.env.ENIGMA_HOME;
+    process.env.ENIGMA_HOME = tmpHome;
+    tmpProject = realpathSync(mkdtempSync(join(tmpdir(), 'enigma-project-')));
+    mkdirSync(join(tmpProject, '.git'));
+    envFilePath = join(tmpProject, '.env');
+    originalCwd = process.cwd();
+    process.chdir(tmpProject);
+    RequestStore.__resetForTests();
+    stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(async () => {
+    await stopServer();
+    RequestStore.__resetForTests();
+    process.chdir(originalCwd);
+    if (originalHome === undefined) delete process.env.ENIGMA_HOME;
+    else process.env.ENIGMA_HOME = originalHome;
+    rmSync(tmpHome, { recursive: true, force: true });
+    rmSync(tmpProject, { recursive: true, force: true });
+    stdoutSpy.mockRestore();
+    stderrSpy.mockRestore();
+  });
+
+  function stdoutText(): string {
+    return stdoutSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+  }
+
+  it('rejects more than one positional with UsageError', async () => {
+    const { UsageError } = await import('../../../../src/cli/args.js');
+    await expect(cmdImport(['.env', 'extra'])).rejects.toThrow(UsageError);
+  });
+
+  it('rejects a missing file with E_NOT_FOUND', async () => {
+    await expect(cmdImport(['.env', '--depository', 'encrypted'])).rejects.toThrow(
+      expect.objectContaining({ code: 'E_NOT_FOUND' }),
+    );
+  });
+
+  it('AC1: --depository encrypted imports every key, rewrites the file, warns about a missing .gitignore, and never prints the value', async () => {
+    writeFileSync(
+      envFilePath,
+      `# a header comment, kept as-is\n\nOPENAI_API_KEY=${SENTINEL}\nGITHUB_TOKEN=ghp-xyz\nlower_case_ignored=untouched\n`,
+    );
+
+    const code = await cmdImport(['.env', '--depository', 'encrypted']);
+
+    expect(code).toBe(0);
+    const output = stdoutText();
+    expect(output).not.toContain(SENTINEL);
+    expect(output).toContain('OPENAI_API_KEY');
+    expect(output).toContain('warning:');
+    expect(output).toContain('lower_case_ignored');
+
+    const rewritten = readFileSync(envFilePath, 'utf8');
+    expect(rewritten).toContain('# a header comment, kept as-is\n');
+    expect(rewritten).toContain('lower_case_ignored=untouched\n');
+    expect(rewritten).not.toContain(SENTINEL);
+
+    const stored = listSecrets({ scope: 'all', cwd: tmpProject });
+    expect(stored.map((e) => e.name).sort()).toEqual(['GITHUB_TOKEN', 'OPENAI_API_KEY']);
+  });
+
+  it('AC2: --depository env moves values into the managed block only', async () => {
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
+
+    const code = await cmdImport(['.env', '--depository', 'env']);
+
+    expect(code).toBe(0);
+    const rewritten = readFileSync(envFilePath, 'utf8');
+    expect(rewritten).toContain('# enigma:begin');
+    expect(rewritten.match(new RegExp(SENTINEL, 'g'))).toHaveLength(1);
+  });
+
+  it('AC4: --json includes warnings[] for a missing .gitignore', async () => {
+    writeFileSync(envFilePath, 'OPENAI_API_KEY=sk-abc\n');
+
+    await cmdImport(['.env', '--depository', 'encrypted', '--json']);
+
+    const parsed = JSON.parse(stdoutText()) as { warnings: string[]; imported: string[] };
+    expect(parsed.imported).toEqual(['OPENAI_API_KEY']);
+    expect(parsed.warnings.some((w) => w.includes('.env is not gitignored'))).toBe(true);
+  });
+
+  it('emits nothing destructive and exits 0 when the file has no importable keys', async () => {
+    writeFileSync(envFilePath, '# just a comment\n');
+    const code = await cmdImport(['.env', '--depository', 'encrypted']);
+    expect(code).toBe(0);
+    expect(readFileSync(envFilePath, 'utf8')).toBe('# just a comment\n');
+  });
+
+  it('a partial failure leaves .env untouched and exits 1', async () => {
+    writeFileSync(envFilePath, 'OPENAI_API_KEY=first\n');
+    await cmdImport(['.env', '--depository', 'encrypted']);
+    writeFileSync(envFilePath, 'OPENAI_API_KEY=second\nGITHUB_TOKEN=ghp-xyz\n');
+
+    const code = await cmdImport(['.env', '--depository', 'encrypted']);
+
+    expect(code).toBe(1);
+    expect(readFileSync(envFilePath, 'utf8')).toBe('OPENAI_API_KEY=second\nGITHUB_TOKEN=ghp-xyz\n');
+  });
+
+  it('AC3: without --depository, starts the server, prints a URL, and completes once the picker is submitted', async () => {
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
+
+    const importPromise = cmdImport(['.env']);
+
+    // Wait for the CLI to create the RequestStore record and print the URL.
+    await vi.waitFor(() => {
+      expect(stderrSpy.mock.calls.some((c: unknown[]) => String(c[0]).includes('/i/'))).toBe(true);
+    });
+
+    const printed = stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    const match = printed.match(/\/i\/([0-9a-f]{32})/);
+    expect(match).not.toBeNull();
+    const id = match![1]!;
+
+    const handle = await startServer();
+    const postResp = await fetch(`${handle.origin}/i/${id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+    });
+    expect(postResp.status).toBe(200);
+
+    const code = await importPromise;
+    expect(code).toBe(0);
+    expect(stdoutText()).not.toContain(SENTINEL);
+
+    const stored = listSecrets({ scope: 'all', cwd: tmpProject });
+    expect(stored.map((e) => e.name)).toEqual(['OPENAI_API_KEY']);
+  });
+});

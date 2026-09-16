@@ -4,8 +4,11 @@ import { platform, release } from 'node:os';
 import { promisify } from 'node:util';
 import { parseArgs } from '../args.js';
 import { detectAll } from '../../storage/detect.js';
+import { listSecrets } from '../../storage/manager.js';
+import { loadProjectManifest } from '../../core/config.js';
 import { readIndex } from '../../core/index-store.js';
 import { auditLogPath, configPath, enigmaHome, indexPath, keyPath, secretsPath } from '../../core/paths.js';
+import { findProjectPath } from '../../core/project.js';
 import { EnigmaError } from '../../core/errors.js';
 
 const execFileAsync = promisify(execFile);
@@ -44,6 +47,11 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
     secretsFilePresent: existsSync(secretsPath()),
   };
 
+  const cwd = process.cwd();
+  const manifest = loadProjectManifest(findProjectPath(cwd));
+  const registeredNames = new Set(listSecrets({ scope: 'all', cwd }).map((e) => e.name));
+  const manifestGaps = Object.keys(manifest.secrets).filter((name) => !registeredNames.has(name));
+
   const report = {
     platform: `${platform()} ${release()}`,
     depositories,
@@ -58,6 +66,7 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
     },
     index,
     vault,
+    manifestGaps,
   };
 
   if (json) {
@@ -76,6 +85,7 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
     `Index: ${index.ok ? `ok (${index.entries} entries)` : `ERROR: ${index.error}`}`,
     `Vault key: ${vault.keyPresent ? 'present' : 'missing'}`,
     `Vault file: ${vault.secretsFilePresent ? 'present' : 'missing'}`,
+    `Manifest gaps: ${manifestGaps.length === 0 ? 'none' : manifestGaps.join(', ')}`,
   ];
   process.stdout.write(`${lines.join('\n')}\n`);
   return 0;

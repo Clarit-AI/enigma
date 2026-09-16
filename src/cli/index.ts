@@ -2,6 +2,7 @@ import { UsageError } from './args.js';
 import { cmdAdd } from './commands/add.js';
 import { cmdDoctor } from './commands/doctor.js';
 import { cmdGet } from './commands/get.js';
+import { cmdImport } from './commands/import.js';
 import { cmdList } from './commands/list.js';
 import { cmdMove } from './commands/move.js';
 import { cmdRemove } from './commands/remove.js';
@@ -18,9 +19,10 @@ Commands:
   move NAME --to ID [--scope project|global]
   run [--only A,B] [--scope project|global] -- <command> [args...]
   get NAME [--scope project|global]
+  import [PATH] [--depository ID] [--json]
   doctor [--json]
 
-Not yet implemented: request, reveal, import, install
+Not yet implemented: request, reveal, install
 `;
 
 const COMMANDS: Record<string, (argv: string[]) => Promise<number>> = {
@@ -31,9 +33,9 @@ const COMMANDS: Record<string, (argv: string[]) => Promise<number>> = {
   run: cmdRun,
   get: cmdGet,
   doctor: cmdDoctor,
+  import: cmdImport,
   request: notImplemented('request'),
   reveal: notImplemented('reveal'),
-  import: notImplemented('import'),
   install: notImplemented('install'),
 };
 
