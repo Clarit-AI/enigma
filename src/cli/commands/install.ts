@@ -26,10 +26,30 @@ export function claudeSettingsPath(): string {
   return join(configDir, 'settings.json');
 }
 
-function readSettings(path: string): ClaudeSettings {
-  if (!existsSync(path)) return {};
+/** The on-disk formatting of an existing settings.json, reproduced on write so `--uninstall`
+ * restores the original bytes instead of just JSON-equivalent content (a hand-formatted or
+ * version-controlled settings.json shouldn't get its whole file reformatted by this command). */
+interface SettingsStyle {
+  indent: string;
+  trailingNewline: boolean;
+}
+
+/** Used only when creating a settings.json that didn't exist before — there is no prior style to preserve. */
+const DEFAULT_STYLE: SettingsStyle = { indent: '  ', trailingNewline: true };
+
+/** Detects indent width/character from the first indented line, and whether the file ended in a
+ * newline. Not a general formatter: a single-line (compact) file has no indentation to detect and
+ * falls back to the default, which is an accepted, narrow simplification — the fixtures this guards
+ * against (hand-edited or version-controlled settings.json) are pretty-printed in practice. */
+function detectStyle(raw: string): SettingsStyle {
+  const indentMatch = raw.match(/\n([ \t]+)\S/);
+  return { indent: indentMatch?.[1] ?? DEFAULT_STYLE.indent, trailingNewline: raw.endsWith('\n') };
+}
+
+function readSettings(path: string): { settings: ClaudeSettings; style: SettingsStyle } {
+  if (!existsSync(path)) return { settings: {}, style: DEFAULT_STYLE };
   const raw = readFileSync(path, 'utf8');
-  if (raw.trim() === '') return {};
+  if (raw.trim() === '') return { settings: {}, style: DEFAULT_STYLE };
 
   let parsed: unknown;
   try {
@@ -46,7 +66,7 @@ function readSettings(path: string): ClaudeSettings {
       message: `${path} must contain a JSON object. Fix or remove it by hand, then run enigma install again.`,
     });
   }
-  return parsed as ClaudeSettings;
+  return { settings: parsed as ClaudeSettings, style: detectStyle(raw) };
 }
 
 /** Rejects a `settings.json` where `key` already exists but isn't a plain object — writing through it would silently discard whatever the user had there. */
@@ -66,18 +86,44 @@ function isEnigmaMarketplaceSource(entry: MarketplaceSource | undefined): boolea
   return entry?.source?.source === 'github' && entry.source?.repo === REPO;
 }
 
-function writeSettingsAtomic(path: string, settings: ClaudeSettings): void {
-  mkdirSync(dirname(path), { recursive: true });
+function errorReason(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+/** Writes minimally: only `enabledPlugins`/`extraKnownMarketplaces` are touched (see `cmdInstall`),
+ * and this function's own job is to reproduce the original file's formatting exactly rather than
+ * reformat the whole thing (`style`, from `detectStyle`). A directory-creation failure and a
+ * file-write failure are reported separately — they're different problems for the user to fix,
+ * and collapsing them into one message would point at the wrong path. */
+function writeSettingsAtomic(path: string, settings: ClaudeSettings, style: SettingsStyle): void {
+  const dir = dirname(path);
+  try {
+    mkdirSync(dir, { recursive: true });
+  } catch (err) {
+    throw new EnigmaError({
+      code: 'E_CLAUDE_SETTINGS_UNWRITABLE',
+      message: `Could not create or access the settings directory ${dir}: ${errorReason(err)}. Fix its permissions, then run enigma install again.`,
+    });
+  }
+
   const tmpPath = `${path}.enigma-install-${process.pid}.tmp`;
-  writeFileSync(tmpPath, `${JSON.stringify(settings, null, 2)}\n`, 'utf8');
-  renameSync(tmpPath, path);
+  const body = JSON.stringify(settings, null, style.indent);
+  try {
+    writeFileSync(tmpPath, style.trailingNewline ? `${body}\n` : body, 'utf8');
+    renameSync(tmpPath, path);
+  } catch (err) {
+    throw new EnigmaError({
+      code: 'E_CLAUDE_SETTINGS_UNWRITABLE',
+      message: `Could not write ${path}: ${errorReason(err)}. Fix its permissions, then run enigma install again.`,
+    });
+  }
 }
 
 export async function cmdInstall(argv: string[]): Promise<number> {
   const { flags } = parseArgs(argv, { boolean: ['uninstall'] });
   const uninstall = Boolean(flags.uninstall);
   const path = claudeSettingsPath();
-  const before = readSettings(path);
+  const { settings: before, style } = readSettings(path);
 
   const enabledPlugins = expectRecord(before, 'enabledPlugins', path) as Record<string, boolean>;
   const marketplaces = expectRecord(before, 'extraKnownMarketplaces', path) as Record<string, MarketplaceSource>;
@@ -104,7 +150,7 @@ export async function cmdInstall(argv: string[]): Promise<number> {
     if (Object.keys(nextMarketplaces).length > 0) next.extraKnownMarketplaces = nextMarketplaces;
     else delete next.extraKnownMarketplaces;
 
-    writeSettingsAtomic(path, next);
+    writeSettingsAtomic(path, next, style);
     process.stdout.write(`Disabled ${PLUGIN_ENTRY} and unregistered the ${MARKETPLACE_NAME} marketplace in ${path}.\n`);
     return 0;
   }
@@ -128,7 +174,7 @@ export async function cmdInstall(argv: string[]): Promise<number> {
     enabledPlugins: { ...enabledPlugins, [PLUGIN_ENTRY]: true },
   };
 
-  writeSettingsAtomic(path, next);
+  writeSettingsAtomic(path, next, style);
   process.stdout.write(
     `Registered the ${MARKETPLACE_NAME} marketplace (${REPO}) and enabled ${PLUGIN_ENTRY} in ${path}.\nRestart Claude Code to pick up the change.\n`,
   );

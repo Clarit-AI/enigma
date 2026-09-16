@@ -86,15 +86,37 @@ describe('cmdInstall', () => {
     expect(stdoutSpy.mock.calls.at(-1)?.[0]).toContain('already registered');
   });
 
-  it('--uninstall reverses install, restoring settings.json to its prior shape', async () => {
-    writeFileSync(settingsPath, JSON.stringify({ theme: 'dark' }));
+  it('--uninstall reverses install, restoring settings.json to its exact original bytes', async () => {
+    // Pretty-printed with a trailing newline, matching how the real Claude
+    // Code CLI itself writes settings.json (confirmed by inspection).
+    const original = `${JSON.stringify({ theme: 'dark' }, null, 2)}\n`;
+    writeFileSync(settingsPath, original);
 
     await cmdInstall([]);
     const code = await cmdInstall(['--uninstall']);
 
     expect(code).toBe(0);
-    const settings = readSettingsFile();
-    expect(settings).toEqual({ theme: 'dark' });
+    // Raw bytes, not parsed-JSON equality: toEqual on parsed JSON can't see
+    // formatting, so it would pass even if the file got reformatted.
+    expect(readFileSync(settingsPath, 'utf8')).toBe(original);
+  });
+
+  it('preserves the original indentation and lack of a trailing newline through install and --uninstall', async () => {
+    const original = '{\n    "theme": "dark",\n    "someArray": [\n        1,\n        2\n    ]\n}';
+    writeFileSync(settingsPath, original);
+
+    await cmdInstall([]);
+    const afterInstall = readFileSync(settingsPath, 'utf8');
+    // The install itself must reproduce the 4-space indent and the missing trailing newline —
+    // not just the eventual round trip — so a diff after `enigma install` only shows the two
+    // keys it actually added, not a whole-file reformat.
+    expect(afterInstall.startsWith('{\n    "theme": "dark"')).toBe(true);
+    expect(afterInstall.endsWith('\n')).toBe(false);
+
+    const code = await cmdInstall(['--uninstall']);
+
+    expect(code).toBe(0);
+    expect(readFileSync(settingsPath, 'utf8')).toBe(original);
   });
 
   it('--uninstall only removes the marketplace entry it owns, leaving other keys alone', async () => {
@@ -180,5 +202,47 @@ describe('cmdInstall', () => {
 
     expect(code).toBe(0);
     expect(existsSync(settingsPath)).toBe(true);
+  });
+
+  it('fails with a friendly, path-naming error when the settings directory cannot be created — distinct from an unwritable file', async () => {
+    // Occupy the config directory's own path with a plain file, so
+    // mkdirSync(dir, {recursive:true}) fails deterministically (EEXIST) —
+    // portable and root-safe, unlike a chmod-based permission test.
+    rmSync(tmpConfigDir, { recursive: true, force: true });
+    writeFileSync(tmpConfigDir, 'not a directory');
+
+    let error: unknown;
+    try {
+      await cmdInstall([]);
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(EnigmaError);
+    expect((error as InstanceType<typeof EnigmaError>).code).toBe('E_CLAUDE_SETTINGS_UNWRITABLE');
+    expect((error as Error).message).toContain(tmpConfigDir);
+    expect((error as Error).message.toLowerCase()).toContain('directory');
+  });
+
+  it('fails with a friendly, path-naming error when the settings file itself cannot be written — distinct from an unwritable directory', async () => {
+    const original = JSON.stringify({ theme: 'dark' });
+    writeFileSync(settingsPath, original);
+    // Occupy the exact atomic-write temp path with a directory, so
+    // writeFileSync(tmpPath, ...) fails deterministically (EISDIR) without
+    // relying on chmod (which a root-run test process would bypass).
+    const tmpWritePath = `${settingsPath}.enigma-install-${process.pid}.tmp`;
+    mkdirSync(tmpWritePath);
+
+    let error: unknown;
+    try {
+      await cmdInstall([]);
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(EnigmaError);
+    expect((error as InstanceType<typeof EnigmaError>).code).toBe('E_CLAUDE_SETTINGS_UNWRITABLE');
+    expect((error as Error).message).toContain(settingsPath);
+    expect(readFileSync(settingsPath, 'utf8')).toBe(original);
   });
 });
