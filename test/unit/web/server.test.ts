@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { startServer, stopServer } from '../../../src/web/server.js';
 
 function sleep(ms: number): Promise<void> {
@@ -47,13 +47,31 @@ describe('startServer', () => {
   });
 
   it('an incoming request resets the idle timer', async () => {
-    const first = await startServer({ idleTimeoutMs: 60 });
-    await sleep(30);
-    await fetch(`${first.origin}/healthz`); // activity within the window
-    await sleep(30);
+    // Real sleeps raced the idle timer against the request's connection time,
+    // so this drives the clock explicitly instead: the request lands at a
+    // known instant, and we advance past the original (un-reset) deadline
+    // without ever crossing the deadline the reset actually grants.
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const first = await startServer({ idleTimeoutMs: 100 });
 
-    // 60ms since the request, well under the 60ms idle window restarted by it.
-    const second = await startServer({ idleTimeoutMs: 60 });
-    expect(second.port).toBe(first.port);
+      await vi.advanceTimersByTimeAsync(80);
+      await fetch(`${first.origin}/healthz`); // activity resets the deadline to t=180
+
+      // t=170: past the original t=100 deadline a server that ignored the
+      // reset would have used, but under the t=180 deadline the reset grants.
+      await vi.advanceTimersByTimeAsync(90);
+      const stillRunning = await startServer({ idleTimeoutMs: 100 });
+      expect(stillRunning.port).toBe(first.port);
+
+      // Let a full idle window elapse with no further activity: the server
+      // must actually close, proving the timer was genuinely armed and not
+      // merely disabled by the reset.
+      await vi.advanceTimersByTimeAsync(100);
+      const afterClose = await startServer({ idleTimeoutMs: 100 });
+      expect(afterClose.port).not.toBe(first.port);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
