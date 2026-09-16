@@ -1019,7 +1019,7 @@ var DOTENV_EXEMPT = /* @__PURE__ */ new Set([".env.example"]);
 var BARE_ENV_DUMP_COMMANDS = /* @__PURE__ */ new Set(["env", "printenv"]);
 var NON_READING_BASH_VERBS = /* @__PURE__ */ new Set(["rm", "mv", "touch", "chmod", "stat", "ls", "find", "test"]);
 var DOTENV_EXCLUDE_GLOB = "!.env*";
-var MAX_SUBSTITUTION_DEPTH = 3;
+var MAX_SUBSTITUTION_DEPTH = 10;
 var USE_INSTEAD = "Use `enigma_request` to collect it from the user, or `enigma run -- <command>` to inject the real value into a child process without it ever entering this session.";
 function isDotEnvBasename(name) {
   if (DOTENV_EXEMPT.has(name)) return false;
@@ -1032,6 +1032,42 @@ function targetsEnigmaConfig(pathLike, cwd) {
   const home = resolve2(enigmaHome());
   const resolved = resolve2(cwd, pathLike.trim());
   return resolved === home || resolved.startsWith(`${home}${sep}`);
+}
+function decodeAnsiCEscapes(body) {
+  return body.replace(/\\(x[0-9a-fA-F]{1,2}|[0-7]{1,3}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|.)/gs, (_whole, esc) => {
+    if (esc.startsWith("x")) return String.fromCharCode(parseInt(esc.slice(1), 16));
+    if (esc.startsWith("u") || esc.startsWith("U")) return String.fromCodePoint(parseInt(esc.slice(1), 16));
+    if (/^[0-7]{1,3}$/.test(esc)) return String.fromCharCode(parseInt(esc, 8));
+    switch (esc) {
+      case "n":
+        return "\n";
+      case "t":
+        return "	";
+      case "r":
+        return "\r";
+      case "a":
+        return "\x07";
+      case "b":
+        return "\b";
+      case "e":
+      case "E":
+        return "\x1B";
+      case "f":
+        return "\f";
+      case "v":
+        return "\v";
+      default:
+        return esc;
+    }
+  });
+}
+function normalizeShellEscapes(command) {
+  const withIfsExpanded = command.replace(/\$\{IFS\}|\$IFS\b/g, " ");
+  return withIfsExpanded.replace(/\$'((?:[^'\\]|\\.)*)'/gs, (_whole, body) => {
+    const decoded = decodeAnsiCEscapes(body);
+    const escaped = decoded.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+    return `"${escaped}"`;
+  });
 }
 function tokenize(segment) {
   const raw = segment.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
@@ -1068,9 +1104,12 @@ function extractSubstitutions(command) {
   return results;
 }
 function allCommandTexts(command, depth = MAX_SUBSTITUTION_DEPTH) {
-  if (depth <= 0) return [command];
   const subs = extractSubstitutions(command);
-  return [command, ...subs.flatMap((s) => allCommandTexts(s, depth - 1))];
+  if (subs.length === 0) return [command];
+  if (depth <= 0) return void 0;
+  const nested = subs.map((s) => allCommandTexts(s, depth - 1));
+  if (nested.some((n) => n === void 0)) return void 0;
+  return [command, ...nested.flatMap((n) => n)];
 }
 function commandName(token) {
   const parts = token.split("/");
@@ -1151,7 +1190,16 @@ function globToRegExp(glob) {
       out += "[^/]*";
     } else if (c === "?") {
       out += "[^/]";
-    } else if (c && ".+^${}()|[]\\".includes(c)) {
+    } else if (c === "[") {
+      const close = glob.indexOf("]", i + 1);
+      if (close === -1) {
+        out += "\\[";
+      } else {
+        const body = glob.slice(i + 1, close);
+        out += `[${body.startsWith("!") ? `^${body.slice(1)}` : body}]`;
+        i = close;
+      }
+    } else if (c && ".+^${}()|\\".includes(c)) {
       out += `\\${c}`;
     } else {
       out += c;
@@ -1161,7 +1209,6 @@ function globToRegExp(glob) {
 }
 function globCouldMatchDotEnv(glob) {
   const pattern = glob.startsWith("!") ? glob.slice(1) : glob;
-  if (pattern.includes("[") || pattern.includes("]")) return true;
   const hasSlash = pattern.includes("/");
   return expandBraces(pattern).some((alt) => {
     const regex = globToRegExp(alt);
@@ -1211,7 +1258,13 @@ function runReadGuard(input) {
     const command = stringField(toolInput, "command");
     if (command) {
       const known = knownSecretNames();
-      const segments = allCommandTexts(command).flatMap(splitSegments);
+      const texts = allCommandTexts(normalizeShellEscapes(command));
+      if (texts === void 0) {
+        return deny(
+          "This command has command-substitution nesting too deep to safely inspect for a secret read. Simplify it, or use `enigma run -- <command>` if it needs a secret value injected."
+        );
+      }
+      const segments = texts.flatMap(splitSegments);
       for (const segment of segments) {
         if (segmentTargetsDotEnvByPath(segment)) {
           return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${USE_INSTEAD}`);
