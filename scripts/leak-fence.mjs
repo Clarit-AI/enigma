@@ -9,7 +9,12 @@ import { join } from 'node:path';
 
 const ALLOW_PREFIX = '// enigma:leak-fence-allow:';
 const LEAK_PATTERN = /\bresolveSecret\s*\(|(?<!\bPromise\s*)\.\s*resolve\s*\(/;
-const SCAN_DIRS = ['src/mcp', 'src/web'];
+// src/hooks is scanned too: the tripwire hook legitimately resolves a value (with
+// its own allow marker, same as the reveal route below), but session-start.ts and
+// read-guard.ts have no legitimate reason to ever do so — an unscanned directory
+// here would be an unguarded one for exactly the code that's meant to be the
+// backstop when everything else fails.
+const SCAN_DIRS = ['src/mcp', 'src/web', 'src/hooks'];
 
 function walk(dir) {
   const entries = readdirSync(dir, { withFileTypes: true });
