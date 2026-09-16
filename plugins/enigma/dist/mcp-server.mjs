@@ -42596,7 +42596,10 @@ function takeRemoteNote(requestId) {
 }
 function stopAllActiveTunnels() {
   for (const entry of active.values()) {
-    entry.tunnel?.stop();
+    try {
+      entry.tunnel?.stop();
+    } catch {
+    }
   }
 }
 var shutdownHandlersRegistered = false;
@@ -42606,8 +42609,11 @@ function registerShutdownHandlers() {
   process.once("exit", stopAllActiveTunnels);
   for (const signal of ["SIGINT", "SIGTERM"]) {
     process.once(signal, () => {
-      stopAllActiveTunnels();
-      process.kill(process.pid, signal);
+      try {
+        stopAllActiveTunnels();
+      } finally {
+        process.kill(process.pid, signal);
+      }
     });
   }
 }
