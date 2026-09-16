@@ -49,11 +49,13 @@ export interface Outcome {
 }
 
 /**
- * Renders a batch outcome — failures first (named, with their error code),
- * then successes as "Stored NAME in <depository> (<scope>)" lines — shared
- * by enigma_request's elicitation/fallback/native paths and enigma_await, so
- * the shape and the isError rule never drift between them (Tech Lead ruling,
- * 2026-09-16):
+ * Renders a batch outcome — failures first (named, with their error code and,
+ * when present, `reason` — the one narrow exception to "never a message",
+ * see RequestNameResult's doc comment), then successes as "Stored NAME in
+ * <depository> (<scope>)" lines — shared by enigma_request's
+ * elicitation/fallback/native paths, enigma_await, and enigma_import's
+ * elicitation/fallback paths, so the shape and the isError rule never drift
+ * between them (Tech Lead ruling, 2026-09-16):
  *   - every name failed: isError:true — nothing was accomplished, the agent
  *     must not proceed as though it has the secrets.
  *   - some succeeded: isError:false — the agent genuinely accomplished part
@@ -65,7 +67,7 @@ export function renderOutcome(results: RequestNameResult[], cwd: string): Outcom
   const failed = results.filter((r) => !r.ok);
   const succeeded = results.filter((r) => r.ok);
   const lines = [
-    ...failed.map((r) => `${r.name}: failed (${r.errorCode ?? 'E_UNKNOWN'})`),
+    ...failed.map((r) => (r.reason ? `${r.name}: failed (${r.errorCode ?? 'E_UNKNOWN'}) — ${r.reason}` : `${r.name}: failed (${r.errorCode ?? 'E_UNKNOWN'})`)),
     ...renderStoredLines(succeeded.map((r) => r.name), cwd),
   ];
   return { text: lines.join('\n'), isError: succeeded.length === 0 };

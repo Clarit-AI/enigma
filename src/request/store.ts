@@ -7,11 +7,26 @@ import type { Scope } from '../core/index-store.js';
 
 export type RequestKind = 'request' | 'reveal' | 'import';
 
-/** Outcome of writing one name through the storage core; never a value or a message that could carry one. */
+/**
+ * Outcome of writing one name through the storage core; never a value or a
+ * message that could carry one. `reason` is the one narrow, deliberate
+ * exception (Issue #13 review, round 4, finding 2): kind 'import' only,
+ * populated ONLY from `ParsedDotEnvEntry.ambiguousReason` — static text
+ * about structure ("assigned more than once in this file", "quote the value
+ * if the # belongs to it") computed by the parser before any value is
+ * looked at, plus the entry's own name and file path. Never populate this
+ * from an EnigmaError's `.message` in general, or from anything else
+ * derived from a parsed value — widening this field is exactly how a
+ * value-carrying string gets introduced here by someone with good
+ * intentions later. If you're tempted to set `reason` for a NEW error code,
+ * stop and ask whether that code's message can ever embed a value; if it
+ * can, it does not belong here.
+ */
 export interface RequestNameResult {
   name: string;
   ok: boolean;
   errorCode?: string;
+  reason?: string;
 }
 
 export interface RequestRecord {

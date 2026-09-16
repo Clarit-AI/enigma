@@ -144,7 +144,17 @@ export async function handleImportFormPost(req: IncomingMessage, res: ServerResp
   });
 
   const results: RequestNameResult[] = [
-    ...commitResult.failed.map((f): RequestNameResult => ({ name: f.name, ok: false, errorCode: f.errorCode })),
+    // reason is populated ONLY for the ambiguity refusal — static structural text computed
+    // by the parser before any value is looked at (see RequestNameResult's doc comment).
+    // Never widen this to other error codes, whose messages aren't guaranteed value-free.
+    ...commitResult.failed.map(
+      (f): RequestNameResult => ({
+        name: f.name,
+        ok: false,
+        errorCode: f.errorCode,
+        reason: f.errorCode === 'E_VALUE_AMBIGUOUS' ? f.message : undefined,
+      }),
+    ),
     ...commitResult.notAttempted.map((name): RequestNameResult => ({ name, ok: false, errorCode: 'E_NOT_ATTEMPTED' })),
     ...commitResult.succeeded.map((name): RequestNameResult => ({ name, ok: true })),
   ];
@@ -164,7 +174,7 @@ export async function handleImportFormPost(req: IncomingMessage, res: ServerResp
     results.map((r) => ({
       NAME: r.name,
       STATUS_CLASS: r.ok ? 'ok' : 'fail',
-      STATUS_TEXT: r.ok ? 'stored' : `failed (${r.errorCode})`,
+      STATUS_TEXT: r.ok ? 'stored' : r.reason ? `failed (${r.errorCode}): ${r.reason}` : `failed (${r.errorCode})`,
     })),
   );
   sendHtml(res, 200, html);

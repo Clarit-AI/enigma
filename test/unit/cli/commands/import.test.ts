@@ -202,5 +202,47 @@ describe('cmdImport', () => {
 
     const stored = listSecrets({ scope: 'all', cwd: tmpProject });
     expect(stored.map((e) => e.name)).toEqual(['OPENAI_API_KEY']);
+
+    // Issue #13 review, round 4, finding 1: cmdImport must close its own server handle
+    // once the browser flow completes — otherwise the listening socket keeps the event
+    // loop alive and the process never exits (process.exitCode alone only takes effect
+    // once the loop drains). Proven by starting a fresh server afterwards: if the
+    // previous one were still open, startServer() would just return that same instance
+    // (same origin) rather than binding a new port.
+    const handleAfter = await startServer();
+    expect(handleAfter.origin).not.toBe(handle.origin);
+  });
+
+  it('duplicate key via the browser picker default flow surfaces the same reason as --depository, and closes the server on completion (Issue #13 review, round 4, findings 1 & 2)', async () => {
+    const original = 'API_KEY=real-production-key\nAPI_KEY=placeholder\n';
+    writeFileSync(envFilePath, original);
+
+    const importPromise = cmdImport(['.env']);
+
+    await vi.waitFor(() => {
+      expect(stderrSpy.mock.calls.some((c: unknown[]) => String(c[0]).includes('/i/'))).toBe(true);
+    });
+    const printed = stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    const id = printed.match(/\/i\/([0-9a-f]{32})/)![1]!;
+
+    const handle = await startServer();
+    const postResp = await fetch(`${handle.origin}/i/${id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+    });
+    expect(postResp.status).toBe(200);
+
+    const code = await importPromise;
+
+    expect(code).toBe(1);
+    const output = stdoutText();
+    expect(output).toContain('API_KEY');
+    expect(output).toContain('assigned more than once');
+    expect(readFileSync(envFilePath, 'utf8')).toBe(original);
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+
+    const handleAfter = await startServer();
+    expect(handleAfter.origin).not.toBe(handle.origin);
   });
 });

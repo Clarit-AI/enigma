@@ -151,4 +151,34 @@ describe('enigma_import', () => {
     expect(rewritten).not.toContain(SENTINEL);
     await pair.close();
   });
+
+  it('elicitation.url default flow: a duplicate-key refusal surfaces the same reason as the direct --depository path, not a bare error code (Issue #13 review, round 4, finding 2)', async () => {
+    const original = 'API_KEY=real-production-key\nAPI_KEY=placeholder\n';
+    writeFileSync(envFilePath, original);
+    const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+
+    pair.client.setRequestHandler(ElicitRequestSchema, async (request: { params: ElicitRequest['params'] }) => {
+      if (request.params.mode !== 'url') throw new Error('expected url mode');
+      await fetch(request.params.url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+      });
+      return { action: 'accept' };
+    });
+
+    const result = await pair.client.callTool({ name: 'enigma_import', arguments: {} });
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+    expect(result.isError).toBe(true);
+    expect(text).toContain('API_KEY');
+    expect(text).toContain('E_VALUE_AMBIGUOUS');
+    expect(text).toContain('assigned more than once');
+    // The reason names the key and the file, never either value.
+    expect(text).not.toContain('real-production-key');
+    expect(text).not.toContain('placeholder');
+    expect(readFileSync(envFilePath, 'utf8')).toBe(original);
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+    await pair.close();
+  });
 });

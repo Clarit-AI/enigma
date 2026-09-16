@@ -71,9 +71,16 @@ async function runBrowserFlow(
     `Open ${url} to choose where to store ${entries.length} secret(s): ${entries.map((e) => e.name).join(', ')}\n`,
   );
 
+  // The CLI is a one-shot process holding a listening socket for the first time in this
+  // codebase (every other command is request/response, nothing keeps the event loop
+  // alive) — cmdImport's caller only sets process.exitCode, which waits for the loop to
+  // drain rather than forcing it, so this handle MUST be closed on every path out of the
+  // wait, success or expiry, or the process idles out the full 10-minute server timeout
+  // instead of exiting (Issue #13 review, round 4, finding 1).
   try {
     await RequestStore.waitForFulfilled(record.id);
   } catch {
+    await handle.close();
     return report(
       {
         imported: [],
@@ -89,6 +96,7 @@ async function runBrowserFlow(
       'Import link expired before it was completed.',
     );
   }
+  await handle.close();
 
   const finalRecord = RequestStore.get(record.id);
   const results = finalRecord?.results ?? [];
@@ -99,7 +107,7 @@ async function runBrowserFlow(
       imported: results.filter((r) => r.ok).map((r) => r.name),
       failed: results
         .filter((r) => !r.ok && r.errorCode !== 'E_NOT_ATTEMPTED')
-        .map((r) => ({ name: r.name, errorCode: r.errorCode ?? 'E_UNKNOWN' })),
+        .map((r) => ({ name: r.name, errorCode: r.errorCode ?? 'E_UNKNOWN', message: r.reason })),
       notAttempted: results.filter((r) => r.errorCode === 'E_NOT_ATTEMPTED').map((r) => r.name),
       skippedInvalid: opts.skippedInvalid,
       skippedMismatch: outcome?.skippedMismatch ?? [],

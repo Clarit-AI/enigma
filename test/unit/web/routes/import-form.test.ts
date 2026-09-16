@@ -22,6 +22,7 @@ vi.mock('node:child_process', () => ({
 const { startServer, stopServer } = await import('../../../../src/web/server.js');
 const { RequestStore } = await import('../../../../src/request/store.js');
 const { listSecrets } = await import('../../../../src/storage/manager.js');
+const { parseDotEnv } = await import('../../../../src/storage/dotenv-file.js');
 
 const SENTINEL = 'sk-sentinel-value-should-never-appear';
 
@@ -162,13 +163,18 @@ describe('GET/POST /i/:id', () => {
     expect(stored.map((e) => e.name)).toEqual(['OPENAI_API_KEY']);
   });
 
-  it('POST refuses an ambiguous value carried in via the picker, exactly as the direct --depository path does (Issue #13 review, round 2, A2)', async () => {
-    writeFileSync(envPath(), 'PORT=3000 # dev port\n');
+  it('POST refuses an ambiguous value carried in via the picker, WITH THE SAME REASON TEXT the direct --depository path surfaces (Issue #13 review, round 4, finding 2 — a test whose title claims parity must assert it)', async () => {
+    const source = 'PORT=3000 # dev port\n';
+    writeFileSync(envPath(), source);
+    const parsedReason = parseDotEnv(source).entries.find((e) => e.name === 'PORT')?.ambiguousReason;
+    expect(parsedReason).toBeDefined();
+
     const record = RequestStore.create({
       kind: 'import',
       names: ['PORT'],
       values: { PORT: '3000 # dev port' },
       ambiguousNames: ['PORT'],
+      ambiguousReasons: { PORT: parsedReason! },
       envFilePath: envPath(),
     });
 
@@ -181,20 +187,29 @@ describe('GET/POST /i/:id', () => {
 
     expect(resp.status).toBe(200);
     expect(html).toContain('failed');
-    expect(RequestStore.get(record.id)?.results).toEqual([{ name: 'PORT', ok: false, errorCode: 'E_VALUE_AMBIGUOUS' }]);
-    expect(readFileSync(envPath(), 'utf8')).toBe('PORT=3000 # dev port\n');
+    expect(html).toContain('quote the value');
+    const results = RequestStore.get(record.id)?.results;
+    expect(results).toEqual([
+      { name: 'PORT', ok: false, errorCode: 'E_VALUE_AMBIGUOUS', reason: expect.stringContaining('quote the value') },
+    ]);
+    // The reason is static, structural text — never the parsed value itself.
+    expect(results?.[0]?.reason).not.toContain('3000 # dev port');
+    expect(readFileSync(envPath(), 'utf8')).toBe(source);
     expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
   });
 
-  it('POST refuses a duplicated key carried in via the picker, naming it in the same way as the direct --depository path (Issue #13 review, round 4)', async () => {
+  it('POST refuses a duplicated key carried in via the picker, WITH THE SAME REASON TEXT the direct --depository path surfaces (Issue #13 review, round 4)', async () => {
     const original = 'API_KEY=real-production-key\nAPI_KEY=placeholder\n';
     writeFileSync(envPath(), original);
+    const parsedReason = parseDotEnv(original).entries.find((e) => e.name === 'API_KEY')?.ambiguousReason;
+    expect(parsedReason).toBeDefined();
+
     const record = RequestStore.create({
       kind: 'import',
       names: ['API_KEY'],
       values: { API_KEY: 'placeholder' },
       ambiguousNames: ['API_KEY'],
-      ambiguousReasons: { API_KEY: 'API_KEY is assigned more than once in this file — remove the duplicate line(s) and rerun import' },
+      ambiguousReasons: { API_KEY: parsedReason! },
       envFilePath: envPath(),
     });
 
@@ -207,7 +222,14 @@ describe('GET/POST /i/:id', () => {
 
     expect(resp.status).toBe(200);
     expect(html).toContain('failed');
-    expect(RequestStore.get(record.id)?.results).toEqual([{ name: 'API_KEY', ok: false, errorCode: 'E_VALUE_AMBIGUOUS' }]);
+    expect(html).toContain('assigned more than once');
+    const results = RequestStore.get(record.id)?.results;
+    expect(results).toEqual([
+      { name: 'API_KEY', ok: false, errorCode: 'E_VALUE_AMBIGUOUS', reason: expect.stringContaining('assigned more than once') },
+    ]);
+    // The reason names the key and the file, never either value ("real-production-key" or "placeholder").
+    expect(results?.[0]?.reason).not.toContain('real-production-key');
+    expect(results?.[0]?.reason).not.toContain('placeholder');
     expect(readFileSync(envPath(), 'utf8')).toBe(original);
     expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
   });

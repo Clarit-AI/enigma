@@ -145,6 +145,25 @@ describe('parseDotEnv', () => {
       expect(result.duplicateNames).toEqual(['KEY']);
     });
   });
+
+  describe('ambiguousReason never carries a value (Issue #13 review, round 4, finding 2)', () => {
+    const SENTINEL = 'sk-sentinel-value-should-never-appear';
+
+    it('the inline-comment reason is static text, never the value that triggered it', () => {
+      const result = parseDotEnv(`SECRET=${SENTINEL} # trailing\n`);
+      const reason = result.entries.find((e) => e.name === 'SECRET')?.ambiguousReason;
+      expect(reason).toBeDefined();
+      expect(reason).not.toContain(SENTINEL);
+    });
+
+    it('the duplicate-key reason names only the key, never either of its values', () => {
+      const result = parseDotEnv(`SECRET=${SENTINEL}-first\nSECRET=${SENTINEL}-second\n`);
+      const reason = result.entries.find((e) => e.name === 'SECRET')?.ambiguousReason;
+      expect(reason).toBeDefined();
+      expect(reason).toContain('SECRET');
+      expect(reason).not.toContain(SENTINEL);
+    });
+  });
 });
 
 describe('removeDotEnvEntries', () => {
