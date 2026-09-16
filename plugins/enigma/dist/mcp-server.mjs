@@ -1870,7 +1870,7 @@ var require_keyword = __commonJS({
       const { gen, keyword, schema, parentSchema, $data, it } = cxt;
       checkAsyncKeyword(it, def);
       const validate2 = !$data && def.compile ? def.compile.call(it.self, schema, parentSchema, it) : def.validate;
-      const validateRef3 = useKeyword(gen, keyword, validate2);
+      const validateRef4 = useKeyword(gen, keyword, validate2);
       const valid = gen.let("valid");
       cxt.block$data(valid, validateKeyword);
       cxt.ok((_a3 = def.valid) !== null && _a3 !== void 0 ? _a3 : valid);
@@ -1893,7 +1893,7 @@ var require_keyword = __commonJS({
         return ruleErrs;
       }
       function validateSync() {
-        const validateErrs = (0, codegen_1._)`${validateRef3}.errors`;
+        const validateErrs = (0, codegen_1._)`${validateRef4}.errors`;
         gen.assign(validateErrs, null);
         assignValid(codegen_1.nil);
         return validateErrs;
@@ -1901,7 +1901,7 @@ var require_keyword = __commonJS({
       function assignValid(_await = def.async ? (0, codegen_1._)`await ` : codegen_1.nil) {
         const passCxt = it.opts.passContext ? names_1.default.this : names_1.default.self;
         const passSchema = !("compile" in def && !$data || def.schema === false);
-        gen.assign(valid, (0, codegen_1._)`${_await}${(0, code_1.callValidateCode)(cxt, validateRef3, passCxt, passSchema)}`, def.modifying);
+        gen.assign(valid, (0, codegen_1._)`${_await}${(0, code_1.callValidateCode)(cxt, validateRef4, passCxt, passSchema)}`, def.modifying);
       }
       function reportErrs(errors) {
         var _a4;
@@ -8922,7 +8922,7 @@ var require_keyword2 = __commonJS({
       const { gen, keyword, schema, parentSchema, $data, it } = cxt;
       checkAsyncKeyword(it, def);
       const validate2 = !$data && def.compile ? def.compile.call(it.self, schema, parentSchema, it) : def.validate;
-      const validateRef3 = useKeyword(gen, keyword, validate2);
+      const validateRef4 = useKeyword(gen, keyword, validate2);
       const valid = gen.let("valid");
       cxt.block$data(valid, validateKeyword);
       cxt.ok((_a3 = def.valid) !== null && _a3 !== void 0 ? _a3 : valid);
@@ -8945,7 +8945,7 @@ var require_keyword2 = __commonJS({
         return ruleErrs;
       }
       function validateSync() {
-        const validateErrs = (0, codegen_1._)`${validateRef3}.errors`;
+        const validateErrs = (0, codegen_1._)`${validateRef4}.errors`;
         gen.assign(validateErrs, null);
         assignValid(codegen_1.nil);
         return validateErrs;
@@ -8953,7 +8953,7 @@ var require_keyword2 = __commonJS({
       function assignValid(_await = def.async ? (0, codegen_1._)`await ` : codegen_1.nil) {
         const passCxt = it.opts.passContext ? names_1.default.this : names_1.default.self;
         const passSchema = !("compile" in def && !$data || def.schema === false);
-        gen.assign(valid, (0, codegen_1._)`${_await}${(0, code_1.callValidateCode)(cxt, validateRef3, passCxt, passSchema)}`, def.modifying);
+        gen.assign(valid, (0, codegen_1._)`${_await}${(0, code_1.callValidateCode)(cxt, validateRef4, passCxt, passSchema)}`, def.modifying);
       }
       function reportErrs(errors) {
         var _a4;
@@ -42274,7 +42274,10 @@ var RequestStore = {
    * Atomically checks existence, non-expiry, and non-use, then marks used.
    * This is the security boundary (S2.1): once it returns a record, every
    * later call for the same id returns undefined until the sweeper's grace
-   * period elapses.
+   * period elapses. Deliberately does NOT resolve the fulfilment waiter —
+   * marking a token used and reporting what happened are two different
+   * moments (see `fulfill`); a caller that wrote a value after this call
+   * returns is still free to fail before ever calling `fulfill`.
    */
   tryMarkUsed(id) {
     const record2 = records.get(id);
@@ -42285,23 +42288,37 @@ var RequestStore = {
     }
     if (record2.usedAt !== void 0) return void 0;
     record2.usedAt = Date.now();
+    return record2;
+  },
+  /**
+   * Records the outcome of a used request/reveal and THEN resolves the
+   * fulfilment waiter, in that order — a caller waking up from
+   * `waitForFulfilled` is therefore guaranteed `get(id)?.results` is already
+   * readable. `results` defaults to `[]` for a reveal, which has no
+   * per-name write outcome to report but still needs the waiter to resolve
+   * once the human has revealed it. No-op if the id is unknown.
+   */
+  fulfill(id, results = []) {
+    const record2 = records.get(id);
+    if (record2) record2.results = results;
     const waiter = waiters.get(id);
     if (waiter) {
       waiter.resolve("fulfilled");
       waiters.delete(id);
     }
-    return record2;
   },
-  /** Records per-name write outcomes (Issue #10 reads this via `get` after the waiter resolves). No-op if the id is unknown. */
-  setResults(id, results) {
-    const record2 = records.get(id);
-    if (record2) record2.results = results;
-  },
-  /** Resolves to the literal 'fulfilled' once the id is marked used; rejects if the id is unknown or expires first. Never carries a value. */
+  /**
+   * Resolves to the literal 'fulfilled' once `fulfill` has run for this id —
+   * meaning the single-use token was consumed AND its outcome (`results`) is
+   * already readable — or rejects if the id is unknown or expires first.
+   * `fulfilled` means only that: a human completed the interaction. It says
+   * nothing about per-name outcome, which `results` alone carries. Never
+   * carries a value.
+   */
   waitForFulfilled(id) {
     const record2 = records.get(id);
     if (!record2) return Promise.reject(new Error("request not found"));
-    if (record2.usedAt !== void 0) return Promise.resolve("fulfilled");
+    if (record2.results !== void 0) return Promise.resolve("fulfilled");
     let waiter = waiters.get(id);
     if (!waiter) {
       waiter = deferred();
@@ -43039,12 +43056,249 @@ var macosKeychainDepositoryModule = {
   create: createKeychainDepository
 };
 
+// src/storage/depositories/onepassword.ts
+import { execFile as execFile3 } from "node:child_process";
+import { basename } from "node:path";
+var OP_BIN = "op";
+var VAULT = "Enigma";
+var MIN_MAJOR_VERSION = 2;
+var EXEC_TIMEOUT_MS3 = 15e3;
+var EXEC_MAX_BUFFER_BYTES3 = 1024 * 1024;
+var REF_PATTERN3 = /^[A-Za-z0-9_./-]+$/;
+var REF_MAX_LENGTH3 = 512;
+var VAULT_MISSING_PATTERN = /isn't a vault|no vault named|could not find vault/i;
+var ITEM_MISSING_PATTERN = /isn't an item|could not find item|item.*not found/i;
+function runOp(args) {
+  return new Promise((resolve2, reject) => {
+    execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error62, stdout, stderr) => {
+      if (error62) {
+        reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
+        return;
+      }
+      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    });
+  });
+}
+function runOpWithStdin(args, stdinData) {
+  return new Promise((resolve2, reject) => {
+    const child = execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error62, stdout, stderr) => {
+      if (error62) {
+        reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
+        return;
+      }
+      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    });
+    child.on("error", reject);
+    if (!child.stdin) {
+      child.kill();
+      reject(new Error("op: stdin unavailable"));
+      return;
+    }
+    child.stdin.on("error", reject);
+    if (child.stdin.write(stdinData)) {
+      child.stdin.end();
+    } else {
+      child.stdin.once("drain", () => child.stdin?.end());
+    }
+  });
+}
+function isTimeout(failure2) {
+  return failure2.killed === true || failure2.signal != null;
+}
+function refInvalid3() {
+  throw new EnigmaError({
+    code: "E_REF_INVALID",
+    message: `invalid depository ref: expected ${REF_PATTERN3} and at most ${REF_MAX_LENGTH3} characters`,
+    depository: "1password"
+  });
+}
+function validateRef3(ref) {
+  if (ref.length === 0 || ref.length > REF_MAX_LENGTH3 || !REF_PATTERN3.test(ref)) {
+    refInvalid3();
+  }
+}
+function writeFailed3(reason) {
+  throw new EnigmaError({
+    code: "E_WRITE_FAILED",
+    message: reason ?? "failed to write secret to 1password depository",
+    depository: "1password"
+  });
+}
+function readFailed4(reason) {
+  throw new EnigmaError({
+    code: "E_READ_FAILED",
+    message: reason ?? "failed to read secret from 1password depository",
+    depository: "1password"
+  });
+}
+function notFound3() {
+  throw new EnigmaError({ code: "E_NOT_FOUND", message: "secret not found", depository: "1password" });
+}
+function vaultMissing() {
+  throw new EnigmaError({
+    code: "E_VAULT_MISSING",
+    message: `the "${VAULT}" vault does not exist in 1Password; pass createVault to create it`,
+    depository: "1password"
+  });
+}
+function timedOut(op) {
+  const message = `1password depository timed out waiting for the op CLI after ${EXEC_TIMEOUT_MS3}ms; run "op signin" or unlock 1Password and try again`;
+  if (op === "read") readFailed4(message);
+  writeFailed3(message);
+}
+function nameFromRef(ref) {
+  const idx = ref.lastIndexOf("/");
+  return idx === -1 ? ref : ref.slice(idx + 1);
+}
+function buildTitle(ref, ctx) {
+  const name = nameFromRef(ref);
+  const isGlobal = ref === name || ref.startsWith("global/");
+  if (isGlobal || !ctx.projectPath) return name;
+  return `${name} \xB7 ${basename(ctx.projectPath)}`;
+}
+function itemTemplate(title, value) {
+  return JSON.stringify({
+    title,
+    category: "API_CREDENTIAL",
+    fields: [{ id: "credential", type: "CONCEALED", label: "credential", value }]
+  });
+}
+async function createVault() {
+  try {
+    await runOp(["vault", "create", VAULT, "--format", "json"]);
+  } catch (err) {
+    const failure2 = err;
+    if (isTimeout(failure2)) timedOut("write");
+    writeFailed3(`failed to create the "${VAULT}" vault in 1Password`);
+  }
+}
+async function createItem(title, value) {
+  const { stdout } = await runOpWithStdin(["item", "create", "--vault", VAULT, "--format", "json", "-"], itemTemplate(title, value));
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    return writeFailed3("op item create returned a response that could not be parsed");
+  }
+  if (typeof parsed.id !== "string" || parsed.id.length === 0) {
+    return writeFailed3("op item create did not return an item id");
+  }
+  return parsed.id;
+}
+function createOnepasswordDepository(ctx) {
+  return {
+    id: "1password",
+    promptProfile: "prompts-each-read",
+    async set(ref, value) {
+      validateRef3(ref);
+      const title = buildTitle(ref, ctx);
+      try {
+        return await createItem(title, value);
+      } catch (err) {
+        const failure2 = err;
+        if (isTimeout(failure2)) timedOut("write");
+        if (VAULT_MISSING_PATTERN.test(failure2.stderr ?? "")) {
+          if (!ctx.createVault) vaultMissing();
+          await createVault();
+          try {
+            return await createItem(title, value);
+          } catch (retryErr) {
+            const retryFailure = retryErr;
+            if (isTimeout(retryFailure)) timedOut("write");
+            return writeFailed3();
+          }
+        }
+        return writeFailed3();
+      }
+    },
+    async resolve(ref) {
+      validateRef3(ref);
+      try {
+        const { stdout } = await runOp(["read", `op://${VAULT}/${ref}/credential`]);
+        return stdout.replace(/\n$/, "");
+      } catch (err) {
+        const failure2 = err;
+        if (isTimeout(failure2)) timedOut("read");
+        if (ITEM_MISSING_PATTERN.test(failure2.stderr ?? "")) notFound3();
+        return readFailed4();
+      }
+    },
+    async delete(ref) {
+      validateRef3(ref);
+      try {
+        await runOp(["item", "delete", ref, "--vault", VAULT]);
+      } catch (err) {
+        const failure2 = err;
+        if (isTimeout(failure2)) timedOut("read");
+        if (ITEM_MISSING_PATTERN.test(failure2.stderr ?? "")) return;
+        readFailed4();
+      }
+    },
+    async has(ref) {
+      validateRef3(ref);
+      try {
+        await runOp(["item", "get", ref, "--vault", VAULT]);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  };
+}
+function parseMajorVersion(stdout) {
+  const match = /^(\d+)\./.exec(stdout.trim());
+  return match ? Number(match[1]) : void 0;
+}
+var onepasswordDepositoryModule = {
+  id: "1password",
+  promptProfile: "prompts-each-read",
+  /**
+   * Available only when `op --version` is 2.x+ and `op whoami` succeeds —
+   * both fail fast and never prompt. Vault existence is deliberately not
+   * checked here (that's a `set`-time concern, AC2) since any vault-touching
+   * `op` subcommand risks the ~60s authorization-timeout hang this module
+   * otherwise avoids.
+   */
+  async detect() {
+    let versionOut;
+    try {
+      versionOut = (await runOp(["--version"])).stdout;
+    } catch (err) {
+      const failure2 = err;
+      const reason = failure2.code === "ENOENT" ? "op CLI not installed" : "op --version failed";
+      return { id: "1password", promptProfile: "prompts-each-read", available: false, reason };
+    }
+    const major = parseMajorVersion(versionOut);
+    if (major === void 0 || major < MIN_MAJOR_VERSION) {
+      return {
+        id: "1password",
+        promptProfile: "prompts-each-read",
+        available: false,
+        reason: `op CLI version ${versionOut.trim() || "unknown"} is older than the required ${MIN_MAJOR_VERSION}.x`
+      };
+    }
+    try {
+      await runOp(["whoami"]);
+    } catch {
+      return {
+        id: "1password",
+        promptProfile: "prompts-each-read",
+        available: false,
+        reason: "op CLI is not signed in (run `op signin`)"
+      };
+    }
+    return { id: "1password", promptProfile: "prompts-each-read", available: true };
+  },
+  create: createOnepasswordDepository
+};
+
 // src/storage/detect.ts
 var DEPOSITORY_MODULES = [
   encryptedDepositoryModule,
   envDepositoryModule,
   macosKeychainDepositoryModule,
-  linuxSecretServiceDepositoryModule
+  linuxSecretServiceDepositoryModule,
+  onepasswordDepositoryModule
 ];
 async function detectAll() {
   return Promise.all(DEPOSITORY_MODULES.map((mod) => mod.detect()));
@@ -43062,8 +43316,8 @@ function getDepositoryModule(id) {
   }
   return mod;
 }
-function createDepository(id, projectPath) {
-  return getDepositoryModule(id).create({ projectPath });
+function createDepository(id, ctx = {}) {
+  return getDepositoryModule(id).create(ctx);
 }
 function projectPathFor(entry, cwd) {
   if (entry.scope === "project") return entry.projectPath;
@@ -43091,7 +43345,7 @@ async function setSecret(opts) {
     });
   }
   const providedRef = opts.depository === "env" ? opts.name : buildRef(opts.name, opts.scope, pid);
-  const depository = createDepository(opts.depository, opts.depository === "env" ? projectPath : void 0);
+  const depository = createDepository(opts.depository, { projectPath, createVault: opts.createVault });
   const op = existing ? "rotated" : "set";
   let ref;
   try {
@@ -43135,7 +43389,7 @@ async function deleteSecret(name, opts) {
   const pid = opts.cwd ? projectId(opts.cwd) : void 0;
   const index = readIndex();
   const { index: updated, removed } = removeIndexEntry(index, name, opts.scope, pid);
-  const depository = createDepository(removed.depository, projectPathFor(removed, opts.cwd));
+  const depository = createDepository(removed.depository, { projectPath: projectPathFor(removed, opts.cwd) });
   try {
     await depository.delete(removed.ref);
   } catch (err) {
@@ -43153,7 +43407,7 @@ async function resolveSecret(name, opts) {
     throw new EnigmaError({ code: "E_NOT_FOUND", message: `${name} not found`, secretName: name });
   }
   const op = opts.auditOp ?? "read";
-  const depository = createDepository(entry.depository, projectPathFor(entry, opts.cwd));
+  const depository = createDepository(entry.depository, { projectPath: projectPathFor(entry, opts.cwd) });
   try {
     const value = await depository.resolve(entry.ref);
     appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: true, error: null });
@@ -43186,25 +43440,21 @@ function renderStoredLine(name, cwd) {
 function renderStoredLines(names, cwd) {
   return names.map((name) => renderStoredLine(name, cwd));
 }
+function renderOutcome(results, cwd) {
+  const failed = results.filter((r) => !r.ok);
+  const succeeded = results.filter((r) => r.ok);
+  const lines = [
+    ...failed.map((r) => `${r.name}: failed (${r.errorCode ?? "E_UNKNOWN"})`),
+    ...renderStoredLines(succeeded.map((r) => r.name), cwd)
+  ];
+  return { text: lines.join("\n"), isError: succeeded.length === 0 };
+}
 
 // src/mcp/request-outcome.ts
-var RESULTS_POLL_INTERVAL_MS = 10;
-var RESULTS_POLL_TIMEOUT_MS = 5e3;
-async function waitForResults(id) {
-  await RequestStore.waitForFulfilled(id);
-  const deadline = Date.now() + RESULTS_POLL_TIMEOUT_MS;
-  for (; ; ) {
-    const record2 = RequestStore.get(id);
-    if (record2?.results) return record2.results;
-    if (Date.now() >= deadline) {
-      throw new Error(`request ${id} was fulfilled but its results never settled`);
-    }
-    await new Promise((resolve2) => setTimeout(resolve2, RESULTS_POLL_INTERVAL_MS));
-  }
-}
 async function resolveRequestOutcome(id, cwd) {
-  const results = await waitForResults(id);
-  return results.map((r) => r.ok ? renderStoredLine(r.name, cwd) : `${r.name}: failed (${r.errorCode ?? "E_UNKNOWN"})`).join("\n");
+  await RequestStore.waitForFulfilled(id);
+  const results = RequestStore.get(id)?.results ?? [];
+  return renderOutcome(results, cwd);
 }
 
 // src/mcp/tools/await.ts
@@ -43227,7 +43477,7 @@ function registerAwaitTool(server) {
       }
       try {
         const outcome = await resolveRequestOutcome(args.request_id, cwd);
-        return textResult(outcome);
+        return textResult(outcome.text, outcome.isError);
       } catch {
         return errorResult(
           new EnigmaError({ code: "E_REQUEST_EXPIRED", message: `request ${args.request_id} expired before it was fulfilled` })
@@ -43238,7 +43488,7 @@ function registerAwaitTool(server) {
 }
 
 // src/mcp/tools/doctor.ts
-import { execFile as execFile3 } from "node:child_process";
+import { execFile as execFile4 } from "node:child_process";
 import { existsSync as existsSync7 } from "node:fs";
 import { platform, release } from "node:os";
 import { promisify } from "node:util";
@@ -43304,7 +43554,7 @@ async function sendElicitationComplete(server, elicitationId) {
 }
 
 // src/mcp/tools/doctor.ts
-var execFileAsync = promisify(execFile3);
+var execFileAsync = promisify(execFile4);
 async function binaryStatus(command, args) {
   try {
     const { stdout } = await execFileAsync(command, args, { timeout: 2e3, maxBuffer: 1024 });
@@ -43985,14 +44235,15 @@ async function handleRequestFormPost(req, res, id) {
         depository: chosenDepository,
         cwd: process.cwd(),
         rotate: submission.rotate,
-        actor: "user"
+        actor: "user",
+        createVault: submission.confirmCreateVault
       });
       results.push({ name, ok: true });
     } catch (err) {
       results.push({ name, ok: false, errorCode: err instanceof EnigmaError ? err.code : "E_UNKNOWN" });
     }
   }
-  RequestStore.setResults(id, results);
+  RequestStore.fulfill(id, results);
   let html = request_done_default;
   html = renderRepeatingBlock(
     html,
@@ -44032,6 +44283,7 @@ async function handleRevealPost(res, id) {
     sendErrorPage(res, 410, "Already used", "This link has already been used.");
     return;
   }
+  RequestStore.fulfill(id);
   const [name] = marked.names;
   if (!name) {
     sendErrorPage(res, 404, "Not found", "This link is unknown or has expired.");
@@ -44219,13 +44471,21 @@ async function runNative(args, cwd) {
       usage: args.usage,
       rotate: args.rotate
     });
-    return textResult(renderStoredLines(result.stored, cwd).join("\n"));
+    const outcome = renderOutcome(
+      result.stored.map((name) => ({ name, ok: true })),
+      cwd
+    );
+    return textResult(outcome.text, outcome.isError);
   } catch (err) {
     if (err instanceof EnigmaError && err.secretName) {
       const failIndex = args.names.indexOf(err.secretName);
       const succeeded = failIndex >= 0 ? args.names.slice(0, failIndex) : [];
-      const lines = [...renderStoredLines(succeeded, cwd), `${err.secretName}: failed (${err.code})`];
-      return textResult(lines.join("\n"), true);
+      const results = [
+        ...succeeded.map((name) => ({ name, ok: true })),
+        { name: err.secretName, ok: false, errorCode: err.code }
+      ];
+      const outcome = renderOutcome(results, cwd);
+      return textResult(outcome.text, outcome.isError);
     }
     return errorResult(err);
   }
@@ -44282,7 +44542,7 @@ Client does not support URL-mode elicitation. Call enigma_await with this reques
       }
       const outcome = await resolveRequestOutcome(record2.id, cwd);
       await sendElicitationComplete(server.server, record2.id);
-      return textResult(outcome);
+      return textResult(outcome.text, outcome.isError);
     }
   );
 }
