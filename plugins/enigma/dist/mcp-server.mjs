@@ -42363,6 +42363,7 @@ function remoteUnavailable(detail) {
 function startCloudflaredTunnel(targetUrl) {
   return new Promise((resolve2, reject) => {
     const child = spawn("cloudflared", ["tunnel", "--url", targetUrl], { stdio: ["ignore", "ignore", "pipe"] });
+    child.unref();
     let stderrBuf = "";
     let settled2 = false;
     let stopped = false;
@@ -42463,6 +42464,7 @@ async function startTailscaleServe(port) {
   const target = `http://127.0.0.1:${port}`;
   return new Promise((resolve2, reject) => {
     const child = spawn2("tailscale", ["serve", `--https=${SERVE_PORT}`, target], { stdio: "ignore" });
+    child.unref();
     let settled2 = false;
     let stopped = false;
     let unexpectedExitResolve;
@@ -42506,6 +42508,7 @@ var INSTALL_HINTS = {
   cloudflared: 'cloudflared not found on PATH; install it (e.g. "brew install cloudflared", or see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)',
   tailscale: 'tailscale not found on PATH; install it (e.g. "brew install tailscale", or see https://tailscale.com/download)'
 };
+var TAILSCALE_CONCURRENT_MESSAGE = "a remote session is already active for this project \u2014 tailscale serve supports only one mapping at a time, and a second one would tear down the first mid-request; wait for it to finish or expire";
 function resolveRemotePreference(remote) {
   if (remote === true) return "required";
   if (remote === "prefer") return "prefer";
@@ -42517,27 +42520,42 @@ function selectBinary(config2) {
 function detectBinary(binary) {
   return binary === "tailscale" ? detectTailscale() : detectCloudflared();
 }
+var tailscaleClaimed = false;
 function startTunnel(binary, port) {
   return binary === "tailscale" ? startTailscaleServe(port) : startCloudflaredTunnel(`http://127.0.0.1:${port}`);
 }
 async function attemptRemoteTunnel(preference, config2, port) {
   if (preference === "none") return void 0;
   const binary = selectBinary(config2);
+  const refuse = (message) => {
+    if (preference === "required") throw new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message });
+    return { note: `Remote access unavailable \u2014 ${message}. Used the local link instead.` };
+  };
+  if (binary === "tailscale" && tailscaleClaimed) return refuse(TAILSCALE_CONCURRENT_MESSAGE);
   const available = await detectBinary(binary);
-  if (!available) {
-    const hint = INSTALL_HINTS[binary];
-    if (preference === "required") throw new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: hint });
-    return { note: `Remote access unavailable \u2014 ${hint}. Used the local link instead.` };
+  if (!available) return refuse(INSTALL_HINTS[binary]);
+  if (binary === "tailscale") {
+    if (tailscaleClaimed) return refuse(TAILSCALE_CONCURRENT_MESSAGE);
+    tailscaleClaimed = true;
   }
   try {
     const tunnel = await startTunnel(binary, port);
+    if (binary === "tailscale") {
+      const releaseClaim = () => {
+        tailscaleClaimed = false;
+      };
+      const originalStop = tunnel.stop;
+      tunnel.stop = () => {
+        originalStop();
+        releaseClaim();
+      };
+      void tunnel.waitForUnexpectedExit().then(releaseClaim);
+    }
     return { tunnel };
   } catch (err) {
+    if (binary === "tailscale") tailscaleClaimed = false;
     const reason = err instanceof EnigmaError ? err.message : `${binary} failed to start`;
-    if (preference === "required") {
-      throw err instanceof EnigmaError ? err : new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: reason });
-    }
-    return { note: `Remote access unavailable \u2014 ${reason}. Used the local link instead.` };
+    return refuse(reason);
   }
 }
 var CLEANUP_GRACE_MS = 6e4;
@@ -42562,7 +42580,10 @@ function registerActiveTunnel(requestId, attempt) {
   });
   void tunnel.waitForUnexpectedExit().then(() => {
     const entry = active.get(requestId);
-    if (entry) entry.note = `Remote access via ${tunnel.binary} was lost during this request; the local link still works.`;
+    if (entry) {
+      entry.tunnel = void 0;
+      entry.note = `Remote access via ${tunnel.binary} was lost during this request; the local link still works.`;
+    }
   });
 }
 function getActiveRemoteUrl(requestId) {
@@ -42573,6 +42594,24 @@ function takeRemoteNote(requestId) {
   active.delete(requestId);
   return entry?.note;
 }
+function stopAllActiveTunnels() {
+  for (const entry of active.values()) {
+    entry.tunnel?.stop();
+  }
+}
+var shutdownHandlersRegistered = false;
+function registerShutdownHandlers() {
+  if (shutdownHandlersRegistered) return;
+  shutdownHandlersRegistered = true;
+  process.once("exit", stopAllActiveTunnels);
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.once(signal, () => {
+      stopAllActiveTunnels();
+      process.kill(process.pid, signal);
+    });
+  }
+}
+registerShutdownHandlers();
 
 // src/core/naming.ts
 var NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
@@ -46422,30 +46461,44 @@ function registerRequestTool(server) {
       if (args.ui === "native" && process.platform === "darwin") {
         return runNative(args, cwd);
       }
-      const handle = await startServer();
       const preference = resolveRemotePreference(args.remote);
+      const clientSupportsUrl = supportsUrlElicitation(server.server);
       let remoteAttempt;
-      if (preference !== "none") {
+      if (preference !== "none" && !clientSupportsUrl) {
+        const reason = "this client does not support MCP URL-mode elicitation, so there is no out-of-band channel to deliver a public link through";
+        if (preference === "required") {
+          return errorResult(new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: reason }));
+        }
+        remoteAttempt = { note: `Remote access unavailable \u2014 ${reason}. Used the local link instead.` };
+      }
+      const handle = await startServer();
+      if (preference !== "none" && clientSupportsUrl) {
         try {
           remoteAttempt = await attemptRemoteTunnel(preference, loadConfig(), handle.port);
         } catch (err) {
           return errorResult(err);
         }
       }
-      const record2 = RequestStore.create({
-        kind: "request",
-        names: args.names,
-        reason: args.reason,
-        usage: args.usage,
-        depository: args.depository,
-        scope: args.scope,
-        rotate: args.rotate
-      });
+      let record2;
+      try {
+        record2 = RequestStore.create({
+          kind: "request",
+          names: args.names,
+          reason: args.reason,
+          usage: args.usage,
+          depository: args.depository,
+          scope: args.scope,
+          rotate: args.rotate
+        });
+      } catch (err) {
+        remoteAttempt?.tunnel?.stop();
+        throw err;
+      }
       if (remoteAttempt) registerActiveTunnel(record2.id, remoteAttempt);
       const origin = remoteAttempt?.tunnel?.url ?? handle.origin;
       const url2 = `${origin}/r/${record2.id}`;
       const remoteNote = remoteAttempt?.tunnel ? `Remote access via ${remoteAttempt.tunnel.binary} is active for this request.` : remoteAttempt?.note;
-      if (!supportsUrlElicitation(server.server)) {
+      if (!clientSupportsUrl) {
         const fallback = { request_id: record2.id, url: url2, expiresAt: new Date(record2.expiresAt).toISOString() };
         const lines = [
           JSON.stringify(fallback),
