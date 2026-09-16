@@ -1,0 +1,132 @@
+import { mkdtempSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { startServer, stopServer } from '../../../../src/web/server.js';
+import { RequestStore } from '../../../../src/request/store.js';
+import { setSecret } from '../../../../src/storage/manager.js';
+
+describe('GET/POST /r/:id', () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+  let origin: string;
+
+  beforeEach(async () => {
+    tmpHome = mkdtempSync(join(tmpdir(), 'enigma-home-'));
+    originalHome = process.env.ENIGMA_HOME;
+    process.env.ENIGMA_HOME = tmpHome;
+    RequestStore.__resetForTests();
+    origin = (await startServer()).origin;
+  });
+
+  afterEach(async () => {
+    await stopServer();
+    RequestStore.__resetForTests();
+    if (originalHome === undefined) delete process.env.ENIGMA_HOME;
+    else process.env.ENIGMA_HOME = originalHome;
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it('GET returns 404 for an unknown id', async () => {
+    const resp = await fetch(`${origin}/r/${'a'.repeat(32)}`);
+    expect(resp.status).toBe(404);
+  });
+
+  it('GET returns 404 for a reveal-kind id (route/kind mismatch)', async () => {
+    const record = RequestStore.create({ kind: 'reveal', names: ['OPENAI_API_KEY'] });
+    const resp = await fetch(`${origin}/r/${record.id}`);
+    expect(resp.status).toBe(404);
+  });
+
+  it('GET returns 410 once the id has been used', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    RequestStore.tryMarkUsed(record.id);
+
+    const resp = await fetch(`${origin}/r/${record.id}`);
+    expect(resp.status).toBe(410);
+  });
+
+  it('GET renders the depository picker with prompt-profile labels and the requested name', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], reason: 'testing' });
+    const resp = await fetch(`${origin}/r/${record.id}`);
+    const html = await resp.text();
+
+    expect(html).toContain('OPENAI_API_KEY');
+    expect(html).toContain('encrypted (no prompt)');
+    expect(html).toContain('testing');
+  });
+
+  it('POST without a chosen depository re-renders the form with an error, id stays usable', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    const resp = await fetch(`${origin}/r/${record.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ OPENAI_API_KEY: 'value' }).toString(),
+    });
+
+    expect(resp.status).toBe(200);
+    expect(await resp.text()).toContain('Choose a depository');
+    expect(RequestStore.get(record.id)?.usedAt).toBeUndefined();
+  });
+
+  it('POST with an unavailable depository re-renders the confirmation without consuming the id', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    const resp = await fetch(`${origin}/r/${record.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ OPENAI_API_KEY: 'value', depository: '1password', scope: 'global' }).toString(),
+    });
+
+    expect(resp.status).toBe(200);
+    const html = await resp.text();
+    expect(html).toContain('1password');
+    expect(html).toContain("isn't set up yet");
+    expect(RequestStore.get(record.id)?.usedAt).toBeUndefined();
+  });
+
+  it('POST with confirmCreateVault set still records the write failure via per-name results, without crashing (AC5, D4)', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    const resp = await fetch(`${origin}/r/${record.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({
+        OPENAI_API_KEY: 'value',
+        depository: '1password',
+        scope: 'global',
+        confirmCreateVault: 'on',
+      }).toString(),
+    });
+
+    expect(resp.status).toBe(200);
+    expect(await resp.text()).toContain('failed');
+    expect(RequestStore.get(record.id)?.usedAt).toBeDefined();
+    expect(RequestStore.get(record.id)?.results).toEqual([
+      { name: 'OPENAI_API_KEY', ok: false, errorCode: 'E_DEPOSITORY_UNAVAILABLE' },
+    ]);
+  });
+
+  it('GET shows a rotate warning when the name already exists', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: 'old-value', scope: 'global', depository: 'encrypted', actor: 'cli' });
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], scope: 'global' });
+
+    const resp = await fetch(`${origin}/r/${record.id}`);
+    expect(await resp.text()).toContain('already exists and will be rotated');
+  });
+
+  it('replaying a used id returns 410 and performs no second write', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], scope: 'global' });
+    await fetch(`${origin}/r/${record.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ OPENAI_API_KEY: 'first-value', depository: 'encrypted', scope: 'global' }).toString(),
+    });
+
+    const replay = await fetch(`${origin}/r/${record.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ OPENAI_API_KEY: 'second-value', depository: 'encrypted', scope: 'global' }).toString(),
+    });
+
+    expect(replay.status).toBe(410);
+  });
+});

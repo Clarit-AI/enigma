@@ -7,8 +7,7 @@ import { join } from 'node:path';
 
 const ALLOW_PREFIX = '// enigma:leak-fence-allow:';
 const LEAK_PATTERN = /\bresolve\s*\(/;
-// Issue #7 adds src/web to this list once that surface exists.
-const SCAN_DIRS = ['src/mcp'];
+const SCAN_DIRS = ['src/mcp', 'src/web'];
 
 function walk(dir) {
   const entries = readdirSync(dir, { withFileTypes: true });
