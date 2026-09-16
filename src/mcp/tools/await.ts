@@ -27,7 +27,7 @@ export function registerAwaitTool(server: McpServer): void {
 
       try {
         const outcome = await resolveRequestOutcome(args.request_id, cwd);
-        return textResult(outcome);
+        return textResult(outcome.text, outcome.isError);
       } catch {
         return errorResult(
           new EnigmaError({ code: 'E_REQUEST_EXPIRED', message: `request ${args.request_id} expired before it was fulfilled` }),

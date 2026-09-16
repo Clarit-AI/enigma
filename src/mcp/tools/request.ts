@@ -4,13 +4,14 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { Scope } from '../../core/index-store.js';
 import { EnigmaError } from '../../core/errors.js';
 import { nativeRequest } from '../../native/request.js';
+import type { RequestNameResult } from '../../request/store.js';
 import { RequestStore } from '../../request/store.js';
 import { hasSecret } from '../../storage/manager.js';
 import type { DepositoryId } from '../../storage/interfaces.js';
 import { startServer } from '../../web/server.js';
 import { elicitUrl, sendElicitationComplete, supportsUrlElicitation } from '../elicit.js';
 import { resolveRequestOutcome } from '../request-outcome.js';
-import { errorResult, renderStoredLines, textResult } from '../result-text.js';
+import { errorResult, renderOutcome, textResult } from '../result-text.js';
 import { DEPOSITORY_ID_SCHEMA, SCOPE_SCHEMA } from '../schemas.js';
 
 interface RequestArgs {
@@ -58,13 +59,21 @@ async function runNative(args: RequestArgs, cwd: string): Promise<CallToolResult
       usage: args.usage,
       rotate: args.rotate,
     });
-    return textResult(renderStoredLines(result.stored, cwd).join('\n'));
+    const outcome = renderOutcome(
+      result.stored.map((name): RequestNameResult => ({ name, ok: true })),
+      cwd,
+    );
+    return textResult(outcome.text, outcome.isError);
   } catch (err) {
     if (err instanceof EnigmaError && err.secretName) {
       const failIndex = args.names.indexOf(err.secretName);
       const succeeded = failIndex >= 0 ? args.names.slice(0, failIndex) : [];
-      const lines = [...renderStoredLines(succeeded, cwd), `${err.secretName}: failed (${err.code})`];
-      return textResult(lines.join('\n'), true);
+      const results: RequestNameResult[] = [
+        ...succeeded.map((name): RequestNameResult => ({ name, ok: true })),
+        { name: err.secretName, ok: false, errorCode: err.code },
+      ];
+      const outcome = renderOutcome(results, cwd);
+      return textResult(outcome.text, outcome.isError);
     }
     return errorResult(err);
   }
@@ -129,7 +138,7 @@ export function registerRequestTool(server: McpServer): void {
 
       const outcome = await resolveRequestOutcome(record.id, cwd);
       await sendElicitationComplete(server.server, record.id);
-      return textResult(outcome);
+      return textResult(outcome.text, outcome.isError);
     },
   );
 }

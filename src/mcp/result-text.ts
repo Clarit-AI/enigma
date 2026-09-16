@@ -1,6 +1,7 @@
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { EnigmaError } from '../core/errors.js';
 import type { IndexEntryView } from '../core/index-store.js';
+import type { RequestNameResult } from '../request/store.js';
 import { listSecrets } from '../storage/manager.js';
 
 export function textResult(text: string, isError = false): CallToolResult {
@@ -40,4 +41,32 @@ export function renderStoredLine(name: string, cwd: string): string {
 
 export function renderStoredLines(names: string[], cwd: string): string[] {
   return names.map((name) => renderStoredLine(name, cwd));
+}
+
+export interface Outcome {
+  text: string;
+  isError: boolean;
+}
+
+/**
+ * Renders a batch outcome — failures first (named, with their error code),
+ * then successes as "Stored NAME in <depository> (<scope>)" lines — shared
+ * by enigma_request's elicitation/fallback/native paths and enigma_await, so
+ * the shape and the isError rule never drift between them (Tech Lead ruling,
+ * 2026-09-16):
+ *   - every name failed: isError:true — nothing was accomplished, the agent
+ *     must not proceed as though it has the secrets.
+ *   - some succeeded: isError:false — the agent genuinely accomplished part
+ *     of the task and must not redo the successful writes; the failures are
+ *     led and named so it can retry precisely instead of re-requesting
+ *     everything.
+ */
+export function renderOutcome(results: RequestNameResult[], cwd: string): Outcome {
+  const failed = results.filter((r) => !r.ok);
+  const succeeded = results.filter((r) => r.ok);
+  const lines = [
+    ...failed.map((r) => `${r.name}: failed (${r.errorCode ?? 'E_UNKNOWN'})`),
+    ...renderStoredLines(succeeded.map((r) => r.name), cwd),
+  ];
+  return { text: lines.join('\n'), isError: succeeded.length === 0 };
 }
