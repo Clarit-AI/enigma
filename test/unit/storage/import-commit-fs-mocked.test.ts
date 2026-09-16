@@ -13,12 +13,14 @@ let readFileOverride: ((path: unknown) => string | undefined) | undefined;
 /**
  * `setSecret` itself writes index.json (and, for 'encrypted', secrets.enc)
  * through the SAME temp-file-plus-rename pattern this test is probing on
- * the .env rewrite — so throwing on every renameSync call also breaks the
- * depository write before it ever reaches the .env rewrite. Scoped to the
- * exact target path under test.
+ * the .env rewrite — so throwing on every renameSync/unlinkSync call also
+ * breaks the depository write before it ever reaches the .env rewrite.
+ * Scoped to the exact target path under test.
  */
 let renameShouldThrowForTarget: string | undefined;
+let unlinkShouldThrow = false;
 const renameCalls: Array<[unknown, unknown]> = [];
+const unlinkCalls: unknown[] = [];
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -36,12 +38,17 @@ vi.mock('node:fs', async (importOriginal) => {
       }
       return actual.renameSync(from as never, to as never);
     },
+    unlinkSync: (path: unknown) => {
+      unlinkCalls.push(path);
+      if (unlinkShouldThrow) throw new Error('simulated permission denied');
+      return actual.unlinkSync(path as never);
+    },
   };
 });
 
 const { commitImport } = await import('../../../src/storage/import-commit.js');
 const { listSecrets } = await import('../../../src/storage/manager.js');
-const { readFileSync: realReadFileSync } = await import('node:fs');
+const { existsSync: realExistsSync, readFileSync: realReadFileSync } = await import('node:fs');
 
 function entry(name: string, value: string): ParsedDotEnvEntry {
   return { name, value, ambiguous: false };
@@ -61,7 +68,9 @@ describe('commitImport (fs-mocked edge cases, Issue #13 review round 2)', () => 
     envFilePath = join(tmpProject, '.env');
     readFileOverride = undefined;
     renameShouldThrowForTarget = undefined;
+    unlinkShouldThrow = false;
     renameCalls.length = 0;
+    unlinkCalls.length = 0;
   });
 
   afterEach(() => {
@@ -71,6 +80,7 @@ describe('commitImport (fs-mocked edge cases, Issue #13 review round 2)', () => 
     rmSync(tmpProject, { recursive: true, force: true });
     readFileOverride = undefined;
     renameShouldThrowForTarget = undefined;
+    unlinkShouldThrow = false;
   });
 
   describe('B1: parse/rewrite interleaving', () => {
@@ -144,13 +154,36 @@ describe('commitImport (fs-mocked edge cases, Issue #13 review round 2)', () => 
   });
 
   describe('A1: atomic rewrite', () => {
-    it('a failure during the rename step never leaves the original file corrupted or truncated', async () => {
+    it('a failure during the rename step never leaves the original file corrupted or truncated, and never throws — reported via warnings instead', async () => {
       const original = '# header\nKEEP_ME=1\nOPENAI_API_KEY=sk-abc\n';
       writeFileSync(envFilePath, original);
       renameShouldThrowForTarget = envFilePath;
 
-      await expect(
-        commitImport({
+      const result = await commitImport({
+        entries: [entry('OPENAI_API_KEY', 'sk-abc')],
+        depository: 'encrypted',
+        scope: 'project',
+        cwd: tmpProject,
+        projectPath: tmpProject,
+        envFilePath,
+        actor: 'cli',
+      });
+
+      // The depository write already succeeded — that's expected and not what's under
+      // test. What matters: the file on disk is exactly what it was, never truncated
+      // or half-swapped, and the failure is reported rather than thrown.
+      expect(result.succeeded).toEqual(['OPENAI_API_KEY']);
+      expect(result.fileRewritten).toBe(false);
+      expect(result.warnings.some((w) => w.includes('Failed to rewrite') && w.includes('simulated crash before rename'))).toBe(true);
+      expect(realReadFileSync(envFilePath, 'utf8')).toBe(original);
+    });
+
+    describe('item 2: temp file cleanup (Issue #13 review, round 3)', () => {
+      it('a plaintext temp file left behind by a failed rename is cleaned up automatically', async () => {
+        writeFileSync(envFilePath, 'OPENAI_API_KEY=sk-abc\n');
+        renameShouldThrowForTarget = envFilePath;
+
+        await commitImport({
           entries: [entry('OPENAI_API_KEY', 'sk-abc')],
           depository: 'encrypted',
           scope: 'project',
@@ -158,13 +191,34 @@ describe('commitImport (fs-mocked edge cases, Issue #13 review round 2)', () => 
           projectPath: tmpProject,
           envFilePath,
           actor: 'cli',
-        }),
-      ).rejects.toThrow('simulated crash before rename');
+        });
 
-      // The depository write already succeeded — that's expected and not what's under
-      // test. What matters: the file on disk is exactly what it was, never truncated
-      // or half-swapped.
-      expect(realReadFileSync(envFilePath, 'utf8')).toBe(original);
+        expect(unlinkCalls).toHaveLength(1);
+        const [tmpPath] = renameCalls.filter(([, to]) => to === envFilePath)[0]!;
+        expect(realExistsSync(tmpPath as string)).toBe(false);
+      });
+
+      it('when the cleanup itself also fails, the leftover path is named in warnings rather than swallowed', async () => {
+        writeFileSync(envFilePath, 'OPENAI_API_KEY=sk-abc\n');
+        renameShouldThrowForTarget = envFilePath;
+        unlinkShouldThrow = true;
+
+        const result = await commitImport({
+          entries: [entry('OPENAI_API_KEY', 'sk-abc')],
+          depository: 'encrypted',
+          scope: 'project',
+          cwd: tmpProject,
+          projectPath: tmpProject,
+          envFilePath,
+          actor: 'cli',
+        });
+
+        const [tmpPath] = renameCalls.filter(([, to]) => to === envFilePath)[0]!;
+        expect(result.warnings.some((w) => w.includes(String(tmpPath)) && w.includes('could not be removed automatically'))).toBe(true);
+        // The leftover really is still there — this test's own cleanup below removes it for real.
+        expect(realExistsSync(tmpPath as string)).toBe(true);
+        rmSync(tmpPath as string, { force: true });
+      });
     });
 
     it('renames a sibling temp file onto the target rather than truncating it in place', async () => {

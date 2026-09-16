@@ -4,11 +4,17 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { commitImport } from '../../../src/storage/import-commit.js';
 import { listSecrets } from '../../../src/storage/manager.js';
+import { parseDotEnv } from '../../../src/storage/dotenv-file.js';
 import type { ParsedDotEnvEntry } from '../../../src/storage/dotenv-file.js';
 
-/** Shorthand for an unambiguous entry literal — most tests here don't care about A2. */
-function entry(name: string, value: string, ambiguous = false): ParsedDotEnvEntry {
-  return { name, value, ambiguous };
+/** Shorthand for an unambiguous entry literal — most tests here don't care about A2/duplicate-key handling. */
+function entry(name: string, value: string): ParsedDotEnvEntry {
+  return { name, value, ambiguous: false };
+}
+
+/** Builds a real (ambiguous, ambiguousReason)-carrying entry via the actual parser, rather than hand-rolling a reason string that could drift from what production code produces. */
+function parsedEntry(line: string, name: string): ParsedDotEnvEntry {
+  return parseDotEnv(line).entries.find((e) => e.name === name)!;
 }
 
 describe('commitImport', () => {
@@ -187,7 +193,7 @@ describe('commitImport', () => {
       writeFileSync(envFilePath, 'PORT=3000 # dev port\n');
 
       const result = await commitImport({
-        entries: [entry('PORT', '3000 # dev port', true)],
+        entries: [parsedEntry('PORT=3000 # dev port\n', 'PORT')],
         depository: 'encrypted',
         scope: 'project',
         cwd: tmpProject,
@@ -209,7 +215,7 @@ describe('commitImport', () => {
       writeFileSync(envFilePath, 'PASSPHRASE=hunter2 #1\n');
 
       const result = await commitImport({
-        entries: [entry('PASSPHRASE', 'hunter2 #1', true)],
+        entries: [parsedEntry('PASSPHRASE=hunter2 #1\n', 'PASSPHRASE')],
         depository: 'encrypted',
         scope: 'project',
         cwd: tmpProject,
@@ -227,7 +233,7 @@ describe('commitImport', () => {
       writeFileSync(envFilePath, 'TOKEN="abc#def"\n');
 
       const result = await commitImport({
-        entries: [entry('TOKEN', 'abc#def', false)],
+        entries: [entry('TOKEN', 'abc#def')],
         depository: 'encrypted',
         scope: 'project',
         cwd: tmpProject,
@@ -245,7 +251,7 @@ describe('commitImport', () => {
       writeFileSync(envFilePath, 'OPENAI_API_KEY=sk-abc\n');
 
       const result = await commitImport({
-        entries: [entry('OPENAI_API_KEY', 'sk-abc', false)],
+        entries: [entry('OPENAI_API_KEY', 'sk-abc')],
         depository: 'encrypted',
         scope: 'project',
         cwd: tmpProject,
@@ -256,6 +262,55 @@ describe('commitImport', () => {
 
       expect(result.succeeded).toEqual(['OPENAI_API_KEY']);
       expect(result.fileRewritten).toBe(true);
+    });
+  });
+
+  describe('duplicate keys (Issue #13 review, round 3, item 1)', () => {
+    it('a duplicated key with two different values refuses through the loud-abort path — neither line is removed', async () => {
+      const original = 'API_KEY=real-production-key\nAPI_KEY=placeholder\n';
+      writeFileSync(envFilePath, original);
+
+      const result = await commitImport({
+        entries: [parsedEntry(original, 'API_KEY')],
+        depository: 'encrypted',
+        scope: 'project',
+        cwd: tmpProject,
+        projectPath: tmpProject,
+        envFilePath,
+        actor: 'cli',
+      });
+
+      expect(result.succeeded).toEqual([]);
+      expect(result.failed).toEqual([
+        { name: 'API_KEY', errorCode: 'E_VALUE_AMBIGUOUS', message: expect.stringContaining('assigned more than once') },
+      ]);
+      expect(result.fileRewritten).toBe(false);
+      // Neither the never-migrated first value nor the migrated-nowhere last value is stored...
+      expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+      // ...and both physical lines survive exactly as they were — no line is promoted, none is dropped.
+      expect(readFileSync(envFilePath, 'utf8')).toBe(original);
+    });
+
+    it('a duplicated key does not block unrelated names earlier in the batch from succeeding', async () => {
+      const content = 'GITHUB_TOKEN=ghp-xyz\nAPI_KEY=first\nAPI_KEY=second\n';
+      writeFileSync(envFilePath, content);
+      const parsed = parseDotEnv(content);
+
+      const result = await commitImport({
+        entries: parsed.entries,
+        depository: 'encrypted',
+        scope: 'project',
+        cwd: tmpProject,
+        projectPath: tmpProject,
+        envFilePath,
+        actor: 'cli',
+      });
+
+      expect(result.succeeded).toEqual(['GITHUB_TOKEN']);
+      expect(result.failed[0]?.name).toBe('API_KEY');
+      expect(result.fileRewritten).toBe(false);
+      // GITHUB_TOKEN's line is left in the file too — the whole batch aborted, matching every other loud-abort case.
+      expect(readFileSync(envFilePath, 'utf8')).toBe(content);
     });
   });
 });

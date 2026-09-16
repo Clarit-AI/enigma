@@ -3,7 +3,7 @@
 // partial migration" contract can't drift between entry points. Lives in
 // src/storage/** — an allowed location for in-flight values (style-guide).
 import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import type { AuditActor } from '../core/audit.js';
 import { EnigmaError } from '../core/errors.js';
 import type { Scope } from '../core/index-store.js';
@@ -15,6 +15,14 @@ import { setSecret } from './manager.js';
 
 const FILE_MODE = 0o600;
 
+interface AtomicWriteResult {
+  ok: boolean;
+  /** Set iff !ok: the write/rename failure, safe to surface (never a value — this is filesystem error text, not file content). */
+  error?: string;
+  /** Set iff !ok AND the leftover temp file (holding the FULL rewritten content — every other credential in the file, not just the migrated ones) could not be cleaned up either. Names the path so the caller can tell the user, rather than leaving a plaintext file silently sitting in the project directory. */
+  leftoverPath?: string;
+}
+
 /**
  * Temp file + rename, in the same directory as `path` (so the rename is
  * atomic on the same filesystem). This rewrite touches the WHOLE file,
@@ -22,11 +30,28 @@ const FILE_MODE = 0o600;
  * depository copy anywhere — unlike the `env` depository's own block-only
  * writes, a torn write here could destroy credentials this command was
  * never asked to touch (Issue #13 review, round 2, A1).
+ *
+ * Never throws: a write or rename failure is reported via the return value
+ * so the caller can fold it into `warnings[]` rather than crash. On failure,
+ * always attempts to unlink the temp file — leaving a plaintext copy of the
+ * whole file sitting in the project directory is exactly what a later
+ * `git add -A` sweeps up, and it must never happen silently (round 3, item 2).
  */
-function writeFileAtomic(path: string, content: string, mode: number): void {
+function writeFileAtomic(path: string, content: string, mode: number): AtomicWriteResult {
   const tmpPath = `${path}.${randomBytes(6).toString('hex')}.tmp`;
-  writeFileSync(tmpPath, content, { mode });
-  renameSync(tmpPath, path);
+  try {
+    writeFileSync(tmpPath, content, { mode });
+    renameSync(tmpPath, path);
+    return { ok: true };
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    try {
+      if (existsSync(tmpPath)) unlinkSync(tmpPath);
+      return { ok: false, error };
+    } catch {
+      return { ok: false, error, leftoverPath: tmpPath };
+    }
+  }
 }
 
 export interface ImportCommitOptions {
@@ -60,10 +85,11 @@ export interface ImportCommitResult {
   warnings: string[];
 }
 
+/** One code, one path, for every reason `parseDotEnv` can flag an entry `ambiguous` (inline-comment-like value, or a duplicated name) — the reason text itself comes from the parser, which is the only place with enough context to phrase it precisely. */
 function ambiguousValueError(entry: ParsedDotEnvEntry, envFilePath: string): EnigmaError {
   return new EnigmaError({
     code: 'E_VALUE_AMBIGUOUS',
-    message: `value for ${entry.name} in ${envFilePath} contains an unquoted " #", which could start a comment or be part of the secret — quote the value if the # belongs to it, then rerun import`,
+    message: `${entry.name} in ${envFilePath} is ambiguous: ${entry.ambiguousReason ?? 'the value or its assignment could not be resolved unambiguously'}`,
     secretName: entry.name,
   });
 }
@@ -91,7 +117,11 @@ function ambiguousValueError(entry: ParsedDotEnvEntry, envFilePath: string): Eni
  * turning what would otherwise be a silent value loss into an informative
  * refusal for that one name. The rewrite itself is temp-file-plus-rename
  * (round 2, A1): a crash mid-write must never be able to leave the file
- * truncated, since it also carries keys this batch never touched.
+ * truncated, since it also carries keys this batch never touched. A failed
+ * rewrite is reported in `warnings` rather than thrown, and its leftover
+ * temp file is cleaned up — or, if that cleanup itself fails, named in a
+ * second warning rather than left as a silent plaintext copy in the project
+ * directory (round 3, item 2).
  */
 export async function commitImport(opts: ImportCommitOptions): Promise<ImportCommitResult> {
   const succeeded: string[] = [];
@@ -158,8 +188,24 @@ export async function commitImport(opts: ImportCommitOptions): Promise<ImportCom
       ? undefined
       : `# Moved to Enigma (${opts.depository}) by \`enigma import\` on ${new Date().toISOString()}: ${toRemove.join(', ')}`;
   const rewritten = toRemove.length > 0 ? removeDotEnvEntries(currentContent, toRemove, { comment: movedComment }) : currentContent;
-  const fileRewritten = rewritten !== currentContent;
-  if (fileRewritten) writeFileAtomic(opts.envFilePath, rewritten, FILE_MODE);
+  const needsWrite = rewritten !== currentContent;
 
-  return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten, warnings };
+  if (!needsWrite) {
+    return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: false, warnings };
+  }
+
+  const writeResult = writeFileAtomic(opts.envFilePath, rewritten, FILE_MODE);
+  if (!writeResult.ok) {
+    warnings.push(
+      `Failed to rewrite ${opts.envFilePath} (${writeResult.error}). The migrated secret(s) (${toRemove.join(', ')}) are safely stored, but their plaintext line(s) were left in place because the file could not be rewritten — rerun import once the issue is fixed, or remove them from .env manually.`,
+    );
+    if (writeResult.leftoverPath) {
+      warnings.push(
+        `A temporary file containing the full rewritten .env content was left behind at ${writeResult.leftoverPath} and could not be removed automatically — delete it manually as soon as possible.`,
+      );
+    }
+    return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: false, warnings };
+  }
+
+  return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: true, warnings };
 }
