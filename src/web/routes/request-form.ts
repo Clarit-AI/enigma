@@ -156,6 +156,7 @@ export async function handleRequestFormPost(req: IncomingMessage, res: ServerRes
         cwd: process.cwd(),
         rotate: submission.rotate,
         actor: 'user',
+        createVault: submission.confirmCreateVault,
       });
       results.push({ name, ok: true });
     } catch (err) {
