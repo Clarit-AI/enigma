@@ -12,20 +12,21 @@ export interface EnigmaErrorOptions {
   code: EnigmaErrorCode;
   message: string;
   /** The canonical secret name this error concerns, if any. */
-  name?: string;
+  secretName?: string;
   /** The depository id this error concerns, if any. */
   depository?: string;
 }
 
-// `name` is the secret's canonical name, not the JS Error class name (both are safe to log per ADR-001).
 export class EnigmaError extends Error {
   readonly code: EnigmaErrorCode;
+  readonly secretName?: string;
   readonly depository?: string;
 
   constructor(options: EnigmaErrorOptions) {
     super(options.message);
-    this.name = options.name ?? 'EnigmaError';
+    this.name = 'EnigmaError';
     this.code = options.code;
+    this.secretName = options.secretName;
     this.depository = options.depository;
     Object.setPrototypeOf(this, EnigmaError.prototype);
   }

@@ -24,7 +24,7 @@ plugins/enigma/   plugin manifest, .mcp.json, hooks/, skills/, commands/, dist/
 
 ## Secret-handling conventions (enforced by review and the leak fence)
 - A value may exist only inside `src/storage/**`, `src/request/**` (in flight), `src/web/**` request handlers (in flight), `src/native/**`, `src/hooks/tripwire.ts`, and `cli/commands/{run,get,reveal,move,import}`.
-- Never log, throw, or return a value. Errors are `EnigmaError { code, message, name?, depository? }`.
+- Never log, throw, or return a value. Errors are `EnigmaError { code, message, secretName?, depository? }`.
 - Never place a value in `argv`, a URL, an env var of the plugin's own process, or a temp file. Child processes receive values on stdin or in their own env (for `run`).
 - Zero out `Buffer`s holding values after use where practical.
 
