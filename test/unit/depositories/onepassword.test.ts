@@ -198,6 +198,27 @@ describe('onepassword depository', () => {
       expect(template.title).toBe('OPENAI_API_KEY');
     });
 
+    it('documents (does not disambiguate) a title collision between two different projects sharing a folder basename — cosmetic only, since reads go by item id (D1.9) and titles are never disambiguated beyond the folder name the spec calls for', async () => {
+      respond = () => itemCreateOk('id-for-project-a');
+      const depoA = onepasswordDepositoryModule.create({ projectPath: '/Users/alice/work/widgets' });
+      await depoA.set('aaaa1111aaaa1111/OPENAI_API_KEY', SENTINEL);
+      const titleA = (JSON.parse(calls[0]!.stdinData) as { title: string }).title;
+
+      calls.length = 0;
+      respond = () => itemCreateOk('id-for-project-b');
+      const depoB = onepasswordDepositoryModule.create({ projectPath: '/Users/bob/other/widgets' });
+      await depoB.set('bbbb2222bbbb2222/OPENAI_API_KEY', SENTINEL);
+      const titleB = (JSON.parse(calls[0]!.stdinData) as { title: string }).title;
+
+      // Same title string for two distinct projects — expected per D1.9's
+      // literal "NAME · <project folder>" format. Not a bug: set() already
+      // returned a distinct item id for each (asserted above via distinct
+      // mocked ids), and resolve()/delete() key off that id, never the
+      // title.
+      expect(titleA).toBe(titleB);
+      expect(titleA).toBe('OPENAI_API_KEY · widgets');
+    });
+
     it('throws E_VAULT_MISSING and creates nothing when the vault is missing and createVault was not passed', async () => {
       respond = () => opError('"Enigma" isn\'t a vault in this account');
       const depo = onepasswordDepositoryModule.create({});
@@ -358,6 +379,20 @@ describe('onepassword depository', () => {
       await expect(depo.delete('abc123itemid')).rejects.toThrow(expect.objectContaining({ code: 'E_READ_FAILED' }));
     });
 
+    it('throws a distinct, signin-pointing E_READ_FAILED on timeout, never silently treating a stuck auth prompt as "already deleted"', async () => {
+      respond = () => ({ timedOut: true });
+      const depo = onepasswordDepositoryModule.create({});
+
+      try {
+        await depo.delete('abc123itemid');
+        expect.unreachable();
+      } catch (err) {
+        expect(err).toBeInstanceOf(EnigmaError);
+        expect((err as EnigmaError).code).toBe('E_READ_FAILED');
+        expect((err as EnigmaError).message).toMatch(/signin|sign in|unlock/i);
+      }
+    });
+
     it('rejects an invalid ref before spawning anything', async () => {
       const depo = onepasswordDepositoryModule.create({});
 
@@ -377,6 +412,12 @@ describe('onepassword depository', () => {
       respond = () => opError('not found');
       const depo = onepasswordDepositoryModule.create({});
       await expect(depo.has('missing')).resolves.toBe(false);
+    });
+
+    it('resolves to false (never hangs) when the op call times out — bounded by the same 15s timeout as every other call, matching the existing keychain/secret-service has() convention of swallowing any failure to false', async () => {
+      respond = () => ({ timedOut: true });
+      const depo = onepasswordDepositoryModule.create({});
+      await expect(depo.has('abc123itemid')).resolves.toBe(false);
     });
 
     it('rejects an invalid ref before spawning anything', async () => {
