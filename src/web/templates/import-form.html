@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Enigma — import</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    max-width: 480px;
+    margin: 6vh auto 40px;
+    padding: 0 16px;
+    box-sizing: border-box;
+    color: #18181b;
+    background: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e4e4e7; background: #18181b; }
+    .card, fieldset { border-color: #3f3f46 !important; background: #27272a !important; }
+    select { background: #18181b !important; color: #e4e4e7 !important; border-color: #3f3f46 !important; }
+    button[type="submit"] { background: #e4e4e7 !important; color: #18181b !important; }
+    .warn { background: #422006 !important; color: #fde68a !important; }
+    .error { background: #450a0a !important; color: #fecaca !important; }
+  }
+  * { box-sizing: border-box; }
+  .card { border: 1px solid #e4e4e7; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  h1 { font-size: 1.1rem; margin: 0 0 4px; }
+  p.muted { color: #71717a; margin: 4px 0 16px; }
+  fieldset { border: 1px solid #e4e4e7; border-radius: 10px; margin: 0 0 12px; padding: 12px; }
+  legend { padding: 0 6px; font-weight: 600; font-size: 0.9rem; }
+  label { display: block; font-size: 0.85rem; margin: 10px 0 4px; }
+  select { width: 100%; padding: 10px; border: 1px solid #d4d4d8; border-radius: 8px; font-size: 1rem; }
+  ul.names { list-style: none; margin: 0 0 12px; padding: 0; }
+  ul.names li { padding: 6px 0; border-top: 1px solid #e4e4e7; font-size: 0.9rem; }
+  ul.names li:first-child { border-top: none; }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .checkbox-row label { margin: 0; }
+  button[type="submit"] {
+    width: 100%; padding: 12px; border: none; border-radius: 8px;
+    background: #18181b; color: #fff; font-size: 1rem; cursor: pointer; margin-top: 8px;
+  }
+  .warn { background: #fef9c3; color: #713f12; border-radius: 8px; padding: 10px; font-size: 0.85rem; margin-bottom: 12px; }
+  .error { background: #fee2e2; color: #7f1d1d; border-radius: 8px; padding: 10px; font-size: 0.85rem; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Import secrets</h1>
+    <p class="muted">{{COUNT}} secret(s) parsed from the project's .env. Choose where to store them.</p>
+
+    <!--BLOCK:ERROR_BLOCK-->
+    <div class="error">{{ERROR_MESSAGE}}</div>
+    <!--/BLOCK:ERROR_BLOCK-->
+
+    <!--BLOCK:WARN_BLOCK-->
+    <div class="warn">{{WARN_MESSAGE}}</div>
+    <!--/BLOCK:WARN_BLOCK-->
+
+    <!--BLOCK:CONFIRM_BLOCK-->
+    <div class="warn">
+      The <strong>{{CONFIRM_DEPOSITORY}}</strong> depository isn't set up yet. Check the box below to confirm creating it and try again.
+    </div>
+    <!--/BLOCK:CONFIRM_BLOCK-->
+
+    <ul class="names">
+      <!--BLOCK:NAME_ROW-->
+      <li>{{NAME}}</li>
+      <!--/BLOCK:NAME_ROW-->
+    </ul>
+
+    <form method="post" action="/i/{{ID}}">
+      <fieldset>
+        <legend>Where to store them</legend>
+        <label for="depository">Depository</label>
+        <select id="depository" name="depository">
+          <!--BLOCK:DEP_OPTION-->
+          <option value="{{DEP_ID}}" {{DEP_SELECTED}}>{{DEP_LABEL}}</option>
+          <!--/BLOCK:DEP_OPTION-->
+        </select>
+
+        <div class="checkbox-row">
+          <input id="rotate" type="checkbox" name="rotate" />
+          <label for="rotate">Rotate any that already exist</label>
+        </div>
+
+        <!--BLOCK:CONFIRM_CHECKBOX-->
+        <div class="checkbox-row">
+          <input id="confirmCreateVault" type="checkbox" name="confirmCreateVault" />
+          <label for="confirmCreateVault">Create the {{CONFIRM_DEPOSITORY}} depository</label>
+        </div>
+        <!--/BLOCK:CONFIRM_CHECKBOX-->
+      </fieldset>
+
+      <button type="submit">Import</button>
+    </form>
+  </div>
+</body>
+</html>
