@@ -130,6 +130,21 @@ describe('cmdDoctor', () => {
       expect(report.manifestGaps.sort()).toEqual(['GITHUB_TOKEN', 'OPENAI_API_KEY']);
     });
 
+    it('a same-named secret registered in an UNRELATED project must never mask a genuine gap here (Issue #13 review B2)', async () => {
+      const otherProject = realpathSync(mkdtempSync(join(tmpdir(), 'enigma-other-project-')));
+      mkdirSync(join(otherProject, '.git'));
+      try {
+        await setSecret({ name: 'API_KEY', value: 'unrelated-project-value', scope: 'project', depository: 'encrypted', cwd: otherProject, actor: 'cli' });
+        writeFileSync(join(tmpProject, '.enigma.json'), JSON.stringify({ secrets: { API_KEY: 'this project needs its own' } }));
+
+        await cmdDoctor(['--json']);
+        const report = JSON.parse(String(stdoutSpy.mock.calls[0]?.[0])) as { manifestGaps: string[] };
+        expect(report.manifestGaps).toEqual(['API_KEY']);
+      } finally {
+        rmSync(otherProject, { recursive: true, force: true });
+      }
+    });
+
     it('prints "Manifest gaps: none" in human output when there are no gaps, and the names when there are', async () => {
       await cmdDoctor([]);
       expect(stdoutSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toContain('Manifest gaps: none');

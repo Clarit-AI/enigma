@@ -67,4 +67,24 @@ describe('enigma_doctor', () => {
 
     await pair.close();
   });
+
+  it('a same-named secret registered in an UNRELATED project must never mask a genuine gap here (Issue #13 review B2)', async () => {
+    const otherProject = mkdtempSync(join(tmpdir(), 'enigma-other-project-'));
+    mkdirSync(join(otherProject, '.git'));
+    try {
+      await setSecret({ name: 'API_KEY', value: 'unrelated-project-value', scope: 'project', depository: 'encrypted', cwd: otherProject, actor: 'cli' });
+
+      writeFileSync(join(tmpProject, '.enigma.json'), JSON.stringify({ secrets: { API_KEY: 'this project needs its own' } }));
+      vi.spyOn(process, 'cwd').mockReturnValue(tmpProject);
+
+      const pair = await connectWithCapabilities({});
+      const result = await pair.client.callTool({ name: 'enigma_doctor', arguments: {} });
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+      expect(text).toContain('Manifest gaps: API_KEY');
+      await pair.close();
+    } finally {
+      rmSync(otherProject, { recursive: true, force: true });
+    }
+  });
 });

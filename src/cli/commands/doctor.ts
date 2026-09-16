@@ -4,11 +4,9 @@ import { platform, release } from 'node:os';
 import { promisify } from 'node:util';
 import { parseArgs } from '../args.js';
 import { detectAll } from '../../storage/detect.js';
-import { listSecrets } from '../../storage/manager.js';
-import { loadProjectManifest } from '../../core/config.js';
 import { readIndex } from '../../core/index-store.js';
+import { computeManifestGaps } from '../../core/manifest-gaps.js';
 import { auditLogPath, configPath, enigmaHome, indexPath, keyPath, secretsPath } from '../../core/paths.js';
-import { findProjectPath } from '../../core/project.js';
 import { EnigmaError } from '../../core/errors.js';
 
 const execFileAsync = promisify(execFile);
@@ -47,10 +45,7 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
     secretsFilePresent: existsSync(secretsPath()),
   };
 
-  const cwd = process.cwd();
-  const manifest = loadProjectManifest(findProjectPath(cwd));
-  const registeredNames = new Set(listSecrets({ scope: 'all', cwd }).map((e) => e.name));
-  const manifestGaps = Object.keys(manifest.secrets).filter((name) => !registeredNames.has(name));
+  const { gaps: manifestGaps } = computeManifestGaps(process.cwd());
 
   const report = {
     platform: `${platform()} ${release()}`,
