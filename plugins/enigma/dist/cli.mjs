@@ -996,13 +996,14 @@ async function resolveSecret(name, opts) {
   if (!entry) {
     throw new EnigmaError({ code: "E_NOT_FOUND", message: `${name} not found`, secretName: name });
   }
+  const op = opts.auditOp ?? "read";
   const depository = createDepository(entry.depository, projectPathFor(entry, opts.cwd));
   try {
     const value = await depository.resolve(entry.ref);
-    appendAuditEvent({ op: "read", name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: true, error: null });
+    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: true, error: null });
     return value;
   } catch (err) {
-    appendAuditEvent({ op: "read", name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
     throw err;
   }
 }
