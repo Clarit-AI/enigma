@@ -2,10 +2,13 @@ import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { Scope } from '../../core/index-store.js';
+import { loadConfig } from '../../core/config.js';
 import { EnigmaError } from '../../core/errors.js';
 import { nativeRequest } from '../../native/request.js';
 import type { RequestNameResult } from '../../request/store.js';
 import { RequestStore } from '../../request/store.js';
+import { attemptRemoteTunnel, registerActiveTunnel, resolveRemotePreference, takeRemoteNote } from '../../remote/index.js';
+import type { RemoteAttempt } from '../../remote/index.js';
 import { hasSecret } from '../../storage/manager.js';
 import type { DepositoryId } from '../../storage/interfaces.js';
 import { startServer } from '../../web/server.js';
@@ -22,7 +25,8 @@ interface RequestArgs {
   scope?: Scope;
   rotate?: boolean;
   ui?: 'web' | 'native';
-  remote?: boolean;
+  /** `true` → remote or an honest refusal; `"prefer"` → best-effort with a local fallback; absent → local only (Issue #12). */
+  remote?: boolean | 'prefer';
 }
 
 /** D1.3: overwrite requires rotate; without it the tool fails fast, before ever creating a request or bothering the user. */
@@ -94,7 +98,7 @@ export function registerRequestTool(server: McpServer): void {
         scope: SCOPE_SCHEMA.optional(),
         rotate: z.boolean().optional(),
         ui: z.enum(['web', 'native']).optional(),
-        remote: z.boolean().optional(),
+        remote: z.union([z.boolean(), z.literal('prefer')]).optional(),
       },
     },
     async (args) => {
@@ -108,6 +112,21 @@ export function registerRequestTool(server: McpServer): void {
       }
 
       const handle = await startServer();
+
+      const preference = resolveRemotePreference(args.remote);
+      let remoteAttempt: RemoteAttempt | undefined;
+      if (preference !== 'none') {
+        try {
+          remoteAttempt = await attemptRemoteTunnel(preference, loadConfig(), handle.port);
+        } catch (err) {
+          // Honest refusal, not a silent localhost downgrade (PR #31's
+          // finding this Issue closes): a caller asking for `remote:true`
+          // that cannot be honoured gets a named E_REMOTE_UNAVAILABLE and no
+          // request is ever created or elicited.
+          return errorResult(err);
+        }
+      }
+
       const record = RequestStore.create({
         kind: 'request',
         names: args.names,
@@ -117,13 +136,22 @@ export function registerRequestTool(server: McpServer): void {
         scope: args.scope,
         rotate: args.rotate,
       });
-      const url = `${handle.origin}/r/${record.id}`;
+      if (remoteAttempt) registerActiveTunnel(record.id, remoteAttempt);
+
+      const origin = remoteAttempt?.tunnel?.url ?? handle.origin;
+      const url = `${origin}/r/${record.id}`;
+      const remoteNote = remoteAttempt?.tunnel
+        ? `Remote access via ${remoteAttempt.tunnel.binary} is active for this request.`
+        : remoteAttempt?.note;
 
       if (!supportsUrlElicitation(server.server)) {
         const fallback = { request_id: record.id, url, expiresAt: new Date(record.expiresAt).toISOString() };
-        return textResult(
-          `${JSON.stringify(fallback)}\nClient does not support URL-mode elicitation. Call enigma_await with this request_id once the user has submitted the form.`,
-        );
+        const lines = [
+          JSON.stringify(fallback),
+          remoteNote,
+          'Client does not support URL-mode elicitation. Call enigma_await with this request_id once the user has submitted the form.',
+        ].filter((line): line is string => Boolean(line));
+        return textResult(lines.join('\n'));
       }
 
       const result = await elicitUrl(server.server, {
@@ -138,7 +166,9 @@ export function registerRequestTool(server: McpServer): void {
 
       const outcome = await resolveRequestOutcome(record.id, cwd);
       await sendElicitationComplete(server.server, record.id);
-      return textResult(outcome.text, outcome.isError);
+      const settledNote = takeRemoteNote(record.id);
+      const text = settledNote ? `${outcome.text}\n${settledNote}` : outcome.text;
+      return textResult(text, outcome.isError);
     },
   );
 }

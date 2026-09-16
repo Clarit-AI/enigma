@@ -7,6 +7,8 @@ import { setSecret, listSecrets } from '../../storage/manager.js';
 import { EnigmaError } from '../../core/errors.js';
 import type { DepositoryId } from '../../storage/interfaces.js';
 import type { Scope } from '../../core/index-store.js';
+import { getActiveRemoteUrl } from '../../remote/index.js';
+import { renderQrSvg } from '../../remote/qr.js';
 import { readBody, parseSubmission, PayloadTooLargeError } from '../body.js';
 import { renderRepeatingBlock, renderTemplate } from '../templates/render.js';
 import { requestFormHtml, requestDoneHtml } from '../templates/loaded.js';
@@ -20,6 +22,34 @@ interface RenderFormOptions {
   selectedDepositoryId?: DepositoryId;
   selectedScope?: Scope;
   rotateChecked?: boolean;
+}
+
+const QR_BLOCK_START = '<!--BLOCK:QR_BLOCK-->';
+const QR_BLOCK_END = '<!--/BLOCK:QR_BLOCK-->';
+const RAW_QR_SVG_TOKEN = '{{RAW_QR_SVG}}';
+
+/**
+ * Keeps or drops the whole `QR_BLOCK` section (the card, its caption, and
+ * the QR itself) depending on whether a tunnel is up for this request, and
+ * fills its `{{RAW_QR_SVG}}` token with the actual `<svg>` markup (Issue #12
+ * AC4). Deliberately does not go through renderRepeatingBlock/renderTemplate
+ * (templates/render.ts): those always HTML-escape a substitution, which is
+ * exactly wrong here — renderQrSvg's output is markup to render, not text to
+ * display, and escaping it would print the SVG source instead of drawing it.
+ */
+function insertQrBlock(html: string, activeRemoteUrl: string | undefined, requestId: string): string {
+  const start = html.indexOf(QR_BLOCK_START);
+  const end = html.indexOf(QR_BLOCK_END);
+  if (start === -1 || end === -1) return html;
+
+  if (!activeRemoteUrl) {
+    return html.slice(0, start) + html.slice(end + QR_BLOCK_END.length);
+  }
+
+  const blockContent = html.slice(start + QR_BLOCK_START.length, end);
+  const svg = renderQrSvg(`${activeRemoteUrl}/r/${requestId}`);
+  const filled = blockContent.replace(RAW_QR_SVG_TOKEN, () => svg);
+  return html.slice(0, start) + filled + html.slice(end + QR_BLOCK_END.length);
 }
 
 async function renderForm(res: ServerResponse, record: RequestRecord, opts: RenderFormOptions = {}): Promise<void> {
@@ -63,6 +93,8 @@ async function renderForm(res: ServerResponse, record: RequestRecord, opts: Rend
   const confirmRows = opts.confirmDepository ? [{ CONFIRM_DEPOSITORY: opts.confirmDepository }] : [];
   html = renderRepeatingBlock(html, 'CONFIRM_BLOCK', confirmRows);
   html = renderRepeatingBlock(html, 'CONFIRM_CHECKBOX', confirmRows);
+
+  html = insertQrBlock(html, getActiveRemoteUrl(record.id), record.id);
 
   sendHtml(res, opts.status ?? 200, html);
 }
