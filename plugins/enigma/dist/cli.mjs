@@ -553,8 +553,351 @@ var envDepositoryModule = {
   create: createEnvDepository
 };
 
+// src/storage/depositories/linux-secret-service.ts
+import { execFile } from "node:child_process";
+var SECRET_TOOL_BIN = "secret-tool";
+var SERVICE = "enigma";
+var EXEC_TIMEOUT_MS = 1e4;
+var EXEC_MAX_BUFFER_BYTES = 1024 * 1024;
+var PROBE_REF = "__enigma_detect_probe__";
+var REF_PATTERN = /^[A-Za-z0-9_./-]+$/;
+var REF_MAX_LENGTH = 512;
+function runSecretTool(args) {
+  return new Promise((resolve2, reject) => {
+    execFile(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error, stdout, stderr) => {
+      if (error) {
+        reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
+        return;
+      }
+      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    });
+  });
+}
+function runSecretToolWithStdin(args, value) {
+  return new Promise((resolve2, reject) => {
+    const child = execFile(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error, stdout, stderr) => {
+      if (error) {
+        reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
+        return;
+      }
+      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    });
+    child.on("error", reject);
+    if (!child.stdin) {
+      child.kill();
+      reject(new Error("secret-tool: stdin unavailable"));
+      return;
+    }
+    child.stdin.on("error", reject);
+    if (child.stdin.write(value)) {
+      child.stdin.end();
+    } else {
+      child.stdin.once("drain", () => child.stdin?.end());
+    }
+  });
+}
+function looksLikeNoResults(failure) {
+  return (failure.stdout ?? "").trim() === "" && (failure.stderr ?? "").trim() === "" && typeof failure.code !== "undefined";
+}
+function classifyUnavailable(failure) {
+  if (failure.code === "ENOENT") return "secret-tool not installed";
+  const stderr = failure.stderr ?? "";
+  if (stderr.includes("Object does not exist at path") || stderr.includes("/org/freedesktop/secrets/collection/login")) {
+    return "Secret Service default collection is missing";
+  }
+  if (stderr.includes("Cannot autolaunch D-Bus without X11 $DISPLAY") || stderr.includes("Failed to execute child process") || stderr.toLowerCase().includes("dbus")) {
+    return "no D-Bus session bus available (headless environment)";
+  }
+  return "secret-tool probe failed";
+}
+function readFailed2() {
+  throw new EnigmaError({
+    code: "E_READ_FAILED",
+    message: "failed to read secret from secret-service depository",
+    depository: "secret-service"
+  });
+}
+function writeFailed() {
+  throw new EnigmaError({
+    code: "E_WRITE_FAILED",
+    message: "failed to write secret to secret-service depository",
+    depository: "secret-service"
+  });
+}
+function notFound() {
+  throw new EnigmaError({ code: "E_NOT_FOUND", message: "secret not found", depository: "secret-service" });
+}
+function refInvalid() {
+  throw new EnigmaError({
+    code: "E_REF_INVALID",
+    message: `invalid depository ref: expected ${REF_PATTERN} and at most ${REF_MAX_LENGTH} characters`,
+    depository: "secret-service"
+  });
+}
+function validateRef(ref) {
+  if (ref.length === 0 || ref.length > REF_MAX_LENGTH || !REF_PATTERN.test(ref)) {
+    refInvalid();
+  }
+}
+function createSecretServiceDepository() {
+  return {
+    id: "secret-service",
+    promptProfile: "may-prompt",
+    async set(ref, value) {
+      validateRef(ref);
+      try {
+        await runSecretToolWithStdin(["store", `--label=enigma ${ref}`, "service", SERVICE, "ref", ref], value);
+      } catch {
+        writeFailed();
+      }
+      return ref;
+    },
+    async resolve(ref) {
+      validateRef(ref);
+      try {
+        const { stdout } = await runSecretTool(["lookup", "service", SERVICE, "ref", ref]);
+        return stdout.replace(/\n$/, "");
+      } catch (err) {
+        const failure = err;
+        if (looksLikeNoResults(failure)) notFound();
+        return readFailed2();
+      }
+    },
+    async delete(ref) {
+      validateRef(ref);
+      try {
+        await runSecretTool(["clear", "service", SERVICE, "ref", ref]);
+      } catch {
+      }
+    },
+    async has(ref) {
+      validateRef(ref);
+      try {
+        await runSecretTool(["lookup", "service", SERVICE, "ref", ref]);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  };
+}
+async function probeWritable() {
+  let storeError;
+  try {
+    await runSecretToolWithStdin(["store", "--label=enigma detect probe", "service", SERVICE, "ref", PROBE_REF], "probe");
+  } catch (err) {
+    storeError = err;
+  } finally {
+    try {
+      await runSecretTool(["clear", "service", SERVICE, "ref", PROBE_REF]);
+    } catch {
+    }
+  }
+  if (storeError) {
+    return { available: false, reason: classifyUnavailable(storeError) };
+  }
+  return { available: true };
+}
+var linuxSecretServiceDepositoryModule = {
+  id: "secret-service",
+  promptProfile: "may-prompt",
+  async detect() {
+    if (process.platform !== "linux") {
+      return { id: "secret-service", promptProfile: "may-prompt", available: false, reason: "not running on Linux" };
+    }
+    const probe = await probeWritable();
+    return probe.available ? { id: "secret-service", promptProfile: "may-prompt", available: true } : { id: "secret-service", promptProfile: "may-prompt", available: false, reason: probe.reason };
+  },
+  create: createSecretServiceDepository
+};
+
+// src/storage/depositories/macos-keychain.ts
+import { execFile as execFile2 } from "node:child_process";
+import { existsSync as existsSync6 } from "node:fs";
+var SECURITY_BIN = "/usr/bin/security";
+var SERVICE2 = "enigma";
+var EXEC_TIMEOUT_MS2 = 1e4;
+var EXEC_MAX_BUFFER_BYTES2 = 1024 * 1024;
+var NOT_FOUND_PATTERN = /could not be found/i;
+var ERR_SEC_ITEM_NOT_FOUND = 44;
+var BATCH_LINE_MAX_BYTES = 4096;
+var REF_PATTERN2 = /^[A-Za-z0-9_./-]+$/;
+var REF_MAX_LENGTH2 = 512;
+var MARKER_BYTE = 1;
+function runSecurity(args) {
+  return new Promise((resolve2, reject) => {
+    execFile2(SECURITY_BIN, args, { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error, stdout, stderr) => {
+      if (error) {
+        reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
+        return;
+      }
+      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    });
+  });
+}
+function runSecurityBatch(line) {
+  return new Promise((resolve2, reject) => {
+    const child = execFile2(SECURITY_BIN, ["-i"], { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error, stdout, stderr) => {
+      if (error) {
+        reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
+        return;
+      }
+      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    });
+    child.on("error", reject);
+    if (!child.stdin) {
+      child.kill();
+      reject(new Error("security -i: stdin unavailable"));
+      return;
+    }
+    child.stdin.on("error", reject);
+    if (child.stdin.write(`${line}
+`)) {
+      child.stdin.end();
+    } else {
+      child.stdin.once("drain", () => child.stdin?.end());
+    }
+  });
+}
+function encodeSecretHex(value) {
+  return Buffer.concat([Buffer.from(value, "utf8"), Buffer.from([MARKER_BYTE])]).toString("hex");
+}
+function decodeSecretOutput(stdout) {
+  const trimmed = stdout.replace(/\n$/, "");
+  if (/^[0-9a-fA-F]*$/.test(trimmed) && trimmed.length % 2 === 0 && trimmed.length > 0) {
+    const bytes = Buffer.from(trimmed, "hex");
+    if (bytes[bytes.length - 1] === MARKER_BYTE) {
+      return bytes.subarray(0, bytes.length - 1).toString("utf8");
+    }
+  }
+  return readFailed3();
+}
+function batchLineOverheadBytes(ref) {
+  return Buffer.byteLength(`add-generic-password -a ${ref} -s ${SERVICE2} -X  -U
+`, "utf8");
+}
+function maxValueBytes(ref) {
+  const hexBudget = BATCH_LINE_MAX_BYTES - batchLineOverheadBytes(ref);
+  return Math.floor(hexBudget / 2) - 1;
+}
+function readFailed3() {
+  throw new EnigmaError({
+    code: "E_READ_FAILED",
+    message: "failed to read secret from keychain depository",
+    depository: "keychain"
+  });
+}
+function writeFailed2() {
+  throw new EnigmaError({
+    code: "E_WRITE_FAILED",
+    message: "failed to write secret to keychain depository",
+    depository: "keychain"
+  });
+}
+function notFound2() {
+  throw new EnigmaError({ code: "E_NOT_FOUND", message: "secret not found", depository: "keychain" });
+}
+function refInvalid2() {
+  throw new EnigmaError({
+    code: "E_REF_INVALID",
+    message: `invalid depository ref: expected ${REF_PATTERN2} and at most ${REF_MAX_LENGTH2} characters`,
+    depository: "keychain"
+  });
+}
+function valueTooLarge(limitBytes) {
+  throw new EnigmaError({
+    code: "E_VALUE_TOO_LARGE",
+    message: `value exceeds the keychain depository's ${limitBytes}-byte limit; use the "encrypted" depository for large material such as PEM keys`,
+    depository: "keychain"
+  });
+}
+function validateRef2(ref) {
+  if (ref.length === 0 || ref.length > REF_MAX_LENGTH2 || !REF_PATTERN2.test(ref)) {
+    refInvalid2();
+  }
+}
+function isItemNotFound(failure) {
+  return failure.code === ERR_SEC_ITEM_NOT_FOUND || NOT_FOUND_PATTERN.test(failure.stderr ?? "") || NOT_FOUND_PATTERN.test(failure.message ?? "");
+}
+function createKeychainDepository() {
+  return {
+    id: "keychain",
+    promptProfile: "may-prompt",
+    async set(ref, value) {
+      validateRef2(ref);
+      const limit = maxValueBytes(ref);
+      if (Buffer.byteLength(value, "utf8") > limit) {
+        valueTooLarge(limit);
+      }
+      const hex = encodeSecretHex(value);
+      try {
+        await runSecurityBatch(`add-generic-password -a ${ref} -s ${SERVICE2} -X ${hex} -U`);
+      } catch {
+        writeFailed2();
+      }
+      return ref;
+    },
+    async resolve(ref) {
+      validateRef2(ref);
+      try {
+        const { stdout } = await runSecurity(["find-generic-password", "-a", ref, "-s", SERVICE2, "-w"]);
+        return decodeSecretOutput(stdout);
+      } catch (err) {
+        const failure = err;
+        if (isItemNotFound(failure)) {
+          notFound2();
+        }
+        return readFailed3();
+      }
+    },
+    async delete(ref) {
+      validateRef2(ref);
+      try {
+        await runSecurity(["delete-generic-password", "-a", ref, "-s", SERVICE2]);
+      } catch (err) {
+        const failure = err;
+        if (isItemNotFound(failure)) {
+          return;
+        }
+        readFailed3();
+      }
+    },
+    async has(ref) {
+      validateRef2(ref);
+      try {
+        await runSecurity(["find-generic-password", "-a", ref, "-s", SERVICE2]);
+        return true;
+      } catch {
+        return false;
+      }
+    }
+  };
+}
+var macosKeychainDepositoryModule = {
+  id: "keychain",
+  promptProfile: "may-prompt",
+  async detect() {
+    if (process.platform !== "darwin") {
+      return { id: "keychain", promptProfile: "may-prompt", available: false, reason: "not running on macOS" };
+    }
+    const available = existsSync6(SECURITY_BIN);
+    return {
+      id: "keychain",
+      promptProfile: "may-prompt",
+      available,
+      reason: available ? void 0 : `${SECURITY_BIN} not found`
+    };
+  },
+  create: createKeychainDepository
+};
+
 // src/storage/detect.ts
-var DEPOSITORY_MODULES = [encryptedDepositoryModule, envDepositoryModule];
+var DEPOSITORY_MODULES = [
+  encryptedDepositoryModule,
+  envDepositoryModule,
+  macosKeychainDepositoryModule,
+  linuxSecretServiceDepositoryModule
+];
 async function detectAll() {
   return Promise.all(DEPOSITORY_MODULES.map((mod) => mod.detect()));
 }
@@ -695,11 +1038,11 @@ async function cmdAdd(argv, streams = {}) {
 }
 
 // src/cli/commands/doctor.ts
-import { execFile } from "node:child_process";
-import { existsSync as existsSync6 } from "node:fs";
+import { execFile as execFile3 } from "node:child_process";
+import { existsSync as existsSync7 } from "node:fs";
 import { platform, release } from "node:os";
 import { promisify } from "node:util";
-var execFileAsync = promisify(execFile);
+var execFileAsync = promisify(execFile3);
 async function opStatus() {
   try {
     const { stdout } = await execFileAsync("op", ["--version"], { timeout: 2e3, maxBuffer: 1024 });
@@ -725,8 +1068,8 @@ async function cmdDoctor(argv) {
     index = { ok: false, error: err instanceof EnigmaError ? err.code : "unknown error" };
   }
   const vault = {
-    keyPresent: existsSync6(keyPath()),
-    secretsFilePresent: existsSync6(secretsPath())
+    keyPresent: existsSync7(keyPath()),
+    secretsFilePresent: existsSync7(secretsPath())
   };
   const report = {
     platform: `${platform()} ${release()}`,
