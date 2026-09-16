@@ -1,0 +1,12 @@
+{
+  "name": "enigma",
+  "version": "0.1.0",
+  "description": "Local-only secret request/reveal for coding agents — no secret value ever enters the model's context.",
+  "author": {
+    "name": "Clarit AI",
+    "email": "info@clarit.ai"
+  },
+  "homepage": "https://github.com/Clarit-AI/enigma",
+  "repository": "https://github.com/Clarit-AI/enigma",
+  "license": "Apache-2.0"
+}

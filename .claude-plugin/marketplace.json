@@ -1,0 +1,19 @@
+{
+  "name": "clarit-enigma",
+  "owner": {
+    "name": "Clarit AI",
+    "email": "info@clarit.ai"
+  },
+  "metadata": {
+    "description": "Local-only secret request/reveal for coding agents.",
+    "version": "0.1.0"
+  },
+  "plugins": [
+    {
+      "name": "enigma",
+      "description": "Local-only secret request/reveal for coding agents — no secret value ever enters the model's context.",
+      "version": "0.1.0",
+      "source": "./plugins/enigma"
+    }
+  ]
+}
