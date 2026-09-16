@@ -5,6 +5,7 @@ type ExecFileCallback = (...cbArgs: unknown[]) => void;
 
 class FakeChild extends EventEmitter {
   kill = vi.fn();
+  unref = vi.fn();
 }
 
 const execFileMock = vi.fn<(...args: unknown[]) => unknown>();

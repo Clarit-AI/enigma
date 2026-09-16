@@ -18,10 +18,18 @@ vi.mock('../../../src/remote/tailscale.js', () => ({
   startTailscaleServe: (port: number) => startTailscaleMock(port),
 }));
 
-const { attemptRemoteTunnel, getActiveRemoteUrl, registerActiveTunnel, resolveRemotePreference, takeRemoteNote } = await import(
-  '../../../src/remote/index.js'
-);
+const { __resetForTests, attemptRemoteTunnel, getActiveRemoteUrl, registerActiveTunnel, resolveRemotePreference, takeRemoteNote } =
+  await import('../../../src/remote/index.js');
 const { RequestStore } = await import('../../../src/request/store.js');
+
+// The tailscale concurrency claim (Tech Lead ruling on PR #35, round 2, item
+// 3) is deliberately module-level, persistent state — there is genuinely
+// only one tailscale mapping possible per machine — so, unlike the rest of
+// this module's per-request bookkeeping, it does not self-clear between
+// tests unless reset explicitly.
+afterEach(() => {
+  __resetForTests();
+});
 
 /** A controllable fake RemoteTunnel: `finishUnexpectedExit()` simulates the process dying on its own. */
 function fakeTunnel(url: string, binary: 'cloudflared' | 'tailscale'): RemoteTunnel & { finishUnexpectedExit: () => void } {
@@ -161,6 +169,11 @@ describe('registerActiveTunnel / getActiveRemoteUrl / takeRemoteNote', () => {
     await Promise.resolve();
     await Promise.resolve();
 
+    // A page reload after this point must stop showing a QR for a link
+    // that no longer resolves to anything (Tech Lead ruling on PR #35,
+    // round 2, item 4) — the dead tunnel is cleared, not just its note.
+    expect(getActiveRemoteUrl(record.id)).toBeUndefined();
+
     RequestStore.fulfill(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
     await RequestStore.waitForFulfilled(record.id);
     await Promise.resolve();
@@ -169,5 +182,114 @@ describe('registerActiveTunnel / getActiveRemoteUrl / takeRemoteNote', () => {
     expect(note).toContain('cloudflared');
     expect(note).toContain('lost');
     expect(note).not.toContain('https://x.trycloudflare.com');
+  });
+});
+
+describe('tailscale concurrency guard (Tech Lead ruling on PR #35, round 2, item 3)', () => {
+  beforeEach(() => {
+    RequestStore.__resetForTests();
+    detectTailscaleMock.mockReset();
+    startTailscaleMock.mockReset();
+  });
+
+  afterEach(() => {
+    RequestStore.__resetForTests();
+  });
+
+  it('refuses a second concurrent "required" tailscale attempt while the first is still active', async () => {
+    detectTailscaleMock.mockResolvedValue(true);
+    const firstTunnel = fakeTunnel('https://first.tailnet.ts.net', 'tailscale');
+    startTailscaleMock.mockResolvedValue(firstTunnel);
+
+    const first = await attemptRemoteTunnel('required', { remote: 'tailscale' }, 1111);
+    expect(first?.tunnel).toBe(firstTunnel);
+
+    await expect(attemptRemoteTunnel('required', { remote: 'tailscale' }, 2222)).rejects.toMatchObject({
+      code: 'E_REMOTE_UNAVAILABLE',
+      message: expect.stringContaining('already active'),
+    });
+    expect(startTailscaleMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('a concurrent "prefer" tailscale attempt falls back to local instead of throwing', async () => {
+    detectTailscaleMock.mockResolvedValue(true);
+    startTailscaleMock.mockResolvedValue(fakeTunnel('https://first.tailnet.ts.net', 'tailscale'));
+
+    await attemptRemoteTunnel('required', { remote: 'tailscale' }, 1111);
+    const second = await attemptRemoteTunnel('prefer', { remote: 'tailscale' }, 2222);
+
+    expect(second?.tunnel).toBeUndefined();
+    expect(second?.note).toContain('already active');
+  });
+
+  it('closes the TOCTOU race: a second attempt starting before the first even resolves detection is still refused', async () => {
+    detectTailscaleMock.mockResolvedValue(true);
+    let resolveFirstStart!: (tunnel: RemoteTunnel) => void;
+    startTailscaleMock.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveFirstStart = resolve;
+        }),
+    );
+
+    const firstPromise = attemptRemoteTunnel('required', { remote: 'tailscale' }, 1111);
+    // The first call is still awaiting detectTailscale/startTailscaleServe —
+    // nothing has resolved yet — but the claim is synchronous, so the
+    // second call must already see it.
+    await vi.waitFor(() => expect(startTailscaleMock).toHaveBeenCalledTimes(1));
+    expect(resolveFirstStart).toBeTypeOf('function');
+
+    await expect(attemptRemoteTunnel('required', { remote: 'tailscale' }, 2222)).rejects.toMatchObject({
+      code: 'E_REMOTE_UNAVAILABLE',
+    });
+
+    resolveFirstStart(fakeTunnel('https://first.tailnet.ts.net', 'tailscale'));
+    const first = await firstPromise;
+    expect(first?.tunnel).toBeDefined();
+  });
+
+  it('releases the claim once the first tunnel is stopped, allowing a new tailscale attempt', async () => {
+    detectTailscaleMock.mockResolvedValue(true);
+    const firstTunnel = fakeTunnel('https://first.tailnet.ts.net', 'tailscale');
+    startTailscaleMock.mockResolvedValueOnce(firstTunnel);
+
+    const first = await attemptRemoteTunnel('required', { remote: 'tailscale' }, 1111);
+    first?.tunnel?.stop();
+
+    const secondTunnel = fakeTunnel('https://second.tailnet.ts.net', 'tailscale');
+    startTailscaleMock.mockResolvedValueOnce(secondTunnel);
+    const second = await attemptRemoteTunnel('required', { remote: 'tailscale' }, 2222);
+
+    expect(second?.tunnel).toBe(secondTunnel);
+  });
+
+  it('releases the claim when the first tunnel dies unexpectedly, allowing a new tailscale attempt', async () => {
+    detectTailscaleMock.mockResolvedValue(true);
+    const firstTunnel = fakeTunnel('https://first.tailnet.ts.net', 'tailscale');
+    startTailscaleMock.mockResolvedValueOnce(firstTunnel);
+
+    await attemptRemoteTunnel('required', { remote: 'tailscale' }, 1111);
+    firstTunnel.finishUnexpectedExit();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    const secondTunnel = fakeTunnel('https://second.tailnet.ts.net', 'tailscale');
+    startTailscaleMock.mockResolvedValueOnce(secondTunnel);
+    const second = await attemptRemoteTunnel('required', { remote: 'tailscale' }, 2222);
+
+    expect(second?.tunnel).toBe(secondTunnel);
+  });
+
+  it('does not apply the tailscale concurrency guard to cloudflared', async () => {
+    detectTailscaleMock.mockResolvedValue(true);
+    startTailscaleMock.mockResolvedValue(fakeTunnel('https://first.tailnet.ts.net', 'tailscale'));
+    await attemptRemoteTunnel('required', { remote: 'tailscale' }, 1111);
+
+    detectCloudflaredMock.mockResolvedValue(true);
+    const cloudflaredTunnel = fakeTunnel('https://x.trycloudflare.com', 'cloudflared');
+    startCloudflaredMock.mockResolvedValue(cloudflaredTunnel);
+
+    const result = await attemptRemoteTunnel('required', {}, 2222);
+    expect(result?.tunnel).toBe(cloudflaredTunnel);
   });
 });

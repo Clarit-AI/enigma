@@ -67,6 +67,11 @@ export async function startTailscaleServe(port: number): Promise<RemoteTunnel> {
 
   return new Promise((resolve, reject) => {
     const child = spawn('tailscale', ['serve', `--https=${SERVE_PORT}`, target], { stdio: 'ignore' });
+    // See cloudflared.ts: this tunnel's lifetime is governed by the request
+    // it belongs to, not by whether it happens to be the only thing left
+    // running, so it must never itself hold this process's event loop open
+    // (Tech Lead ruling on PR #35, round 2).
+    child.unref();
 
     let settled = false;
     let stopped = false;

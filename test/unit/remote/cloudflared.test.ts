@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 class FakeChild extends EventEmitter {
   stderr = new EventEmitter();
   kill = vi.fn();
+  unref = vi.fn();
 }
 
 const spawnMock = vi.fn<(...args: unknown[]) => FakeChild>();

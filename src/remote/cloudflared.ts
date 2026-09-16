@@ -23,6 +23,12 @@ function remoteUnavailable(detail: string): EnigmaError {
 export function startCloudflaredTunnel(targetUrl: string): Promise<RemoteTunnel> {
   return new Promise((resolve, reject) => {
     const child = spawn('cloudflared', ['tunnel', '--url', targetUrl], { stdio: ['ignore', 'ignore', 'pipe'] });
+    // A ref'd child handle keeps this process's event loop alive by itself;
+    // this tunnel's lifetime is governed by the request it belongs to
+    // (registerActiveTunnel/index.ts), not by whether anything else is
+    // still running, so it must never be what holds the process open
+    // (Tech Lead ruling on PR #35, round 2).
+    child.unref();
 
     let stderrBuf = '';
     let settled = false;

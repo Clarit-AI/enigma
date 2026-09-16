@@ -30,6 +30,9 @@ const INSTALL_HINTS: Record<RemoteBinary, string> = {
   tailscale: 'tailscale not found on PATH; install it (e.g. "brew install tailscale", or see https://tailscale.com/download)',
 };
 
+const TAILSCALE_CONCURRENT_MESSAGE =
+  'a remote session is already active for this project — tailscale serve supports only one mapping at a time, and a second one would tear down the first mid-request; wait for it to finish or expire';
+
 /** `remote:true` → required; `remote:"prefer"` → best-effort; absent/false → local only. */
 export function resolveRemotePreference(remote: boolean | 'prefer' | undefined): RemotePreference {
   if (remote === true) return 'required';
@@ -44,6 +47,18 @@ function selectBinary(config: Pick<EnigmaConfig, 'remote'>): RemoteBinary {
 function detectBinary(binary: RemoteBinary): Promise<boolean> {
   return binary === 'tailscale' ? detectTailscale() : detectCloudflared();
 }
+
+/**
+ * One `tailscale serve` mapping exists per machine, not per request — a
+ * second concurrent `tailscale`-mode request would silently tear down the
+ * first request's still-live tunnel mid-submit (Tech Lead ruling on PR #35,
+ * round 2). Claimed synchronously, before any `await`, so a second call
+ * arriving before the first's detection/spawn even resolves still sees the
+ * claim and refuses — this specifically closes the race a plain
+ * `active`-map lookup would miss. Released the moment that tunnel truly
+ * ends, by any means (`stop()` or an unexpected exit), never before.
+ */
+let tailscaleClaimed = false;
 
 function startTunnel(binary: RemoteBinary, port: number): Promise<RemoteTunnel> {
   return binary === 'tailscale' ? startTailscaleServe(port) : startCloudflaredTunnel(`http://127.0.0.1:${port}`);
@@ -64,23 +79,41 @@ export async function attemptRemoteTunnel(
   if (preference === 'none') return undefined;
 
   const binary = selectBinary(config);
+  const refuse = (message: string): RemoteAttempt => {
+    if (preference === 'required') throw new EnigmaError({ code: 'E_REMOTE_UNAVAILABLE', message });
+    return { note: `Remote access unavailable — ${message}. Used the local link instead.` };
+  };
+
+  if (binary === 'tailscale' && tailscaleClaimed) return refuse(TAILSCALE_CONCURRENT_MESSAGE);
 
   const available = await detectBinary(binary);
-  if (!available) {
-    const hint = INSTALL_HINTS[binary];
-    if (preference === 'required') throw new EnigmaError({ code: 'E_REMOTE_UNAVAILABLE', message: hint });
-    return { note: `Remote access unavailable — ${hint}. Used the local link instead.` };
+  if (!available) return refuse(INSTALL_HINTS[binary]);
+
+  if (binary === 'tailscale') {
+    // Re-check after the `await` above: two concurrent calls can both pass
+    // the first check before either sets the claim.
+    if (tailscaleClaimed) return refuse(TAILSCALE_CONCURRENT_MESSAGE);
+    tailscaleClaimed = true;
   }
 
   try {
     const tunnel = await startTunnel(binary, port);
+    if (binary === 'tailscale') {
+      const releaseClaim = (): void => {
+        tailscaleClaimed = false;
+      };
+      const originalStop = tunnel.stop;
+      tunnel.stop = () => {
+        originalStop();
+        releaseClaim();
+      };
+      void tunnel.waitForUnexpectedExit().then(releaseClaim);
+    }
     return { tunnel };
   } catch (err) {
+    if (binary === 'tailscale') tailscaleClaimed = false;
     const reason = err instanceof EnigmaError ? err.message : `${binary} failed to start`;
-    if (preference === 'required') {
-      throw err instanceof EnigmaError ? err : new EnigmaError({ code: 'E_REMOTE_UNAVAILABLE', message: reason });
-    }
-    return { note: `Remote access unavailable — ${reason}. Used the local link instead.` };
+    return refuse(reason);
   }
 }
 
@@ -121,11 +154,25 @@ export function registerActiveTunnel(requestId: string, attempt: RemoteAttempt):
 
   void tunnel.waitForUnexpectedExit().then(() => {
     const entry = active.get(requestId);
-    if (entry) entry.note = `Remote access via ${tunnel.binary} was lost during this request; the local link still works.`;
+    if (entry) {
+      // Clear the dead tunnel, not just the note: a page reload after this
+      // point must stop showing a QR for a link that no longer resolves to
+      // anything (Tech Lead ruling on PR #35, round 2) — a link that fails
+      // is honest; a link that lies is the thing this Issue exists to stop.
+      entry.tunnel = undefined;
+      entry.note = `Remote access via ${tunnel.binary} was lost during this request; the local link still works.`;
+    }
   });
 }
 
-/** The active tunnel's public origin for `requestId`, or `undefined` if none is up — used by the request-form route to decide whether to render a QR code. */
+/**
+ * The active tunnel's public origin for `requestId`, or `undefined` if none
+ * is up (never started, or died unexpectedly) — used by the request-form
+ * route to decide whether to render a QR code. A normal `stop()` (the
+ * request was fulfilled or expired) also clears this, but that state is
+ * never actually observable here: the request-form route already 410s/404s
+ * a used or expired record before it would ever reach this call.
+ */
 export function getActiveRemoteUrl(requestId: string): string | undefined {
   return active.get(requestId)?.tunnel?.url;
 }
@@ -136,3 +183,55 @@ export function takeRemoteNote(requestId: string): string | undefined {
   active.delete(requestId);
   return entry?.note;
 }
+
+/** Test-only: clears all tracked entries and releases the tailscale concurrency claim, so state never leaks between test files (mirrors RequestStore.__resetForTests). */
+export function __resetForTests(): void {
+  active.clear();
+  tailscaleClaimed = false;
+}
+
+function stopAllActiveTunnels(): void {
+  for (const entry of active.values()) {
+    entry.tunnel?.stop();
+  }
+}
+
+/**
+ * Best-effort process-level cleanup — NOT a total guarantee. A `SIGKILL` of
+ * this process cannot be caught by anything, ever; that case is out of
+ * reach by construction, not an oversight. For the cases that CAN be
+ * caught (a graceful exit, `SIGINT`, `SIGTERM`), every spawned tunnel child
+ * is `unref()`'d (cloudflared.ts, tailscale.ts) so it can never by itself
+ * hold this process's event loop open, and this stops every tracked tunnel
+ * before the process actually goes away — closing the gap the round-2
+ * review proved by spawning a real `cloudflared`, exiting its Node parent,
+ * and watching the child get reparented to PID 1 and keep serving.
+ *
+ * The `SIGINT`/`SIGTERM` handlers stop tunnels synchronously and then
+ * re-raise the same signal at themselves with no listener left (Node's
+ * `once` already removed it before invoking this callback), so the
+ * process's default disposition — terminate — still applies afterwards.
+ * That re-raise, not `process.exit()`, is deliberate: it preserves the
+ * exact exit behavior the process would have had with no handler at all,
+ * just with tunnels asked to stop first. A tailscale `stop()`'s
+ * `serve ... off` call is asynchronous and may not complete before the
+ * process actually terminates; the child being killed directly (`SIGTERM`,
+ * escalating to `SIGKILL`) is what actually matters and that part is
+ * synchronous.
+ */
+let shutdownHandlersRegistered = false;
+export function registerShutdownHandlers(): void {
+  if (shutdownHandlersRegistered) return;
+  shutdownHandlersRegistered = true;
+
+  process.once('exit', stopAllActiveTunnels);
+
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => {
+      stopAllActiveTunnels();
+      process.kill(process.pid, signal);
+    });
+  }
+}
+
+registerShutdownHandlers();
