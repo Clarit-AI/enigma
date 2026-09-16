@@ -1129,12 +1129,52 @@ function isKnownNonDirectoryPath(pathLike, cwd) {
     return false;
   }
 }
+var DOTENV_PROBE_BASENAMES = [".env", ".env.local", ".env.production", ".env.development", ".env.test", ".env.staging"];
+function expandBraces(pattern) {
+  const match = pattern.match(/\{([^{}]*)\}/);
+  if (!match || match.index === void 0) return [pattern];
+  const whole = match[0];
+  const inner = match[1] ?? "";
+  const prefix = pattern.slice(0, match.index);
+  const suffix = pattern.slice(match.index + whole.length);
+  return inner.split(",").flatMap((option) => expandBraces(`${prefix}${option}${suffix}`));
+}
+function globToRegExp(glob) {
+  let out = "";
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === "*" && glob[i + 1] === "*") {
+      out += ".*";
+      i++;
+      if (glob[i + 1] === "/") i++;
+    } else if (c === "*") {
+      out += "[^/]*";
+    } else if (c === "?") {
+      out += "[^/]";
+    } else if (c && ".+^${}()|[]\\".includes(c)) {
+      out += `\\${c}`;
+    } else {
+      out += c;
+    }
+  }
+  return new RegExp(`^${out}$`);
+}
+function globCouldMatchDotEnv(glob) {
+  const pattern = glob.startsWith("!") ? glob.slice(1) : glob;
+  if (pattern.includes("[") || pattern.includes("]")) return true;
+  const hasSlash = pattern.includes("/");
+  return expandBraces(pattern).some((alt) => {
+    const regex = globToRegExp(alt);
+    return DOTENV_PROBE_BASENAMES.some((name) => regex.test(name) || hasSlash && regex.test(`some/dir/${name}`));
+  });
+}
 function grepDotEnvExclusion(toolInput, cwd) {
   if (isKnownNonDirectoryPath(stringField(toolInput, "path"), cwd)) return void 0;
   const existingGlob = stringField(toolInput, "glob");
   if (existingGlob) {
+    if (!globCouldMatchDotEnv(existingGlob)) return void 0;
     return deny(
-      `This Grep call already filters by --glob "${existingGlob}", which can't be safely combined with an exclusion for .env files in the same call. Retry without --glob, or use \`enigma list\`/\`enigma doctor\` if you're looking for what Enigma has stored.`
+      `This Grep call already filters by --glob "${existingGlob}", which could still reach a .env file and can't be safely combined with an additional exclusion in the same call. Narrow --glob to exclude .env files yourself, or use \`enigma list\`/\`enigma doctor\` if you're looking for what Enigma has stored.`
     );
   }
   return {
