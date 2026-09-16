@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -40,6 +40,22 @@ describe('storage manager', () => {
     const [entry] = listSecrets({ scope: 'project', cwd: tmpProject });
     expect(entry?.projectPath).toBe(tmpProject);
     await expect(resolveSecret('OPENAI_API_KEY', { scope: 'project', cwd: tmpProject, actor: 'cli' })).resolves.toBe(SENTINEL);
+  });
+
+  it('env-backed secrets record the bare NAME as ref, and the .env managed block has no scope prefix (B1)', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'project', depository: 'env', cwd: tmpProject, actor: 'cli' });
+
+    const [entry] = listSecrets({ scope: 'project', cwd: tmpProject });
+    expect(entry?.ref).toBe('OPENAI_API_KEY');
+
+    const content = readFileSync(join(tmpProject, '.env'), 'utf8');
+    expect(content).toBe(`# enigma:begin\nOPENAI_API_KEY=${SENTINEL}\n# enigma:end\n`);
+  });
+
+  it('setSecret rejects depository "env" with scope "global" with E_SCOPE_INVALID (A1)', async () => {
+    await expect(
+      setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'env', actor: 'cli' }),
+    ).rejects.toThrow(expect.objectContaining({ code: 'E_SCOPE_INVALID' }));
   });
 
   it('set on an existing name without rotate throws E_EXISTS', async () => {

@@ -21,7 +21,13 @@ export interface DetectionResult {
 export interface Depository {
   readonly id: DepositoryId;
   readonly promptProfile: PromptProfile;
-  set(ref: string, value: string): Promise<void>;
+  /**
+   * Stores `value` under `ref` and returns the effective ref to record in the
+   * index entry. `encrypted` and `env` return the input `ref` unchanged;
+   * `1password` (when implemented) will return the item id it created, which
+   * may differ from the input ref.
+   */
+  set(ref: string, value: string): Promise<string>;
   /**
    * @internal Resolves `ref` to its value. Called only from
    * `src/storage/manager.ts`, `src/request/**`, `src/native/**`,

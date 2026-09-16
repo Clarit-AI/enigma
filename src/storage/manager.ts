@@ -67,6 +67,14 @@ export interface SetSecretResult {
 export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult> {
   validateName(opts.name);
 
+  if (opts.depository === 'env' && opts.scope === 'global') {
+    throw new EnigmaError({
+      code: 'E_SCOPE_INVALID',
+      message: 'env depository does not support global scope; a project .env file has no global location',
+      secretName: opts.name,
+    });
+  }
+
   const needsProjectPath = opts.scope === 'project' || opts.depository === 'env';
   const projectPath = needsProjectPath ? findProjectPath(opts.cwd ?? process.cwd()) : undefined;
   const pid = opts.scope === 'project' ? computeProjectId(opts.cwd ?? process.cwd()) : undefined;
@@ -81,12 +89,14 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
     });
   }
 
-  const ref = buildRef(opts.name, opts.scope, pid);
+  // env's ref is the bare NAME — the .env file is already located via DepositoryContext.projectPath (D1.9).
+  const providedRef = opts.depository === 'env' ? opts.name : buildRef(opts.name, opts.scope, pid);
   const depository = createDepository(opts.depository, opts.depository === 'env' ? projectPath : undefined);
   const op = existing ? 'rotated' : 'set';
 
+  let ref: string;
   try {
-    await depository.set(ref, opts.value);
+    ref = await depository.set(providedRef, opts.value);
   } catch (err) {
     appendAuditEvent({ op, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
     throw err;
