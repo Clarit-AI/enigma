@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -232,6 +232,44 @@ describe('GET/POST /i/:id', () => {
     expect(results?.[0]?.reason).not.toContain('placeholder');
     expect(readFileSync(envPath(), 'utf8')).toBe(original);
     expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+  });
+
+  it('an exception between tryMarkUsed and fulfill always settles the waiter — never hangs forever (Issue #13 review, round 5)', async () => {
+    writeFileSync(envPath(), 'OPENAI_API_KEY=sk-abc\n');
+    const record = RequestStore.create({
+      kind: 'import',
+      names: ['OPENAI_API_KEY'],
+      values: { OPENAI_API_KEY: 'sk-abc' },
+      envFilePath: envPath(),
+    });
+
+    // Simulates the file becoming unreadable between the form render and this submit —
+    // commitImport's re-parse (on its full-success path, after setSecret already stored
+    // the value) throws straight out of readFileSync rather than commitImport's own
+    // internal try/catch, which only covers the setSecret loop.
+    chmodSync(envPath(), 0o000);
+    try {
+      const waiter = RequestStore.waitForFulfilled(record.id);
+
+      const resp = await fetch(`${origin}/i/${record.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+      });
+
+      expect(resp.status).toBe(500);
+      // The waiter resolves — a CLI/MCP caller blocked here is never left hanging.
+      await expect(waiter).resolves.toBe('fulfilled');
+      expect(RequestStore.get(record.id)?.results).toEqual([{ name: 'OPENAI_API_KEY', ok: false, errorCode: expect.any(String) }]);
+      expect(RequestStore.get(record.id)?.usedAt).toBeDefined();
+
+      // The value WAS genuinely stored (setSecret ran before the crash) — the failure
+      // report doesn't falsely claim otherwise, but the depository has it regardless.
+      const stored = listSecrets({ scope: 'all', cwd: tmpProject });
+      expect(stored.map((e) => e.name)).toEqual(['OPENAI_API_KEY']);
+    } finally {
+      chmodSync(envPath(), 0o600);
+    }
   });
 
   it('replaying a used id returns 410 and performs no second write', async () => {

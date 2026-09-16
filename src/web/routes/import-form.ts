@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { loadConfig } from '../../core/config.js';
+import { EnigmaError } from '../../core/errors.js';
 import { findProjectPath } from '../../core/project.js';
 import type { Scope } from '../../core/index-store.js';
 import { RequestStore } from '../../request/store.js';
@@ -131,17 +132,42 @@ export async function handleImportFormPost(req: IncomingMessage, res: ServerResp
     ambiguousReason: ambiguousReasons[name],
   }));
 
-  const commitResult = await commitImport({
-    entries,
-    depository: chosenDepository,
-    scope,
-    cwd,
-    projectPath,
-    envFilePath: record.envFilePath ?? `${projectPath}/.env`,
-    actor: 'user',
-    rotate: submission.rotate,
-    createVault: submission.confirmCreateVault,
-  });
+  // The id is already consumed above (tryMarkUsed) — from here on, fulfill() MUST run no
+  // matter what, or the CLI/MCP caller blocked in RequestStore.waitForFulfilled() hangs
+  // forever with no timeout to fall back on (Issue #13 review, round 5). commitImport
+  // re-parses the file from disk on its success path, so a .env deleted or made unreadable
+  // between the form render and this submit throws straight out of the await — mirrors
+  // request-form.ts's per-name try/catch, adapted to commitImport's single-batch call.
+  let commitResult;
+  try {
+    commitResult = await commitImport({
+      entries,
+      depository: chosenDepository,
+      scope,
+      cwd,
+      projectPath,
+      envFilePath: record.envFilePath ?? `${projectPath}/.env`,
+      actor: 'user',
+      rotate: submission.rotate,
+      createVault: submission.confirmCreateVault,
+    });
+  } catch (err) {
+    // Unknown per-name outcome: commitImport crashed after its own internal setSecret loop
+    // (which never throws — see its own try/catch), so every name that reached this point
+    // already has SOME chance of being genuinely stored. Never claim success or failure
+    // for a name we can't actually confirm.
+    const errorCode = err instanceof EnigmaError ? err.code : 'E_UNKNOWN';
+    const results: RequestNameResult[] = record.names.map((name) => ({ name, ok: false, errorCode }));
+    record.importOutcome = { fileRewritten: false, warnings: [], skippedMismatch: [], depository: chosenDepository };
+    RequestStore.fulfill(id, results);
+    sendErrorPage(
+      res,
+      500,
+      'Import failed',
+      'Something went wrong while completing the import. Some secrets may already be stored — run `enigma list` or `enigma doctor` to check before retrying.',
+    );
+    return;
+  }
 
   const results: RequestNameResult[] = [
     // reason is populated ONLY for the ambiguity refusal — static structural text computed
