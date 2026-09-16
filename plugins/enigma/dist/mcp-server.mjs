@@ -42263,7 +42263,8 @@ var RequestStore = {
       expiresAt: now + (opts.ttlMs ?? defaultTtlMs(opts.kind)),
       values: opts.values ? { ...opts.values } : void 0,
       envFilePath: opts.envFilePath,
-      ambiguousNames: opts.ambiguousNames ? [...opts.ambiguousNames] : void 0
+      ambiguousNames: opts.ambiguousNames ? [...opts.ambiguousNames] : void 0,
+      ambiguousReasons: opts.ambiguousReasons ? { ...opts.ambiguousReasons } : void 0
     };
     records.set(id, record2);
     startSweeper();
@@ -44667,7 +44668,13 @@ async function handleImportFormPost(req, res, id) {
   const scope = record2.scope ?? "project";
   const values = record2.values ?? {};
   const ambiguousNames = new Set(record2.ambiguousNames ?? []);
-  const entries = record2.names.map((name) => ({ name, value: values[name] ?? "", ambiguous: ambiguousNames.has(name) }));
+  const ambiguousReasons = record2.ambiguousReasons ?? {};
+  const entries = record2.names.map((name) => ({
+    name,
+    value: values[name] ?? "",
+    ambiguous: ambiguousNames.has(name),
+    ambiguousReason: ambiguousReasons[name]
+  }));
   const commitResult = await commitImport({
     entries,
     depository: chosenDepository,
@@ -46763,6 +46770,9 @@ function registerImportTool(server) {
         names: parsed.entries.map((e) => e.name),
         values: Object.fromEntries(parsed.entries.map((e) => [e.name, e.value])),
         ambiguousNames: parsed.entries.filter((e) => e.ambiguous).map((e) => e.name),
+        ambiguousReasons: Object.fromEntries(
+          parsed.entries.filter((e) => e.ambiguous && e.ambiguousReason).map((e) => [e.name, e.ambiguousReason])
+        ),
         scope: "project",
         envFilePath: absPath
       });

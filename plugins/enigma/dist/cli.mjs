@@ -1496,7 +1496,8 @@ var RequestStore = {
       expiresAt: now + (opts.ttlMs ?? defaultTtlMs(opts.kind)),
       values: opts.values ? { ...opts.values } : void 0,
       envFilePath: opts.envFilePath,
-      ambiguousNames: opts.ambiguousNames ? [...opts.ambiguousNames] : void 0
+      ambiguousNames: opts.ambiguousNames ? [...opts.ambiguousNames] : void 0,
+      ambiguousReasons: opts.ambiguousReasons ? { ...opts.ambiguousReasons } : void 0
     };
     records.set(id, record);
     startSweeper();
@@ -2325,7 +2326,13 @@ async function handleImportFormPost(req, res, id) {
   const scope = record.scope ?? "project";
   const values = record.values ?? {};
   const ambiguousNames = new Set(record.ambiguousNames ?? []);
-  const entries = record.names.map((name) => ({ name, value: values[name] ?? "", ambiguous: ambiguousNames.has(name) }));
+  const ambiguousReasons = record.ambiguousReasons ?? {};
+  const entries = record.names.map((name) => ({
+    name,
+    value: values[name] ?? "",
+    ambiguous: ambiguousNames.has(name),
+    ambiguousReason: ambiguousReasons[name]
+  }));
   const commitResult = await commitImport({
     entries,
     depository: chosenDepository,
@@ -4424,6 +4431,7 @@ async function runBrowserFlow(entries, opts) {
     names: entries.map((e) => e.name),
     values: Object.fromEntries(entries.map((e) => [e.name, e.value])),
     ambiguousNames: entries.filter((e) => e.ambiguous).map((e) => e.name),
+    ambiguousReasons: Object.fromEntries(entries.filter((e) => e.ambiguous && e.ambiguousReason).map((e) => [e.name, e.ambiguousReason])),
     scope: "project",
     envFilePath: opts.absPath
   });
