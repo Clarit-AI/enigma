@@ -166,6 +166,45 @@ describe('PreToolUse read-guard', () => {
     it('does not deny a substitution with no secret-relevant content', () => {
       expect(isDenied(bash('echo "$(date)"'))).toBe(false);
     });
+
+    it('denies command-substitution nesting past the depth bound rather than silently allowing it', () => {
+      // 12 levels deep, past MAX_SUBSTITUTION_DEPTH (10) — nothing in here
+      // literally mentions .env; this must still deny because the guard
+      // could not fully unwrap it to check, not because it found anything.
+      let command = 'true';
+      for (let i = 0; i < 12; i++) command = `echo "$(${command})"`;
+      expect(isDenied(bash(command))).toBe(true);
+    });
+
+    it('does not deny ordinary nesting comfortably inside the depth bound', () => {
+      let command = 'true';
+      for (let i = 0; i < 5; i++) command = `echo "$(${command})"`;
+      expect(isDenied(bash(command))).toBe(false);
+    });
+  });
+
+  describe('tokenizer-level shell evasions (fix batch review round 2)', () => {
+    it.each<[string, string]>([
+      ['cat${IFS}.env', '${IFS} word-splitting'],
+      ['cat $IFS .env', 'bare $IFS word-splitting'],
+      ["cat$IFS.env", '$IFS with no surrounding spaces at all'],
+      ["op${IFS}read${IFS}op://Enigma/x/credential", '${IFS} defeating the op read rule'],
+      ["security${IFS}find-generic-password${IFS}-w", '${IFS} defeating the keychain-read rule'],
+      ["enigma${IFS}get${IFS}OPENAI_API_KEY", '${IFS} defeating the enigma get rule'],
+      ["echo${IFS}$OPENAI_API_KEY", '${IFS} defeating the known-secret-echo rule'],
+      [String.raw`cat $'\x2e\x65\x6e\x76'`, 'ANSI-C hex escapes spelling .env'],
+      [String.raw`cat $'\056env'`, 'ANSI-C octal escape for the leading dot'],
+    ])('%s -> denied (%s)', (command) => {
+      expect(isDenied(bash(command))).toBe(true);
+    });
+
+    it('normalizing $IFS does not affect an ordinary command with no .env/secret reference', () => {
+      expect(isDenied(bash('echo${IFS}hello'))).toBe(false);
+    });
+
+    it('normalizing $\'...\' does not affect an ordinary quoted string', () => {
+      expect(isDenied(bash(String.raw`echo $'hello world'`))).toBe(false);
+    });
   });
 
   describe('Grep directory-rooted searches get a .env exclusion instead of an outright deny (fix batch #1)', () => {
@@ -213,6 +252,7 @@ describe('PreToolUse read-guard', () => {
         ['**/*.json', 'a JSON-only filter, nested'],
         ['src/**/*.tsx', 'a restricted, path-prefixed filter'],
         ['*.{js,ts}', 'a brace-expanded, still non-.env filter'],
+        ['*.[jt]s', 'a bracket character class that cannot spell .env (review fix batch 2)'],
       ])('passes through unchanged: glob "%s" (%s) cannot match a .env file', (glob) => {
         const input = grep('.', tmpProject, { glob });
         const result = runReadGuard(input);
@@ -244,8 +284,8 @@ describe('PreToolUse read-guard', () => {
         },
       );
 
-      it('treats a bracket character class as "could match" rather than approximating it', () => {
-        const input = grep('.', tmpProject, { glob: '.env[a-z]*' });
+      it('a bracket character class that CAN spell .env is still denied (review fix batch 2: real matching, not always-deny)', () => {
+        const input = grep('.', tmpProject, { glob: '[.]env*' });
         expect(isDenied(input)).toBe(true);
       });
     });

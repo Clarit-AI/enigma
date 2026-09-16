@@ -4,13 +4,28 @@
 // gets disabled, and then it protects nothing), so every rule below is narrow and
 // the default is allow (no output at all; Claude Code proceeds normally).
 //
+// What this guard actually is, stated plainly rather than implied: it stops an
+// agent from reading a secret BY ACCIDENT — grepping the repo, catting a .env
+// file, echoing a variable it doesn't realize is tracked. It is not a sandbox
+// and it does not stop an agent that is deliberately trying to read a value.
+// Shell word-splitting (`${IFS}`) and ANSI-C quoting (`$'...'`) are normalized
+// before matching because they're cheap and the first things anyone probes,
+// but variable indirection, `eval` of an assembled string, writing a script
+// and running it, reading through an interpreter (python/node/perl), or an
+// encode/decode round-trip (base64, a copy-then-read via `cp .env x`) are not
+// chased, and cannot be without turning this into a shell parser. The
+// PostToolUse tripwire is the second layer, but only for secrets Enigma
+// already tracks, and only when the value is actually printed somewhere in
+// tool output — a `source`/`.`-style load into the current shell surfaces in
+// NEITHER layer, because nothing is printed for the tripwire to scan (the
+// read-guard's own deny is the only thing standing between that command and
+// the shell, which is why it's denied outright rather than left to the
+// tripwire). This is deliberately not a closed system: a control that
+// overstates itself is worse than one that states its limits, because people
+// stop compensating for what it misses.
+//
 // This module never touches a secret VALUE — only secret NAMES (to recognize
 // `echo $NAME`) and file paths. Names are safe to inspect freely per the glossary.
-//
-// Known, accepted gap: a copy-then-read (`cp .env x && cat x`) defeats every
-// filename heuristic here, since the second command never mentions `.env`. The
-// PostToolUse tripwire is the only backstop, and only for secrets Enigma
-// already tracks — this guard cannot and does not chase that pattern.
 import { basename, resolve, sep } from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { enigmaHome } from '../core/paths.js';
@@ -26,9 +41,12 @@ const NON_READING_BASH_VERBS = new Set(['rm', 'mv', 'touch', 'chmod', 'stat', 'l
 /** A recursive Grep needs its own `.env` exclusion (see `grepDotEnvExclusion`);
  * this is the pattern injected via `updatedInput.glob`. */
 const DOTENV_EXCLUDE_GLOB = '!.env*';
-/** Bounds how deep `$(...)`/`` `...` `` command-substitution unwrapping goes,
- * so a pathological command can't recurse unboundedly. */
-const MAX_SUBSTITUTION_DEPTH = 3;
+/** Bounds how deep `$(...)`/`` `...` `` command-substitution unwrapping goes.
+ * Generous on purpose — this is recursion over a short string, so the cost of
+ * going deeper is negligible, and nesting this deep essentially never happens
+ * in an ordinary command. Exceeding it denies (see `allCommandTexts`) rather
+ * than silently checking only a partial unwrapping. */
+const MAX_SUBSTITUTION_DEPTH = 10;
 
 const USE_INSTEAD = 'Use `enigma_request` to collect it from the user, or `enigma run -- <command>` to inject the real value into a child process without it ever entering this session.';
 
@@ -45,6 +63,66 @@ function targetsEnigmaConfig(pathLike: string, cwd: string): boolean {
   const home = resolve(enigmaHome());
   const resolved = resolve(cwd, pathLike.trim());
   return resolved === home || resolved.startsWith(`${home}${sep}`);
+}
+
+/**
+ * Decodes ANSI-C escapes inside a `$'...'` body (the syntax bash itself uses
+ * for that quoting form): `\xHH` hex, `\nnn` octal, `\uHHHH`/`\UHHHHHHHH`
+ * unicode, and the common single-character escapes (`\n`, `\t`, `\\`, …).
+ * Used to catch a `.env` reference spelled out byte-by-byte specifically to
+ * dodge a plain-text match, e.g. `$'\x2e\x65\x6e\x76'` for `.env`.
+ */
+function decodeAnsiCEscapes(body: string): string {
+  return body.replace(/\\(x[0-9a-fA-F]{1,2}|[0-7]{1,3}|u[0-9a-fA-F]{1,4}|U[0-9a-fA-F]{1,8}|.)/gs, (_whole, esc: string) => {
+    if (esc.startsWith('x')) return String.fromCharCode(parseInt(esc.slice(1), 16));
+    if (esc.startsWith('u') || esc.startsWith('U')) return String.fromCodePoint(parseInt(esc.slice(1), 16));
+    if (/^[0-7]{1,3}$/.test(esc)) return String.fromCharCode(parseInt(esc, 8));
+    switch (esc) {
+      case 'n':
+        return '\n';
+      case 't':
+        return '\t';
+      case 'r':
+        return '\r';
+      case 'a':
+        return '\x07';
+      case 'b':
+        return '\b';
+      case 'e':
+      case 'E':
+        return '\x1b';
+      case 'f':
+        return '\f';
+      case 'v':
+        return '\v';
+      default:
+        return esc;
+    }
+  });
+}
+
+/**
+ * Expands the two shell mechanisms most likely to be reached for first when
+ * routing around a naive tokenizer, applied once up front to the whole
+ * command (including inside `$(...)`/`` `...` `` spans, since substitution
+ * extraction runs on the result) so every rule below benefits without each
+ * one re-implementing this:
+ *
+ * - `${IFS}`/bare `$IFS` — IFS defaults to space/tab/newline, so unquoted
+ *   `cat${IFS}.env` word-splits into `cat .env` exactly like a literal space
+ *   would. Replaced with a literal space.
+ * - `$'...'` ANSI-C quoting — decoded via `decodeAnsiCEscapes`, then
+ *   re-wrapped in double quotes (escaping `\` and `"` in the decoded text)
+ *   so `tokenize`'s existing quote handling treats it as one word, the same
+ *   as bash would.
+ */
+function normalizeShellEscapes(command: string): string {
+  const withIfsExpanded = command.replace(/\$\{IFS\}|\$IFS\b/g, ' ');
+  return withIfsExpanded.replace(/\$'((?:[^'\\]|\\.)*)'/gs, (_whole, body: string) => {
+    const decoded = decodeAnsiCEscapes(body);
+    const escaped = decoded.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+    return `"${escaped}"`;
+  });
 }
 
 /** Good-enough shell tokenizer for a heuristic guard, not a full parser: splits on
@@ -99,10 +177,21 @@ function extractSubstitutions(command: string): string[] {
   return results;
 }
 
-function allCommandTexts(command: string, depth = MAX_SUBSTITUTION_DEPTH): string[] {
-  if (depth <= 0) return [command];
+/**
+ * Collects the command itself plus the unwrapped contents of every command
+ * substitution, recursively. Returns `undefined` — never a partial result —
+ * when nesting exceeds `MAX_SUBSTITUTION_DEPTH`, so an un-inspected
+ * substitution is never silently treated as safe; the caller denies in that
+ * case rather than falling back to "allow" on a command it couldn't fully see.
+ */
+function allCommandTexts(command: string, depth = MAX_SUBSTITUTION_DEPTH): string[] | undefined {
   const subs = extractSubstitutions(command);
-  return [command, ...subs.flatMap((s) => allCommandTexts(s, depth - 1))];
+  if (subs.length === 0) return [command];
+  if (depth <= 0) return undefined;
+
+  const nested = subs.map((s) => allCommandTexts(s, depth - 1));
+  if (nested.some((n) => n === undefined)) return undefined;
+  return [command, ...nested.flatMap((n) => n as string[])];
 }
 
 function commandName(token: string): string {
@@ -206,10 +295,10 @@ function expandBraces(pattern: string): string[] {
   return inner.split(',').flatMap((option) => expandBraces(`${prefix}${option}${suffix}`));
 }
 
-/** Converts one glob alternative (no braces, no `!`) to a RegExp: `**`
- * crosses `/`, `*` and `?` don't, everything else is escaped. Not a full
- * glob engine — bracket character classes (`[jt]`) aren't modeled, and
- * `globCouldMatchDotEnv` treats those as "could match" rather than guessing. */
+/** Converts one glob alternative (no braces, no leading `!`) to a RegExp: `**`
+ * crosses `/`, `*` and `?` don't, a `[...]` bracket class is carried through
+ * almost verbatim (glob's `[!...]` negation becomes regex's `[^...]`), and
+ * everything else is escaped. */
 function globToRegExp(glob: string): RegExp {
   let out = '';
   for (let i = 0; i < glob.length; i++) {
@@ -222,7 +311,16 @@ function globToRegExp(glob: string): RegExp {
       out += '[^/]*';
     } else if (c === '?') {
       out += '[^/]';
-    } else if (c && '.+^${}()|[]\\'.includes(c)) {
+    } else if (c === '[') {
+      const close = glob.indexOf(']', i + 1);
+      if (close === -1) {
+        out += '\\[';
+      } else {
+        const body = glob.slice(i + 1, close);
+        out += `[${body.startsWith('!') ? `^${body.slice(1)}` : body}]`;
+        i = close;
+      }
+    } else if (c && '.+^${}()|\\'.includes(c)) {
       out += `\\${c}`;
     } else {
       out += c;
@@ -234,18 +332,12 @@ function globToRegExp(glob: string): RegExp {
 /**
  * Whether `glob` (as ripgrep's `--glob` would interpret it) could match any
  * real `.env`-family file, decided empirically against `DOTENV_PROBE_BASENAMES`
- * rather than by reasoning about glob syntax in the abstract — `*.ts` and
- * `**\/*.json` cannot, `.env`, `.env*`, `*`, `**`, and `**\/*` all can.
- * A leading `!` (ripgrep negation) is stripped before testing, and a bracket
- * character class anywhere in the pattern is treated as "could match" rather
- * than approximated, since getting that wrong in the unsafe direction (a
- * glob that actually reaches `.env` being waved through) is worse than an
- * occasional unnecessary deny.
+ * rather than by reasoning about glob syntax in the abstract — `*.ts`,
+ * `**\/*.json`, and `*.[jt]s` cannot, `.env`, `.env*`, `*`, `**`, and `**\/*`
+ * all can. A leading `!` (ripgrep negation) is stripped before testing.
  */
 function globCouldMatchDotEnv(glob: string): boolean {
   const pattern = glob.startsWith('!') ? glob.slice(1) : glob;
-  if (pattern.includes('[') || pattern.includes(']')) return true;
-
   const hasSlash = pattern.includes('/');
   return expandBraces(pattern).some((alt) => {
     const regex = globToRegExp(alt);
@@ -330,7 +422,13 @@ export function runReadGuard(input: PreToolUseInput): PreToolUseOutput | undefin
     const command = stringField(toolInput, 'command');
     if (command) {
       const known = knownSecretNames();
-      const segments = allCommandTexts(command).flatMap(splitSegments);
+      const texts = allCommandTexts(normalizeShellEscapes(command));
+      if (texts === undefined) {
+        return deny(
+          'This command has command-substitution nesting too deep to safely inspect for a secret read. Simplify it, or use `enigma run -- <command>` if it needs a secret value injected.',
+        );
+      }
+      const segments = texts.flatMap(splitSegments);
       for (const segment of segments) {
         if (segmentTargetsDotEnvByPath(segment)) {
           return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${USE_INSTEAD}`);
