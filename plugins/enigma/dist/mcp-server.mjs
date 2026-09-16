@@ -42337,6 +42337,243 @@ var RequestStore = {
   }
 };
 
+// src/remote/detect.ts
+import { execFile } from "node:child_process";
+var DETECT_TIMEOUT_MS = 2e3;
+function checkBinary(command, args) {
+  return new Promise((resolve2) => {
+    execFile(command, args, { timeout: DETECT_TIMEOUT_MS, maxBuffer: 4096 }, (error62) => resolve2(!error62));
+  });
+}
+function detectCloudflared() {
+  return checkBinary("cloudflared", ["--version"]);
+}
+function detectTailscale() {
+  return checkBinary("tailscale", ["version"]);
+}
+
+// src/remote/cloudflared.ts
+import { spawn } from "node:child_process";
+var URL_TIMEOUT_MS = 2e4;
+var MAX_STDERR_BYTES = 64 * 1024;
+var TRYCLOUDFLARE_PATTERN = /https:\/\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.trycloudflare\.com/;
+function remoteUnavailable(detail) {
+  return new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: `cloudflared: ${detail}` });
+}
+function startCloudflaredTunnel(targetUrl) {
+  return new Promise((resolve2, reject) => {
+    const child = spawn("cloudflared", ["tunnel", "--url", targetUrl], { stdio: ["ignore", "ignore", "pipe"] });
+    let stderrBuf = "";
+    let settled2 = false;
+    let stopped = false;
+    let unexpectedExitResolve;
+    const unexpectedExit = new Promise((res) => {
+      unexpectedExitResolve = res;
+    });
+    const timer = setTimeout(() => {
+      if (settled2) return;
+      settled2 = true;
+      child.kill("SIGKILL");
+      reject(remoteUnavailable(`timed out waiting for a trycloudflare.com URL after ${URL_TIMEOUT_MS}ms`));
+    }, URL_TIMEOUT_MS);
+    timer.unref();
+    child.on("error", () => {
+      if (settled2) return;
+      settled2 = true;
+      clearTimeout(timer);
+      reject(remoteUnavailable("failed to start (is it on PATH?)"));
+    });
+    child.stderr.on("data", (chunk) => {
+      if (settled2) return;
+      stderrBuf += chunk.toString("utf8");
+      if (stderrBuf.length > MAX_STDERR_BYTES) stderrBuf = stderrBuf.slice(-MAX_STDERR_BYTES);
+      const match = TRYCLOUDFLARE_PATTERN.exec(stderrBuf);
+      if (!match) return;
+      settled2 = true;
+      clearTimeout(timer);
+      const stop = () => {
+        if (stopped) return;
+        stopped = true;
+        child.kill("SIGTERM");
+        const killer = setTimeout(() => child.kill("SIGKILL"), 2e3);
+        killer.unref();
+      };
+      resolve2({
+        url: match[0],
+        binary: "cloudflared",
+        stop,
+        waitForUnexpectedExit: () => unexpectedExit
+      });
+    });
+    child.on("exit", (code) => {
+      if (!settled2) {
+        settled2 = true;
+        clearTimeout(timer);
+        reject(remoteUnavailable(`exited before establishing a tunnel (code ${code ?? "unknown"})`));
+        return;
+      }
+      if (!stopped) unexpectedExitResolve?.();
+    });
+  });
+}
+
+// src/remote/tailscale.ts
+import { execFile as execFile2, spawn as spawn2 } from "node:child_process";
+var STATUS_TIMEOUT_MS = 1e4;
+var OFF_TIMEOUT_MS = 1e4;
+var START_GRACE_MS = 3e3;
+var SERVE_PORT = 443;
+function remoteUnavailable2(detail) {
+  return new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: `tailscale: ${detail}` });
+}
+function runTailscale(args, timeoutMs) {
+  return new Promise((resolve2, reject) => {
+    execFile2("tailscale", args, { timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (error62, stdout, stderr) => {
+      if (error62) {
+        reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
+        return;
+      }
+      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+    });
+  });
+}
+async function selfDnsName() {
+  let stdout;
+  try {
+    ({ stdout } = await runTailscale(["status", "--json"], STATUS_TIMEOUT_MS));
+  } catch {
+    throw remoteUnavailable2('"tailscale status --json" failed (is tailscaled running and this node logged in?)');
+  }
+  let parsed;
+  try {
+    parsed = JSON.parse(stdout);
+  } catch {
+    throw remoteUnavailable2('"tailscale status --json" returned output that could not be parsed');
+  }
+  const dnsName = parsed.Self?.DNSName;
+  if (!dnsName) throw remoteUnavailable2('"tailscale status --json" has no DNSName for this node');
+  return dnsName.replace(/\.+$/, "");
+}
+function offBestEffort() {
+  void runTailscale(["serve", `--https=${SERVE_PORT}`, "off"], OFF_TIMEOUT_MS).catch(() => {
+  });
+}
+async function startTailscaleServe(port) {
+  const dnsName = await selfDnsName();
+  const target = `http://127.0.0.1:${port}`;
+  return new Promise((resolve2, reject) => {
+    const child = spawn2("tailscale", ["serve", `--https=${SERVE_PORT}`, target], { stdio: "ignore" });
+    let settled2 = false;
+    let stopped = false;
+    let unexpectedExitResolve;
+    const unexpectedExit = new Promise((res) => {
+      unexpectedExitResolve = res;
+    });
+    const stop = () => {
+      if (stopped) return;
+      stopped = true;
+      child.kill("SIGTERM");
+      const killer = setTimeout(() => child.kill("SIGKILL"), 2e3);
+      killer.unref();
+      offBestEffort();
+    };
+    const graceTimer = setTimeout(() => {
+      if (settled2) return;
+      settled2 = true;
+      resolve2({ url: `https://${dnsName}`, binary: "tailscale", stop, waitForUnexpectedExit: () => unexpectedExit });
+    }, START_GRACE_MS);
+    graceTimer.unref();
+    child.on("error", () => {
+      if (settled2) return;
+      settled2 = true;
+      clearTimeout(graceTimer);
+      reject(remoteUnavailable2("failed to start (is it on PATH?)"));
+    });
+    child.on("exit", (code) => {
+      if (!settled2) {
+        settled2 = true;
+        clearTimeout(graceTimer);
+        reject(remoteUnavailable2(`exited before serving (code ${code ?? "unknown"})`));
+        return;
+      }
+      if (!stopped) unexpectedExitResolve?.();
+    });
+  });
+}
+
+// src/remote/index.ts
+var INSTALL_HINTS = {
+  cloudflared: 'cloudflared not found on PATH; install it (e.g. "brew install cloudflared", or see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)',
+  tailscale: 'tailscale not found on PATH; install it (e.g. "brew install tailscale", or see https://tailscale.com/download)'
+};
+function resolveRemotePreference(remote) {
+  if (remote === true) return "required";
+  if (remote === "prefer") return "prefer";
+  return "none";
+}
+function selectBinary(config2) {
+  return config2.remote === "tailscale" ? "tailscale" : "cloudflared";
+}
+function detectBinary(binary) {
+  return binary === "tailscale" ? detectTailscale() : detectCloudflared();
+}
+function startTunnel(binary, port) {
+  return binary === "tailscale" ? startTailscaleServe(port) : startCloudflaredTunnel(`http://127.0.0.1:${port}`);
+}
+async function attemptRemoteTunnel(preference, config2, port) {
+  if (preference === "none") return void 0;
+  const binary = selectBinary(config2);
+  const available = await detectBinary(binary);
+  if (!available) {
+    const hint = INSTALL_HINTS[binary];
+    if (preference === "required") throw new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: hint });
+    return { note: `Remote access unavailable \u2014 ${hint}. Used the local link instead.` };
+  }
+  try {
+    const tunnel = await startTunnel(binary, port);
+    return { tunnel };
+  } catch (err) {
+    const reason = err instanceof EnigmaError ? err.message : `${binary} failed to start`;
+    if (preference === "required") {
+      throw err instanceof EnigmaError ? err : new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: reason });
+    }
+    return { note: `Remote access unavailable \u2014 ${reason}. Used the local link instead.` };
+  }
+}
+var CLEANUP_GRACE_MS = 6e4;
+var active = /* @__PURE__ */ new Map();
+function scheduleCleanup(requestId) {
+  const t = setTimeout(() => active.delete(requestId), CLEANUP_GRACE_MS);
+  t.unref();
+}
+function registerActiveTunnel(requestId, attempt) {
+  const tunnel = attempt.tunnel;
+  const note = tunnel ? `Remote access via ${tunnel.binary} was used for this request.` : attempt.note;
+  active.set(requestId, { tunnel, note });
+  if (!tunnel) {
+    void RequestStore.waitForFulfilled(requestId).catch(() => {
+    }).finally(() => scheduleCleanup(requestId));
+    return;
+  }
+  void RequestStore.waitForFulfilled(requestId).catch(() => {
+  }).finally(() => {
+    tunnel.stop();
+    scheduleCleanup(requestId);
+  });
+  void tunnel.waitForUnexpectedExit().then(() => {
+    const entry = active.get(requestId);
+    if (entry) entry.note = `Remote access via ${tunnel.binary} was lost during this request; the local link still works.`;
+  });
+}
+function getActiveRemoteUrl(requestId) {
+  return active.get(requestId)?.tunnel?.url;
+}
+function takeRemoteNote(requestId) {
+  const entry = active.get(requestId);
+  active.delete(requestId);
+  return entry?.note;
+}
+
 // src/core/naming.ts
 var NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 function validateName(name) {
@@ -42719,7 +42956,7 @@ var envDepositoryModule = {
 };
 
 // src/storage/depositories/linux-secret-service.ts
-import { execFile } from "node:child_process";
+import { execFile as execFile3 } from "node:child_process";
 var SECRET_TOOL_BIN = "secret-tool";
 var SERVICE = "enigma";
 var EXEC_TIMEOUT_MS = 1e4;
@@ -42729,7 +42966,7 @@ var REF_PATTERN = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH = 512;
 function runSecretTool(args) {
   return new Promise((resolve2, reject) => {
-    execFile(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error62, stdout, stderr) => {
+    execFile3(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
@@ -42740,7 +42977,7 @@ function runSecretTool(args) {
 }
 function runSecretToolWithStdin(args, value) {
   return new Promise((resolve2, reject) => {
-    const child = execFile(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error62, stdout, stderr) => {
+    const child = execFile3(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
@@ -42877,7 +43114,7 @@ var linuxSecretServiceDepositoryModule = {
 };
 
 // src/storage/depositories/macos-keychain.ts
-import { execFile as execFile2 } from "node:child_process";
+import { execFile as execFile4 } from "node:child_process";
 import { existsSync as existsSync5 } from "node:fs";
 var SECURITY_BIN = "/usr/bin/security";
 var SERVICE2 = "enigma";
@@ -42891,7 +43128,7 @@ var REF_MAX_LENGTH2 = 512;
 var MARKER_BYTE = 1;
 function runSecurity(args) {
   return new Promise((resolve2, reject) => {
-    execFile2(SECURITY_BIN, args, { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error62, stdout, stderr) => {
+    execFile4(SECURITY_BIN, args, { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
@@ -42902,7 +43139,7 @@ function runSecurity(args) {
 }
 function runSecurityBatch(line) {
   return new Promise((resolve2, reject) => {
-    const child = execFile2(SECURITY_BIN, ["-i"], { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error62, stdout, stderr) => {
+    const child = execFile4(SECURITY_BIN, ["-i"], { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
@@ -43057,7 +43294,7 @@ var macosKeychainDepositoryModule = {
 };
 
 // src/storage/depositories/onepassword.ts
-import { execFile as execFile3 } from "node:child_process";
+import { execFile as execFile5 } from "node:child_process";
 import { basename } from "node:path";
 var OP_BIN = "op";
 var VAULT = "Enigma";
@@ -43070,7 +43307,7 @@ var VAULT_MISSING_PATTERN = /isn't a vault|no vault named|could not find vault/i
 var ITEM_MISSING_PATTERN = /isn't an item|could not find item|item.*not found/i;
 function runOp(args) {
   return new Promise((resolve2, reject) => {
-    execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error62, stdout, stderr) => {
+    execFile5(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
@@ -43081,7 +43318,7 @@ function runOp(args) {
 }
 function runOpWithStdin(args, stdinData) {
   return new Promise((resolve2, reject) => {
-    const child = execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error62, stdout, stderr) => {
+    const child = execFile5(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
@@ -43477,7 +43714,10 @@ function registerAwaitTool(server) {
       }
       try {
         const outcome = await resolveRequestOutcome(args.request_id, cwd);
-        return textResult(outcome.text, outcome.isError);
+        const remoteNote = takeRemoteNote(args.request_id);
+        const text = remoteNote ? `${outcome.text}
+${remoteNote}` : outcome.text;
+        return textResult(text, outcome.isError);
       } catch {
         return errorResult(
           new EnigmaError({ code: "E_REQUEST_EXPIRED", message: `request ${args.request_id} expired before it was fulfilled` })
@@ -43488,7 +43728,7 @@ function registerAwaitTool(server) {
 }
 
 // src/mcp/tools/doctor.ts
-import { execFile as execFile4 } from "node:child_process";
+import { execFile as execFile6 } from "node:child_process";
 import { existsSync as existsSync7 } from "node:fs";
 import { platform, release } from "node:os";
 import { promisify } from "node:util";
@@ -43554,7 +43794,7 @@ async function sendElicitationComplete(server, elicitationId) {
 }
 
 // src/mcp/tools/doctor.ts
-var execFileAsync = promisify(execFile4);
+var execFileAsync = promisify(execFile6);
 async function binaryStatus(command, args) {
   try {
     const { stdout } = await execFileAsync(command, args, { timeout: 2e3, maxBuffer: 1024 });
@@ -43722,10 +43962,10 @@ function buildHiddenAnswerScript(name, reason) {
 }
 
 // src/native/exec.ts
-import { spawn } from "node:child_process";
+import { spawn as spawn3 } from "node:child_process";
 function execWithStdin(command, args, input2, opts) {
   return new Promise((resolve2, reject) => {
-    const child = spawn(command, args, { stdio: ["pipe", "pipe", "pipe"] });
+    const child = spawn3(command, args, { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
     let settled2 = false;
@@ -43826,243 +44066,6 @@ async function nativeRequest(opts) {
     stored.push(name);
   }
   return { stored };
-}
-
-// src/remote/detect.ts
-import { execFile as execFile5 } from "node:child_process";
-var DETECT_TIMEOUT_MS = 2e3;
-function checkBinary(command, args) {
-  return new Promise((resolve2) => {
-    execFile5(command, args, { timeout: DETECT_TIMEOUT_MS, maxBuffer: 4096 }, (error62) => resolve2(!error62));
-  });
-}
-function detectCloudflared() {
-  return checkBinary("cloudflared", ["--version"]);
-}
-function detectTailscale() {
-  return checkBinary("tailscale", ["version"]);
-}
-
-// src/remote/cloudflared.ts
-import { spawn as spawn2 } from "node:child_process";
-var URL_TIMEOUT_MS = 2e4;
-var MAX_STDERR_BYTES = 64 * 1024;
-var TRYCLOUDFLARE_PATTERN = /https:\/\/[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.trycloudflare\.com/;
-function remoteUnavailable(detail) {
-  return new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: `cloudflared: ${detail}` });
-}
-function startCloudflaredTunnel(targetUrl) {
-  return new Promise((resolve2, reject) => {
-    const child = spawn2("cloudflared", ["tunnel", "--url", targetUrl], { stdio: ["ignore", "ignore", "pipe"] });
-    let stderrBuf = "";
-    let settled2 = false;
-    let stopped = false;
-    let unexpectedExitResolve;
-    const unexpectedExit = new Promise((res) => {
-      unexpectedExitResolve = res;
-    });
-    const timer = setTimeout(() => {
-      if (settled2) return;
-      settled2 = true;
-      child.kill("SIGKILL");
-      reject(remoteUnavailable(`timed out waiting for a trycloudflare.com URL after ${URL_TIMEOUT_MS}ms`));
-    }, URL_TIMEOUT_MS);
-    timer.unref();
-    child.on("error", () => {
-      if (settled2) return;
-      settled2 = true;
-      clearTimeout(timer);
-      reject(remoteUnavailable("failed to start (is it on PATH?)"));
-    });
-    child.stderr.on("data", (chunk) => {
-      if (settled2) return;
-      stderrBuf += chunk.toString("utf8");
-      if (stderrBuf.length > MAX_STDERR_BYTES) stderrBuf = stderrBuf.slice(-MAX_STDERR_BYTES);
-      const match = TRYCLOUDFLARE_PATTERN.exec(stderrBuf);
-      if (!match) return;
-      settled2 = true;
-      clearTimeout(timer);
-      const stop = () => {
-        if (stopped) return;
-        stopped = true;
-        child.kill("SIGTERM");
-        const killer = setTimeout(() => child.kill("SIGKILL"), 2e3);
-        killer.unref();
-      };
-      resolve2({
-        url: match[0],
-        binary: "cloudflared",
-        stop,
-        waitForUnexpectedExit: () => unexpectedExit
-      });
-    });
-    child.on("exit", (code) => {
-      if (!settled2) {
-        settled2 = true;
-        clearTimeout(timer);
-        reject(remoteUnavailable(`exited before establishing a tunnel (code ${code ?? "unknown"})`));
-        return;
-      }
-      if (!stopped) unexpectedExitResolve?.();
-    });
-  });
-}
-
-// src/remote/tailscale.ts
-import { execFile as execFile6, spawn as spawn3 } from "node:child_process";
-var STATUS_TIMEOUT_MS = 1e4;
-var OFF_TIMEOUT_MS = 1e4;
-var START_GRACE_MS = 3e3;
-var SERVE_PORT = 443;
-function remoteUnavailable2(detail) {
-  return new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: `tailscale: ${detail}` });
-}
-function runTailscale(args, timeoutMs) {
-  return new Promise((resolve2, reject) => {
-    execFile6("tailscale", args, { timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (error62, stdout, stderr) => {
-      if (error62) {
-        reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
-        return;
-      }
-      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
-    });
-  });
-}
-async function selfDnsName() {
-  let stdout;
-  try {
-    ({ stdout } = await runTailscale(["status", "--json"], STATUS_TIMEOUT_MS));
-  } catch {
-    throw remoteUnavailable2('"tailscale status --json" failed (is tailscaled running and this node logged in?)');
-  }
-  let parsed;
-  try {
-    parsed = JSON.parse(stdout);
-  } catch {
-    throw remoteUnavailable2('"tailscale status --json" returned output that could not be parsed');
-  }
-  const dnsName = parsed.Self?.DNSName;
-  if (!dnsName) throw remoteUnavailable2('"tailscale status --json" has no DNSName for this node');
-  return dnsName.replace(/\.+$/, "");
-}
-function offBestEffort() {
-  void runTailscale(["serve", `--https=${SERVE_PORT}`, "off"], OFF_TIMEOUT_MS).catch(() => {
-  });
-}
-async function startTailscaleServe(port) {
-  const dnsName = await selfDnsName();
-  const target = `http://127.0.0.1:${port}`;
-  return new Promise((resolve2, reject) => {
-    const child = spawn3("tailscale", ["serve", `--https=${SERVE_PORT}`, target], { stdio: "ignore" });
-    let settled2 = false;
-    let stopped = false;
-    let unexpectedExitResolve;
-    const unexpectedExit = new Promise((res) => {
-      unexpectedExitResolve = res;
-    });
-    const stop = () => {
-      if (stopped) return;
-      stopped = true;
-      child.kill("SIGTERM");
-      const killer = setTimeout(() => child.kill("SIGKILL"), 2e3);
-      killer.unref();
-      offBestEffort();
-    };
-    const graceTimer = setTimeout(() => {
-      if (settled2) return;
-      settled2 = true;
-      resolve2({ url: `https://${dnsName}`, binary: "tailscale", stop, waitForUnexpectedExit: () => unexpectedExit });
-    }, START_GRACE_MS);
-    graceTimer.unref();
-    child.on("error", () => {
-      if (settled2) return;
-      settled2 = true;
-      clearTimeout(graceTimer);
-      reject(remoteUnavailable2("failed to start (is it on PATH?)"));
-    });
-    child.on("exit", (code) => {
-      if (!settled2) {
-        settled2 = true;
-        clearTimeout(graceTimer);
-        reject(remoteUnavailable2(`exited before serving (code ${code ?? "unknown"})`));
-        return;
-      }
-      if (!stopped) unexpectedExitResolve?.();
-    });
-  });
-}
-
-// src/remote/index.ts
-var INSTALL_HINTS = {
-  cloudflared: 'cloudflared not found on PATH; install it (e.g. "brew install cloudflared", or see https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/)',
-  tailscale: 'tailscale not found on PATH; install it (e.g. "brew install tailscale", or see https://tailscale.com/download)'
-};
-function resolveRemotePreference(remote) {
-  if (remote === true) return "required";
-  if (remote === "prefer") return "prefer";
-  return "none";
-}
-function selectBinary(config2) {
-  return config2.remote === "tailscale" ? "tailscale" : "cloudflared";
-}
-function detectBinary(binary) {
-  return binary === "tailscale" ? detectTailscale() : detectCloudflared();
-}
-function startTunnel(binary, port) {
-  return binary === "tailscale" ? startTailscaleServe(port) : startCloudflaredTunnel(`http://127.0.0.1:${port}`);
-}
-async function attemptRemoteTunnel(preference, config2, port) {
-  if (preference === "none") return void 0;
-  const binary = selectBinary(config2);
-  const available = await detectBinary(binary);
-  if (!available) {
-    const hint = INSTALL_HINTS[binary];
-    if (preference === "required") throw new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: hint });
-    return { note: `Remote access unavailable \u2014 ${hint}. Used the local link instead.` };
-  }
-  try {
-    const tunnel = await startTunnel(binary, port);
-    return { tunnel };
-  } catch (err) {
-    const reason = err instanceof EnigmaError ? err.message : `${binary} failed to start`;
-    if (preference === "required") {
-      throw err instanceof EnigmaError ? err : new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: reason });
-    }
-    return { note: `Remote access unavailable \u2014 ${reason}. Used the local link instead.` };
-  }
-}
-var CLEANUP_GRACE_MS = 6e4;
-var active = /* @__PURE__ */ new Map();
-function scheduleCleanup(requestId) {
-  const t = setTimeout(() => active.delete(requestId), CLEANUP_GRACE_MS);
-  t.unref();
-}
-function registerActiveTunnel(requestId, attempt) {
-  const tunnel = attempt.tunnel;
-  const note = tunnel ? `Remote access via ${tunnel.binary} was used for this request.` : attempt.note;
-  active.set(requestId, { tunnel, note });
-  if (!tunnel) {
-    void RequestStore.waitForFulfilled(requestId).catch(() => {
-    }).finally(() => scheduleCleanup(requestId));
-    return;
-  }
-  void RequestStore.waitForFulfilled(requestId).catch(() => {
-  }).finally(() => {
-    tunnel.stop();
-    scheduleCleanup(requestId);
-  });
-  void tunnel.waitForUnexpectedExit().then(() => {
-    const entry = active.get(requestId);
-    if (entry) entry.note = `Remote access via ${tunnel.binary} was lost during this request; the local link still works.`;
-  });
-}
-function getActiveRemoteUrl(requestId) {
-  return active.get(requestId)?.tunnel?.url;
-}
-function takeRemoteNote(requestId) {
-  const entry = active.get(requestId);
-  active.delete(requestId);
-  return entry?.note;
 }
 
 // src/web/server.ts
