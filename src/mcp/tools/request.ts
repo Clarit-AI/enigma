@@ -5,7 +5,7 @@ import type { Scope } from '../../core/index-store.js';
 import { loadConfig } from '../../core/config.js';
 import { EnigmaError } from '../../core/errors.js';
 import { nativeRequest } from '../../native/request.js';
-import type { RequestNameResult } from '../../request/store.js';
+import type { RequestNameResult, RequestRecord } from '../../request/store.js';
 import { RequestStore } from '../../request/store.js';
 import { attemptRemoteTunnel, registerActiveTunnel, resolveRemotePreference, takeRemoteNote } from '../../remote/index.js';
 import type { RemoteAttempt } from '../../remote/index.js';
@@ -111,11 +111,29 @@ export function registerRequestTool(server: McpServer): void {
         return runNative(args, cwd);
       }
 
+      const preference = resolveRemotePreference(args.remote);
+      const clientSupportsUrl = supportsUrlElicitation(server.server);
+
+      let remoteAttempt: RemoteAttempt | undefined;
+      if (preference !== 'none' && !clientSupportsUrl) {
+        // A client without URL-mode elicitation has no sanctioned
+        // out-of-band channel at all: the fallback branch below returns
+        // its URL as literal tool-result text, which is the model's own
+        // context — exactly the channel URL-mode elicitation exists to
+        // keep a public link out of (Tech Lead ruling on PR #35, round 2;
+        // this Issue's leak criterion). Remote access is therefore never
+        // attempted for such a client, not offered and then hidden.
+        const reason =
+          'this client does not support MCP URL-mode elicitation, so there is no out-of-band channel to deliver a public link through';
+        if (preference === 'required') {
+          return errorResult(new EnigmaError({ code: 'E_REMOTE_UNAVAILABLE', message: reason }));
+        }
+        remoteAttempt = { note: `Remote access unavailable — ${reason}. Used the local link instead.` };
+      }
+
       const handle = await startServer();
 
-      const preference = resolveRemotePreference(args.remote);
-      let remoteAttempt: RemoteAttempt | undefined;
-      if (preference !== 'none') {
+      if (preference !== 'none' && clientSupportsUrl) {
         try {
           remoteAttempt = await attemptRemoteTunnel(preference, loadConfig(), handle.port);
         } catch (err) {
@@ -127,24 +145,36 @@ export function registerRequestTool(server: McpServer): void {
         }
       }
 
-      const record = RequestStore.create({
-        kind: 'request',
-        names: args.names,
-        reason: args.reason,
-        usage: args.usage,
-        depository: args.depository,
-        scope: args.scope,
-        rotate: args.rotate,
-      });
+      let record: RequestRecord;
+      try {
+        record = RequestStore.create({
+          kind: 'request',
+          names: args.names,
+          reason: args.reason,
+          usage: args.usage,
+          depository: args.depository,
+          scope: args.scope,
+          rotate: args.rotate,
+        });
+      } catch (err) {
+        // Currently unreachable (zod already bounds `names` to 1–10 at the
+        // schema level), but a tunnel started above must never be
+        // orphaned if that assumption ever changes (QA finding on PR #35).
+        remoteAttempt?.tunnel?.stop();
+        throw err;
+      }
       if (remoteAttempt) registerActiveTunnel(record.id, remoteAttempt);
 
+      // `clientSupportsUrl` is false whenever `remoteAttempt.tunnel` could
+      // be set (see above), so this origin is never the tunnel's when the
+      // fallback branch below is the one that runs.
       const origin = remoteAttempt?.tunnel?.url ?? handle.origin;
       const url = `${origin}/r/${record.id}`;
       const remoteNote = remoteAttempt?.tunnel
         ? `Remote access via ${remoteAttempt.tunnel.binary} is active for this request.`
         : remoteAttempt?.note;
 
-      if (!supportsUrlElicitation(server.server)) {
+      if (!clientSupportsUrl) {
         const fallback = { request_id: record.id, url, expiresAt: new Date(record.expiresAt).toISOString() };
         const lines = [
           JSON.stringify(fallback),

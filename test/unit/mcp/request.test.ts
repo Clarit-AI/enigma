@@ -14,6 +14,7 @@ class FakeChild extends EventEmitter {
   stdout = new FakeStream();
   stderr = new FakeStream();
   kill = vi.fn();
+  unref = vi.fn();
 }
 
 const spawnMock = vi.fn();
@@ -466,6 +467,79 @@ describe('enigma_request remote access (Issue #12)', () => {
     expect(text.toLowerCase()).toContain('lost');
     expect(text).not.toContain('trycloudflare.com');
     expect(text).not.toContain(SENTINEL);
+    await pair.close();
+  });
+
+  it(
+    'remote:true + a client without URL-mode elicitation: E_REMOTE_UNAVAILABLE naming the real reason, no request created, no binary ever probed',
+    async () => {
+      // Tech Lead ruling on PR #35, round 2, item 2: such a client has no
+      // sanctioned out-of-band channel at all — the fallback branch returns
+      // its URL as literal tool-result text — so remote access must never
+      // even be attempted, not attempted and then hidden.
+      const pair = await connectWithCapabilities({ elicitation: {} });
+      const elicitHandler = vi.fn();
+      pair.client.setRequestHandler(ElicitRequestSchema, elicitHandler);
+
+      const result = await pair.client.callTool({
+        name: 'enigma_request',
+        arguments: { names: ['OPENAI_API_KEY'], reason: 'test', usage: 'interactive', scope: 'global', remote: true },
+      });
+
+      expect(result.isError).toBe(true);
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+      expect(text).toContain('E_REMOTE_UNAVAILABLE');
+      expect(text).toContain('URL-mode elicitation');
+      expect(elicitHandler).not.toHaveBeenCalled();
+      expect(execFileMock).not.toHaveBeenCalled();
+      expect(spawnMock).not.toHaveBeenCalled();
+      await pair.close();
+    },
+  );
+
+  it(
+    'remote:"prefer" + a client without URL-mode elicitation: the fallback URL is the LOCAL origin, never a tunnel origin, and names why',
+    async () => {
+      const pair = await connectWithCapabilities({ elicitation: {} });
+      const elicitHandler = vi.fn();
+      pair.client.setRequestHandler(ElicitRequestSchema, elicitHandler);
+
+      const result = await pair.client.callTool({
+        name: 'enigma_request',
+        arguments: { names: ['OPENAI_API_KEY'], reason: 'test', usage: 'interactive', scope: 'global', remote: 'prefer' },
+      });
+
+      expect(elicitHandler).not.toHaveBeenCalled();
+      expect(execFileMock).not.toHaveBeenCalled();
+      expect(spawnMock).not.toHaveBeenCalled();
+
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+      const parsed = JSON.parse(text.split('\n')[0] ?? '{}') as { request_id: string; url: string };
+      expect(parsed.url).toContain('127.0.0.1');
+      expect(parsed.url).not.toContain('trycloudflare.com');
+      expect(text).toContain('Remote access unavailable');
+      expect(text).toContain('URL-mode elicitation');
+      await pair.close();
+    },
+  );
+
+  it('RequestStore.create throwing after a tunnel started stops the tunnel before the error surfaces (guard for QA finding on PR #35; currently unreachable given zod bounds)', async () => {
+    const tunnelChild = stubCloudflaredAvailable();
+    const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+    pair.client.setRequestHandler(ElicitRequestSchema, vi.fn());
+
+    const createSpy = vi.spyOn(RequestStore, 'create').mockImplementationOnce(() => {
+      throw new Error('simulated RequestStore.create failure');
+    });
+
+    const result = await pair.client.callTool({
+      name: 'enigma_request',
+      arguments: { names: ['OPENAI_API_KEY'], reason: 'test', usage: 'interactive', scope: 'global', remote: true },
+    });
+
+    createSpy.mockRestore();
+    expect(result.isError).toBe(true);
+    expect(tunnelChild.kill).toHaveBeenCalledWith('SIGTERM');
     await pair.close();
   });
 });
