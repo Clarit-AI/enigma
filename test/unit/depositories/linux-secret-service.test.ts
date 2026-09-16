@@ -1,3 +1,4 @@
+import { EventEmitter } from 'node:events';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -5,10 +6,17 @@ import { EnigmaError } from '../../../src/core/errors.js';
 
 const SENTINEL = 'sk-sentinel-value-should-never-appear';
 
+interface FakeStdin extends EventEmitter {
+  write: (data: string) => boolean;
+  end: () => void;
+}
+
 interface FakeCall {
   file: string;
   args: string[];
   stdinData?: string;
+  stdin: FakeStdin;
+  writeReturn: boolean;
 }
 
 interface FakeError extends Error {
@@ -18,24 +26,29 @@ interface FakeError extends Error {
 }
 
 const calls: FakeCall[] = [];
-type Responder = (call: FakeCall) => { error?: FakeError | null; stdout?: string; stderr?: string };
+type Responder = (call: FakeCall) => { error?: FakeError | null; stdout?: string; stderr?: string; stdinError?: Error };
 let respond: Responder;
 
 vi.mock('node:child_process', () => ({
   execFile: (file: string, args: string[], _options: unknown, callback: (...cbArgs: unknown[]) => void) => {
-    const call: FakeCall = { file, args };
+    const stdin = new EventEmitter() as FakeStdin;
+    const call: FakeCall = { file, args, stdin, writeReturn: true };
+    stdin.write = (data: string) => {
+      call.stdinData = (call.stdinData ?? '') + data;
+      return call.writeReturn;
+    };
+    stdin.end = () => {};
     calls.push(call);
     const result = respond(call);
-    queueMicrotask(() => callback(result.error ?? null, result.stdout ?? '', result.stderr ?? ''));
-    return {
-      stdin: {
-        write: (data: string) => {
-          call.stdinData = (call.stdinData ?? '') + data;
-        },
-        end: () => {},
-      },
-      kill: () => {},
-    };
+    if (result.stdinError) {
+      queueMicrotask(() => stdin.emit('error', result.stdinError));
+    } else {
+      queueMicrotask(() => callback(result.error ?? null, result.stdout ?? '', result.stderr ?? ''));
+    }
+    const child = new EventEmitter() as EventEmitter & { stdin: FakeStdin; kill: () => void };
+    child.stdin = stdin;
+    child.kill = () => {};
+    return child;
   },
 }));
 
@@ -100,13 +113,43 @@ describe('linux-secret-service depository', () => {
       expect(call.stdinData).toBe(SENTINEL);
     });
 
-    it('throws E_READ_FAILED naming secret-service when the command fails', async () => {
+    it('throws E_WRITE_FAILED naming secret-service when the command fails', async () => {
       respond = () => genericError();
       const depo = linuxSecretServiceDepositoryModule.create({});
 
       await expect(depo.set('global/NAME', SENTINEL)).rejects.toThrow(
-        expect.objectContaining({ code: 'E_READ_FAILED', depository: 'secret-service' }),
+        expect.objectContaining({ code: 'E_WRITE_FAILED', depository: 'secret-service' }),
       );
+    });
+
+    it('rejects instead of crashing when the child exits before stdin drains (EPIPE)', async () => {
+      respond = () => ({ stdinError: Object.assign(new Error('write EPIPE'), { code: 'EPIPE' }) });
+      const depo = linuxSecretServiceDepositoryModule.create({});
+
+      await expect(depo.set('global/NAME', SENTINEL)).rejects.toThrow(
+        expect.objectContaining({ code: 'E_WRITE_FAILED', depository: 'secret-service' }),
+      );
+    });
+  });
+
+  describe('ref validation', () => {
+    it('rejects an invalid ref on set/resolve/delete/has before spawning anything', async () => {
+      const depo = linuxSecretServiceDepositoryModule.create({});
+      const invalidRef = 'global/NAME; rm -rf /';
+
+      await expect(depo.set(invalidRef, SENTINEL)).rejects.toThrow(expect.objectContaining({ code: 'E_REF_INVALID' }));
+      await expect(depo.resolve(invalidRef)).rejects.toThrow(expect.objectContaining({ code: 'E_REF_INVALID' }));
+      await expect(depo.delete(invalidRef)).rejects.toThrow(expect.objectContaining({ code: 'E_REF_INVALID' }));
+      await expect(depo.has(invalidRef)).rejects.toThrow(expect.objectContaining({ code: 'E_REF_INVALID' }));
+      expect(calls).toHaveLength(0);
+    });
+
+    it('rejects a ref longer than the sane cap', async () => {
+      const depo = linuxSecretServiceDepositoryModule.create({});
+      const longRef = `global/${'A'.repeat(600)}`;
+
+      await expect(depo.set(longRef, SENTINEL)).rejects.toThrow(expect.objectContaining({ code: 'E_REF_INVALID' }));
+      expect(calls).toHaveLength(0);
     });
   });
 
@@ -217,6 +260,30 @@ describe('linux-secret-service depository', () => {
 
       expect(result.available).toBe(false);
       expect(calls).toHaveLength(0);
+    });
+
+    it('is still available when store succeeds but the cleanup clear fails, and clear was attempted', async () => {
+      setPlatform('linux');
+      respond = (call) => (call.args[0] === 'store' ? okResult() : genericError());
+
+      const result = await linuxSecretServiceDepositoryModule.detect();
+
+      expect(result).toEqual({ id: 'secret-service', promptProfile: 'may-prompt', available: true });
+      expect(calls).toHaveLength(2);
+      expect(calls[0]!.args[0]).toBe('store');
+      expect(calls[1]!.args[0]).toBe('clear');
+    });
+
+    it('attempts cleanup (clear) even when store itself fails, via finally', async () => {
+      setPlatform('linux');
+      respond = (call) => (call.args[0] === 'store' ? dbusUnavailableError() : okResult());
+
+      const result = await linuxSecretServiceDepositoryModule.detect();
+
+      expect(result.available).toBe(false);
+      expect(calls).toHaveLength(2);
+      expect(calls[0]!.args[0]).toBe('store');
+      expect(calls[1]!.args[0]).toBe('clear');
     });
   });
 

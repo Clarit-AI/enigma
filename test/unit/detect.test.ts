@@ -3,7 +3,11 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('node:child_process', () => ({
   execFile: (_file: string, _args: string[], _options: unknown, callback: (...cbArgs: unknown[]) => void) => {
     queueMicrotask(() => callback(null, '', ''));
-    return { stdin: { write: () => {}, end: () => {} }, kill: () => {} };
+    return {
+      stdin: { write: () => true, end: () => {}, on: () => {}, once: () => {} },
+      on: () => {},
+      kill: () => {},
+    };
   },
 }));
 
