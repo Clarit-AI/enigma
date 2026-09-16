@@ -36,7 +36,7 @@ describe('cli main dispatch', () => {
     expect(stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toContain("unknown command 'bogus'");
   });
 
-  it.each(['request', 'reveal', 'install'])('exits 2 for the out-of-scope command %s', async (command) => {
+  it.each(['request', 'reveal'])('exits 2 for the out-of-scope command %s', async (command) => {
     const code = await main([command]);
     expect(code).toBe(2);
     expect(stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toContain(`enigma ${command}: not yet implemented`);

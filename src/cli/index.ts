@@ -3,6 +3,7 @@ import { cmdAdd } from './commands/add.js';
 import { cmdDoctor } from './commands/doctor.js';
 import { cmdGet } from './commands/get.js';
 import { cmdImport } from './commands/import.js';
+import { cmdInstall } from './commands/install.js';
 import { cmdList } from './commands/list.js';
 import { cmdMove } from './commands/move.js';
 import { cmdRemove } from './commands/remove.js';
@@ -21,8 +22,9 @@ Commands:
   get NAME [--scope project|global]
   import [PATH] [--depository ID] [--json]
   doctor [--json]
+  install [--uninstall]
 
-Not yet implemented: request, reveal, install
+Not yet implemented: request, reveal
 `;
 
 const COMMANDS: Record<string, (argv: string[]) => Promise<number>> = {
@@ -34,9 +36,9 @@ const COMMANDS: Record<string, (argv: string[]) => Promise<number>> = {
   get: cmdGet,
   doctor: cmdDoctor,
   import: cmdImport,
+  install: cmdInstall,
   request: notImplemented('request'),
   reveal: notImplemented('reveal'),
-  install: notImplemented('install'),
 };
 
 export async function main(argv: string[]): Promise<number> {
