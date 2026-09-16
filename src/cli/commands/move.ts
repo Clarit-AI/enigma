@@ -2,6 +2,7 @@ import { parseArgs, parseScope, UsageError } from '../args.js';
 import { resolveSecret, setSecret } from '../../storage/manager.js';
 import { readIndex, resolveIndexEntry } from '../../core/index-store.js';
 import { projectId as computeProjectId } from '../../core/project.js';
+import { appendAuditEvent, auditErrorText } from '../../core/audit.js';
 import { DEPOSITORY_MODULES } from '../../storage/detect.js';
 import { EnigmaError } from '../../core/errors.js';
 import type { DepositoryId } from '../../storage/interfaces.js';
@@ -28,18 +29,23 @@ export async function cmdMove(argv: string[]): Promise<number> {
     return 0;
   }
 
-  const value = await resolveSecret(name, { scope: entry.scope, cwd, actor: 'cli' });
-  await setSecret({
-    name,
-    value,
-    scope: entry.scope,
-    depository: target,
-    cwd,
-    description: entry.description,
-    usage: entry.usage,
-    rotate: true,
-    actor: 'cli',
-  });
+  try {
+    const value = await resolveSecret(name, { scope: entry.scope, cwd, actor: 'cli' });
+    await setSecret({
+      name,
+      value,
+      scope: entry.scope,
+      depository: target,
+      cwd,
+      description: entry.description,
+      usage: entry.usage,
+      rotate: true,
+      actor: 'cli',
+    });
+  } catch (err) {
+    appendAuditEvent({ op: 'move', name, scope: entry.scope, depository: target, actor: 'cli', ok: false, error: auditErrorText(err) });
+    throw err;
+  }
 
   // Best-effort cleanup of the old value; the index already points at the new depository.
   const oldModule = DEPOSITORY_MODULES.find((m) => m.id === entry.depository);
@@ -48,6 +54,7 @@ export async function cmdMove(argv: string[]): Promise<number> {
     await oldModule.create({ projectPath }).delete(entry.ref).catch(() => undefined);
   }
 
+  appendAuditEvent({ op: 'move', name, scope: entry.scope, depository: target, actor: 'cli', ok: true, error: null });
   process.stdout.write(`Moved ${name} to ${target} (${entry.scope})\n`);
   return 0;
 }

@@ -6,6 +6,7 @@ import { cmdMove } from '../../../../src/cli/commands/move.js';
 import { UsageError } from '../../../../src/cli/args.js';
 import { hasSecret, listSecrets, resolveSecret, setSecret } from '../../../../src/storage/manager.js';
 import { encryptedDepositoryModule } from '../../../../src/storage/depositories/encrypted.js';
+import { auditLogPath } from '../../../../src/core/paths.js';
 
 const SENTINEL = 'sk-sentinel-value-should-never-appear';
 
@@ -81,6 +82,30 @@ describe('cmdMove', () => {
 
     expect(code).toBe(0);
     expect(stdoutSpy.mock.calls[0]?.[0]).toContain('already in encrypted');
+  });
+
+  it('audits a move op on success, naming the new depository', async () => {
+    await setSecret({ name: 'DB_PASSWORD', value: SENTINEL, scope: 'project', depository: 'encrypted', cwd: tmpProject, actor: 'cli' });
+
+    await cmdMove(['DB_PASSWORD', '--to', 'env', '--scope', 'project']);
+
+    const lines = readFileSync(auditLogPath(), 'utf8').trim().split('\n');
+    const events = lines.map((l) => JSON.parse(l) as { op: string; ok: boolean; depository: string; actor: string });
+    const moveEvent = events.find((e) => e.op === 'move');
+    expect(moveEvent).toMatchObject({ op: 'move', ok: true, depository: 'env', actor: 'cli' });
+  });
+
+  it('audits a failed move op when the write to the new depository fails', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
+
+    await expect(cmdMove(['OPENAI_API_KEY', '--to', 'env', '--scope', 'global'])).rejects.toThrow(
+      expect.objectContaining({ code: 'E_SCOPE_INVALID' }),
+    );
+
+    const lines = readFileSync(auditLogPath(), 'utf8').trim().split('\n');
+    const events = lines.map((l) => JSON.parse(l) as { op: string; ok: boolean });
+    const moveEvent = events.find((e) => e.op === 'move');
+    expect(moveEvent).toMatchObject({ op: 'move', ok: false });
   });
 
   it('throws E_NOT_FOUND for a name that was never set', async () => {

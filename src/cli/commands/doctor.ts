@@ -1,16 +1,31 @@
+import { execFile } from 'node:child_process';
 import { existsSync } from 'node:fs';
 import { platform, release } from 'node:os';
+import { promisify } from 'node:util';
 import { parseArgs } from '../args.js';
 import { detectAll } from '../../storage/detect.js';
 import { readIndex } from '../../core/index-store.js';
 import { auditLogPath, configPath, enigmaHome, indexPath, keyPath, secretsPath } from '../../core/paths.js';
 import { EnigmaError } from '../../core/errors.js';
 
+const execFileAsync = promisify(execFile);
+
+/** Probes for the 1Password CLI (`op`) without ever passing it a value. */
+async function opStatus(): Promise<{ available: boolean; version: string | null }> {
+  try {
+    const { stdout } = await execFileAsync('op', ['--version'], { timeout: 2000, maxBuffer: 1024 });
+    return { available: true, version: stdout.trim() || null };
+  } catch {
+    return { available: false, version: null };
+  }
+}
+
 export async function cmdDoctor(argv: string[]): Promise<number> {
   const { flags } = parseArgs(argv, { boolean: ['json'] });
   const json = Boolean(flags.json);
 
-  const depositories = (await detectAll()).map((d) => ({
+  const [depositoriesRaw, op] = await Promise.all([detectAll(), opStatus()]);
+  const depositories = depositoriesRaw.map((d) => ({
     id: d.id,
     available: d.available,
     promptProfile: d.promptProfile,
@@ -32,6 +47,7 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
   const report = {
     platform: `${platform()} ${release()}`,
     depositories,
+    op,
     config: {
       home: enigmaHome(),
       indexPath: indexPath(),
@@ -55,6 +71,7 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
     ...depositories.map(
       (d) => `  ${d.id}: ${d.available ? 'available' : 'unavailable'} (prompt profile: ${d.promptProfile}${d.reason ? `, ${d.reason}` : ''})`,
     ),
+    `1Password CLI (op): ${op.available ? `available (${op.version ?? 'unknown version'})` : 'not found'}`,
     `Config home: ${report.config.home}`,
     `Index: ${index.ok ? `ok (${index.entries} entries)` : `ERROR: ${index.error}`}`,
     `Vault key: ${vault.keyPresent ? 'present' : 'missing'}`,

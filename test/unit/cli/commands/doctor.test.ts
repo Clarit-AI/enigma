@@ -2,8 +2,19 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { cmdDoctor } from '../../../../src/cli/commands/doctor.js';
-import { setSecret } from '../../../../src/storage/manager.js';
+
+/** Controls how the mocked `op --version` child process behaves for the next call. */
+let opBehavior: { error: Error | null; stdout: string } = { error: null, stdout: '2.30.0\n' };
+
+vi.mock('node:child_process', () => ({
+  execFile: (_file: string, _args: string[], _options: unknown, callback: (err: Error | null, result?: { stdout: string; stderr: string }) => void) => {
+    if (opBehavior.error) callback(opBehavior.error);
+    else callback(null, { stdout: opBehavior.stdout, stderr: '' });
+  },
+}));
+
+const { cmdDoctor } = await import('../../../../src/cli/commands/doctor.js');
+const { setSecret } = await import('../../../../src/storage/manager.js');
 
 describe('cmdDoctor', () => {
   let tmpHome: string;
@@ -15,6 +26,7 @@ describe('cmdDoctor', () => {
     originalHome = process.env.ENIGMA_HOME;
     process.env.ENIGMA_HOME = tmpHome;
     stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    opBehavior = { error: null, stdout: '2.30.0\n' };
   });
 
   afterEach(() => {
@@ -32,6 +44,7 @@ describe('cmdDoctor', () => {
     const report = JSON.parse(String(stdoutSpy.mock.calls[0]?.[0])) as Record<string, unknown>;
     expect(report).toHaveProperty('platform');
     expect(report).toHaveProperty('depositories');
+    expect(report).toHaveProperty('op');
     expect(report).toHaveProperty('config');
     expect(report).toHaveProperty('index');
     expect(report).toHaveProperty('vault');
@@ -60,6 +73,20 @@ describe('cmdDoctor', () => {
     await cmdDoctor(['--json']);
     const report = JSON.parse(String(stdoutSpy.mock.calls[0]?.[0])) as { index: { ok: boolean; entries: number } };
     expect(report.index).toEqual({ ok: true, entries: 1 });
+  });
+
+  it('reports the 1Password CLI (op) as available with its version', async () => {
+    opBehavior = { error: null, stdout: '2.30.0\n' };
+    await cmdDoctor(['--json']);
+    const report = JSON.parse(String(stdoutSpy.mock.calls[0]?.[0])) as { op: { available: boolean; version: string | null } };
+    expect(report.op).toEqual({ available: true, version: '2.30.0' });
+  });
+
+  it('reports the 1Password CLI (op) as unavailable when the binary is missing', async () => {
+    opBehavior = { error: Object.assign(new Error('spawn op ENOENT'), { code: 'ENOENT' }), stdout: '' };
+    await cmdDoctor(['--json']);
+    const report = JSON.parse(String(stdoutSpy.mock.calls[0]?.[0])) as { op: { available: boolean; version: string | null } };
+    expect(report.op).toEqual({ available: false, version: null });
   });
 
   it('prints human-readable text without --json', async () => {

@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, realpathSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { keyPath } from '../../../../src/core/paths.js';
 
 const SENTINEL = 'sk-sentinel-value-should-never-appear';
 
@@ -82,6 +83,16 @@ describe('cmdRun', () => {
   it('aborts before spawning when a --only name cannot be resolved', async () => {
     await expect(cmdRun(['--only', 'NEVER_SET', '--', 'echo', 'hi'])).rejects.toThrow(
       expect.objectContaining({ code: 'E_NOT_FOUND' }),
+    );
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  it('aborts before spawning with E_READ_FAILED naming the depository when the vault cannot be read', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
+    rmSync(keyPath()); // simulates a corrupt/missing vault key: encrypted.resolve() can no longer decrypt.
+
+    await expect(cmdRun(['--scope', 'global', '--', 'echo', 'hi'])).rejects.toThrow(
+      expect.objectContaining({ code: 'E_READ_FAILED', depository: 'encrypted' }),
     );
     expect(spawnMock).not.toHaveBeenCalled();
   });
