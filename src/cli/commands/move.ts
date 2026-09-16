@@ -51,7 +51,14 @@ export async function cmdMove(argv: string[]): Promise<number> {
   const oldModule = DEPOSITORY_MODULES.find((m) => m.id === entry.depository);
   if (oldModule) {
     const projectPath = entry.scope === 'project' ? entry.projectPath : undefined;
-    await oldModule.create({ projectPath }).delete(entry.ref).catch(() => undefined);
+    await oldModule
+      .create({ projectPath })
+      .delete(entry.ref)
+      .catch((err: unknown) => {
+        process.stderr.write(
+          `Warning: failed to delete old copy from ${entry.depository} (ref ${entry.ref}): ${auditErrorText(err)}\n`,
+        );
+      });
   }
 
   appendAuditEvent({ op: 'move', name, scope: entry.scope, depository: target, actor: 'cli', ok: true, error: null });

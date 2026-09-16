@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -6,7 +6,7 @@ import { cmdMove } from '../../../../src/cli/commands/move.js';
 import { UsageError } from '../../../../src/cli/args.js';
 import { hasSecret, listSecrets, resolveSecret, setSecret } from '../../../../src/storage/manager.js';
 import { encryptedDepositoryModule } from '../../../../src/storage/depositories/encrypted.js';
-import { auditLogPath } from '../../../../src/core/paths.js';
+import { auditLogPath, secretsPath } from '../../../../src/core/paths.js';
 
 const SENTINEL = 'sk-sentinel-value-should-never-appear';
 
@@ -106,6 +106,61 @@ describe('cmdMove', () => {
     const events = lines.map((l) => JSON.parse(l) as { op: string; ok: boolean });
     const moveEvent = events.find((e) => e.op === 'move');
     expect(moveEvent).toMatchObject({ op: 'move', ok: false });
+  });
+
+  it('audits a failed move op when the resolve-old step fails, not only the internal read event', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
+
+    // Corrupt the ciphertext for this ref (by name, not by grabbing the first
+    // JSON key: secrets.enc can already carry entries from an unrelated
+    // secret) so the resolve-old read fails with E_READ_FAILED, before the
+    // move ever reaches the write-to-new-depository step.
+    const ref = 'global/OPENAI_API_KEY';
+    const file = JSON.parse(readFileSync(secretsPath(), 'utf8')) as { entries: Record<string, { ct: string }> };
+    file.entries[ref]!.ct = Buffer.from('not-the-real-ciphertext').toString('base64');
+    writeFileSync(secretsPath(), JSON.stringify(file));
+
+    await expect(cmdMove(['OPENAI_API_KEY', '--to', 'env', '--scope', 'global'])).rejects.toThrow(
+      expect.objectContaining({ code: 'E_READ_FAILED' }),
+    );
+
+    const lines = readFileSync(auditLogPath(), 'utf8').trim().split('\n');
+    const events = lines.map((l) => JSON.parse(l) as { op: string; ok: boolean });
+    const readEvent = events.find((e) => e.op === 'read');
+    const moveEvent = events.find((e) => e.op === 'move');
+    expect(readEvent).toMatchObject({ op: 'read', ok: false });
+    expect(moveEvent).toMatchObject({ op: 'move', ok: false });
+  });
+
+  it('warns naming the depository and ref, never the value, when the best-effort delete of the old copy fails', async () => {
+    await setSecret({ name: 'DB_PASSWORD', value: SENTINEL, scope: 'project', depository: 'encrypted', cwd: tmpProject, actor: 'cli' });
+    const [before] = listSecrets({ scope: 'project', cwd: tmpProject });
+    const oldRef = before!.ref;
+
+    const deleteSpy = vi
+      .spyOn(encryptedDepositoryModule, 'create')
+      .mockReturnValue({
+        id: 'encrypted',
+        promptProfile: 'none',
+        set: async (ref: string) => ref,
+        resolve: async () => SENTINEL,
+        delete: async () => {
+          throw new Error('boom');
+        },
+        has: async () => true,
+      });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const code = await cmdMove(['DB_PASSWORD', '--to', 'env', '--scope', 'project']);
+
+    expect(code).toBe(0);
+    const warning = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(warning).toContain('encrypted');
+    expect(warning).toContain(oldRef);
+    expect(warning).not.toContain(SENTINEL);
+
+    deleteSpy.mockRestore();
+    stderrSpy.mockRestore();
   });
 
   it('throws E_NOT_FOUND for a name that was never set', async () => {
