@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import type { DepositoryId } from '../storage/interfaces.js';
 import type { Scope } from '../core/index-store.js';
 
-export type RequestKind = 'request' | 'reveal';
+export type RequestKind = 'request' | 'reveal' | 'import';
 
 /** Outcome of writing one name through the storage core; never a value or a message that could carry one. */
 export interface RequestNameResult {
@@ -28,6 +28,17 @@ export interface RequestRecord {
   usedAt?: number;
   /** Set once POST /r/:id has attempted a write for every name (Issue #10 reads this after the waiter resolves). */
   results?: RequestNameResult[];
+  /**
+   * kind 'import' only: the already-parsed values keyed by name, carried
+   * in-flight from the CLI/MCP process that read the source `.env` through
+   * to the web POST handler that commits them (style-guide: `src/request/**`
+   * may hold a value in flight). Never logged.
+   */
+  values?: Record<string, string>;
+  /** kind 'import' only: the source `.env`-format file to rewrite once every name is stored. */
+  envFilePath?: string;
+  /** kind 'import' only: set by the web POST handler alongside `results`, read back by the CLI/MCP caller after the waiter resolves. */
+  importOutcome?: { fileRewritten: boolean; warnings: string[]; depository?: DepositoryId };
 }
 
 export interface CreateRequestOptions {
@@ -40,6 +51,10 @@ export interface CreateRequestOptions {
   rotate?: boolean;
   /** Overrides the kind-based default (D2.1: 15 min for a request, 5 min for a reveal). */
   ttlMs?: number;
+  /** kind 'import' only. */
+  values?: Record<string, string>;
+  /** kind 'import' only. */
+  envFilePath?: string;
 }
 
 const REQUEST_TTL_MS = 15 * 60 * 1000;
@@ -103,11 +118,15 @@ function sweep(): void {
 export const RequestStore = {
   /** 32-hex id (128-bit random). Throws on a malformed kind/names combination (a caller bug, not reachable via HTTP input). */
   create(opts: CreateRequestOptions): RequestRecord {
-    if (opts.names.length < 1 || opts.names.length > 10) {
+    if (opts.kind === 'reveal') {
+      if (opts.names.length !== 1) throw new Error('a reveal covers exactly one secret name');
+    } else if (opts.kind === 'import') {
+      // No typing-cost limit applies here (the values are already known); bounded generously against a runaway .env.
+      if (opts.names.length < 1 || opts.names.length > 200) {
+        throw new Error('an import must cover between 1 and 200 secret names');
+      }
+    } else if (opts.names.length < 1 || opts.names.length > 10) {
       throw new Error('a request must cover between 1 and 10 secret names');
-    }
-    if (opts.kind === 'reveal' && opts.names.length !== 1) {
-      throw new Error('a reveal covers exactly one secret name');
     }
 
     const id = randomBytes(16).toString('hex');
@@ -123,6 +142,8 @@ export const RequestStore = {
       rotate: opts.rotate,
       createdAt: now,
       expiresAt: now + (opts.ttlMs ?? defaultTtlMs(opts.kind)),
+      values: opts.values ? { ...opts.values } : undefined,
+      envFilePath: opts.envFilePath,
     };
     records.set(id, record);
     startSweeper();
