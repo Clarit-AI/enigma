@@ -674,12 +674,24 @@ async function cmdAdd(argv, streams = {}) {
 }
 
 // src/cli/commands/doctor.ts
+import { execFile } from "node:child_process";
 import { existsSync as existsSync6 } from "node:fs";
 import { platform, release } from "node:os";
+import { promisify } from "node:util";
+var execFileAsync = promisify(execFile);
+async function opStatus() {
+  try {
+    const { stdout } = await execFileAsync("op", ["--version"], { timeout: 2e3, maxBuffer: 1024 });
+    return { available: true, version: stdout.trim() || null };
+  } catch {
+    return { available: false, version: null };
+  }
+}
 async function cmdDoctor(argv) {
   const { flags } = parseArgs(argv, { boolean: ["json"] });
   const json = Boolean(flags.json);
-  const depositories = (await detectAll()).map((d) => ({
+  const [depositoriesRaw, op] = await Promise.all([detectAll(), opStatus()]);
+  const depositories = depositoriesRaw.map((d) => ({
     id: d.id,
     available: d.available,
     promptProfile: d.promptProfile,
@@ -698,6 +710,7 @@ async function cmdDoctor(argv) {
   const report = {
     platform: `${platform()} ${release()}`,
     depositories,
+    op,
     config: {
       home: enigmaHome(),
       indexPath: indexPath(),
@@ -720,6 +733,7 @@ async function cmdDoctor(argv) {
     ...depositories.map(
       (d) => `  ${d.id}: ${d.available ? "available" : "unavailable"} (prompt profile: ${d.promptProfile}${d.reason ? `, ${d.reason}` : ""})`
     ),
+    `1Password CLI (op): ${op.available ? `available (${op.version ?? "unknown version"})` : "not found"}`,
     `Config home: ${report.config.home}`,
     `Index: ${index.ok ? `ok (${index.entries} entries)` : `ERROR: ${index.error}`}`,
     `Vault key: ${vault.keyPresent ? "present" : "missing"}`,
@@ -803,23 +817,29 @@ async function cmdMove(argv) {
 `);
     return 0;
   }
-  const value = await resolveSecret(name, { scope: entry.scope, cwd, actor: "cli" });
-  await setSecret({
-    name,
-    value,
-    scope: entry.scope,
-    depository: target,
-    cwd,
-    description: entry.description,
-    usage: entry.usage,
-    rotate: true,
-    actor: "cli"
-  });
+  try {
+    const value = await resolveSecret(name, { scope: entry.scope, cwd, actor: "cli" });
+    await setSecret({
+      name,
+      value,
+      scope: entry.scope,
+      depository: target,
+      cwd,
+      description: entry.description,
+      usage: entry.usage,
+      rotate: true,
+      actor: "cli"
+    });
+  } catch (err) {
+    appendAuditEvent({ op: "move", name, scope: entry.scope, depository: target, actor: "cli", ok: false, error: auditErrorText(err) });
+    throw err;
+  }
   const oldModule = DEPOSITORY_MODULES.find((m) => m.id === entry.depository);
   if (oldModule) {
     const projectPath = entry.scope === "project" ? entry.projectPath : void 0;
     await oldModule.create({ projectPath }).delete(entry.ref).catch(() => void 0);
   }
+  appendAuditEvent({ op: "move", name, scope: entry.scope, depository: target, actor: "cli", ok: true, error: null });
   process.stdout.write(`Moved ${name} to ${target} (${entry.scope})
 `);
   return 0;
