@@ -39,10 +39,24 @@ export interface Depository {
   has(ref: string): Promise<boolean>;
 }
 
-/** Context a depository needs to locate its backing store. */
+/** Context a depository needs to locate its backing store or that carries a one-time user confirmation. */
 export interface DepositoryContext {
-  /** Required by `env` (locates `<projectPath>/.env`); ignored by `encrypted`. */
+  /**
+   * The project scope's absolute path, when the entry being written/read is
+   * project-scoped. Required by `env` (locates `<projectPath>/.env`); also
+   * consumed by `1password` (builds the `NAME · <project folder>` item
+   * title — cosmetic only, reads go by item id); ignored by depositories
+   * that don't need it.
+   */
   projectPath?: string;
+  /**
+   * Explicit, one-time user confirmation to create a depository's backing
+   * collection when it doesn't exist yet. Consumed only by `1password`
+   * (creates the `Enigma` vault on first use); never a default, only ever
+   * forwarded from an actual user confirmation (e.g. the request form's
+   * `confirmCreateVault` checkbox).
+   */
+  createVault?: boolean;
 }
 
 /** Groups a depository's static capability probe with its instance factory. */
