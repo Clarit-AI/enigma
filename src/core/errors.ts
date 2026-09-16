@@ -15,7 +15,8 @@ export type EnigmaErrorCode =
   | 'E_NO_TTY_CONTROL'
   | 'E_UI_UNAVAILABLE'
   | 'E_REQUEST_CANCELLED'
-  | 'E_VAULT_MISSING';
+  | 'E_VAULT_MISSING'
+  | 'E_REMOTE_UNAVAILABLE';
 
 export interface EnigmaErrorOptions {
   code: EnigmaErrorCode;
