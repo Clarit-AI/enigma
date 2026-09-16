@@ -12,7 +12,9 @@ export type EnigmaErrorCode =
   | 'E_AMBIGUOUS_SCOPE'
   | 'E_SCOPE_INVALID'
   | 'E_INDEX_CORRUPT'
-  | 'E_NO_TTY_CONTROL';
+  | 'E_NO_TTY_CONTROL'
+  | 'E_UI_UNAVAILABLE'
+  | 'E_REQUEST_CANCELLED';
 
 export interface EnigmaErrorOptions {
   code: EnigmaErrorCode;
