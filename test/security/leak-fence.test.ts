@@ -1,5 +1,5 @@
 import { execFileSync } from 'node:child_process';
-import { rmSync, writeFileSync } from 'node:fs';
+import { readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
@@ -124,5 +124,46 @@ describe('leak-fence', () => {
       "export async function reveal(name: string, scope: string) { return resolveSecret(name, { scope, cwd: process.cwd(), actor: 'user', auditOp: 'reveal' }); }\n",
     );
     expect(runLeakFence().code).toBe(1);
+  });
+
+  // src/hooks is scanned too (Issue #11): the tripwire hook legitimately resolves a
+  // value the same way the reveal route does, but session-start.ts and read-guard.ts
+  // have no legitimate reason to ever do so — an unscanned directory here would be
+  // an unguarded one for exactly the code meant to be the last line of defense.
+  describe('src/hooks is a scanned directory', () => {
+    it('fails when a fixture file under src/hooks contains an unmarked depository-style .resolve( call', () => {
+      fixture = join(REPO_ROOT, 'src/hooks/__leak-fence-fixture-hooks-resolve__.ts');
+      writeFileSync(
+        fixture,
+        'export function read(depository: { resolve(ref: string): Promise<string> }, ref: string) { return depository.resolve(ref); }\n',
+      );
+      expect(runLeakFence().code).toBe(1);
+    });
+
+    it('src/hooks/tripwire.ts itself is allowlisted with a non-empty reason', () => {
+      const content = readFileSync(join(REPO_ROOT, 'src/hooks/tripwire.ts'), 'utf8');
+      const firstLines = content.split('\n').slice(0, 5).map((l) => l.trim());
+      expect(firstLines.some((l) => l.startsWith('// enigma:leak-fence-allow:') && l.length > '// enigma:leak-fence-allow:'.length)).toBe(true);
+
+      const result = runLeakFence();
+      expect(result.code).toBe(0);
+      expect(result.stdout).toContain('src/hooks/tripwire.ts');
+    });
+
+    it('would catch tripwire.ts\'s real call shape if its allow marker were removed (sanity check, fixture-only)', () => {
+      fixture = join(REPO_ROOT, 'src/hooks/__leak-fence-fixture-tripwire-shape__.ts');
+      writeFileSync(
+        fixture,
+        "export async function scanOne(depository: { resolve(ref: string): Promise<string> }, ref: string) { return depository.resolve(ref); }\n",
+      );
+      expect(runLeakFence().code).toBe(1);
+    });
+
+    it('does not trip on session-start.ts or read-guard.ts, which never resolve a value', () => {
+      // Regression guard for the decision itself: these files are allowed to exist
+      // unmarked in a scanned directory only because they genuinely never call
+      // resolve(). If either ever adds such a call, this suite must start failing.
+      expect(runLeakFence().code).toBe(0);
+    });
   });
 });
