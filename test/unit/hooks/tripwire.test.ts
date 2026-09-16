@@ -8,6 +8,7 @@ import type { IndexEntry, IndexFile } from '../../../src/core/index-store.js';
  * keyed `"<depositoryId>:<ref>"`, and records every `create()` call so tests can
  * assert which depositories were actually touched (not just what config allows). */
 let resolveResponses: Record<string, string | Error> = {};
+let resolveSideEffects: Record<string, () => void> = {};
 let createCalls: string[] = [];
 
 function makeFakeModule(id: string) {
@@ -23,6 +24,7 @@ function makeFakeModule(id: string) {
         id,
         promptProfile: 'none',
         async resolve(ref: string) {
+          resolveSideEffects[`${id}:${ref}`]?.();
           const resp = resolveResponses[`${id}:${ref}`];
           if (resp instanceof Error) throw resp;
           if (resp === undefined) throw new Error(`fake ${id} depository: no response configured for ref ${ref}`);
@@ -91,6 +93,7 @@ describe('PostToolUse tripwire', () => {
     originalHome = process.env.ENIGMA_HOME;
     process.env.ENIGMA_HOME = tmpHome;
     resolveResponses = {};
+    resolveSideEffects = {};
     createCalls = [];
   });
 
@@ -330,5 +333,35 @@ describe('PostToolUse tripwire', () => {
     expect(result?.systemMessage).toContain('FIRST_SECRET');
     expect(result?.systemMessage).toContain('SECOND_SECRET');
     expect(readAuditOps().filter((a) => a.op === 'leak')).toHaveLength(2);
+  });
+
+  it('caps total runtime to ~5s: a candidate whose resolve stalls past the budget stops the scan of later candidates', async () => {
+    vi.useFakeTimers();
+    try {
+      writeIndexFile([
+        entry({ name: 'SLOW_FIRST', scope: 'global', depository: 'encrypted', ref: 'global/SLOW_FIRST' }),
+        entry({ name: 'NEVER_CHECKED_SECOND', scope: 'global', depository: 'encrypted', ref: 'global/NEVER_CHECKED_SECOND' }),
+      ]);
+      resolveResponses['encrypted:global/SLOW_FIRST'] = 'sk-first-does-not-match';
+      resolveResponses['encrypted:global/NEVER_CHECKED_SECOND'] = 'sk-second-would-match-if-checked';
+      // Simulates a slow depository call by jumping the (fake) clock past the
+      // 5s budget as a side effect of the first candidate's resolve() — proving
+      // the budget is enforced by elapsed time, not by a fixed candidate count.
+      resolveSideEffects['encrypted:global/SLOW_FIRST'] = () => {
+        vi.advanceTimersByTime(6000);
+      };
+
+      const result = await runTripwire({
+        tool_name: 'Bash',
+        tool_input: {},
+        tool_response: 'contains sk-second-would-match-if-checked',
+        cwd,
+      });
+
+      expect(result).toBeUndefined();
+      expect(createCalls).toEqual(['encrypted']);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
