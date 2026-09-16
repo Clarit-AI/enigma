@@ -152,6 +152,7 @@ async function promptSecretValue(promptText, streams = {}) {
 
 // src/core/config.ts
 import { existsSync, readFileSync } from "node:fs";
+import { join as join2 } from "node:path";
 
 // src/core/paths.ts
 import { homedir } from "node:os";
@@ -177,6 +178,7 @@ function secretsPath() {
 
 // src/core/config.ts
 var DEFAULT_CONFIG = {};
+var DEFAULT_MANIFEST = { secrets: {} };
 function readJsonIfExists(path) {
   if (!existsSync(path)) return void 0;
   return JSON.parse(readFileSync(path, "utf8"));
@@ -192,6 +194,18 @@ function loadConfig() {
   }
   if (raw.ui === "web" || raw.ui === "native") config.ui = raw.ui;
   return config;
+}
+function loadProjectManifest(projectPath) {
+  const raw = readJsonIfExists(join2(projectPath, ".enigma.json"));
+  if (!raw) return { ...DEFAULT_MANIFEST, secrets: {} };
+  const manifest = { secrets: {} };
+  if (typeof raw.defaultDepository === "string") manifest.defaultDepository = raw.defaultDepository;
+  if (raw.secrets && typeof raw.secrets === "object") {
+    for (const [name, description] of Object.entries(raw.secrets)) {
+      if (typeof description === "string") manifest.secrets[name] = description;
+    }
+  }
+  return manifest;
 }
 
 // src/core/naming.ts
@@ -419,7 +433,7 @@ var encryptedDepositoryModule = {
 
 // src/storage/depositories/env.ts
 import { existsSync as existsSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
-import { join as join2 } from "node:path";
+import { join as join3 } from "node:path";
 var BEGIN_MARKER = "# enigma:begin";
 var END_MARKER = "# enigma:end";
 var FILE_MODE3 = 384;
@@ -494,7 +508,7 @@ function removeManagedValue(content, name) {
   return newLines.join(eol);
 }
 function checkEnvGitignore(projectPath) {
-  const gitignorePath = join2(projectPath, ".gitignore");
+  const gitignorePath = join3(projectPath, ".gitignore");
   if (!existsSync5(gitignorePath)) {
     return [".env is not gitignored: no .gitignore file found in this project"];
   }
@@ -518,7 +532,7 @@ function requireProjectPath(ctx) {
   return ctx.projectPath;
 }
 function createEnvDepository(ctx) {
-  const envFilePath = join2(requireProjectPath(ctx), ".env");
+  const envFilePath = join3(requireProjectPath(ctx), ".env");
   const readEnvFile = () => existsSync5(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
   return {
     id: "env",
@@ -1181,7 +1195,7 @@ async function setSecret(opts) {
   }
   const providedRef = opts.depository === "env" ? opts.name : buildRef(opts.name, opts.scope, pid);
   const depository = createDepository(opts.depository, { projectPath, createVault: opts.createVault });
-  const op = existing ? "rotated" : "set";
+  const op = opts.auditOp ?? (existing ? "rotated" : "set");
   let ref;
   try {
     ref = await depository.set(providedRef, opts.value);
@@ -1309,7 +1323,11 @@ async function cmdDoctor(argv) {
     keyPresent: existsSync7(keyPath()),
     secretsFilePresent: existsSync7(secretsPath())
   };
-  const report = {
+  const cwd = process.cwd();
+  const manifest = loadProjectManifest(findProjectPath(cwd));
+  const registeredNames = new Set(listSecrets({ scope: "all", cwd }).map((e) => e.name));
+  const manifestGaps = Object.keys(manifest.secrets).filter((name) => !registeredNames.has(name));
+  const report2 = {
     platform: `${platform()} ${release()}`,
     depositories,
     op,
@@ -1322,24 +1340,26 @@ async function cmdDoctor(argv) {
       secretsPath: secretsPath()
     },
     index,
-    vault
+    vault,
+    manifestGaps
   };
   if (json) {
-    process.stdout.write(`${JSON.stringify(report)}
+    process.stdout.write(`${JSON.stringify(report2)}
 `);
     return 0;
   }
   const lines = [
-    `Platform: ${report.platform}`,
+    `Platform: ${report2.platform}`,
     "Depositories:",
     ...depositories.map(
       (d) => `  ${d.id}: ${d.available ? "available" : "unavailable"} (prompt profile: ${d.promptProfile}${d.reason ? `, ${d.reason}` : ""})`
     ),
     `1Password CLI (op): ${op.available ? `available (${op.version ?? "unknown version"})` : "not found"}`,
-    `Config home: ${report.config.home}`,
+    `Config home: ${report2.config.home}`,
     `Index: ${index.ok ? `ok (${index.entries} entries)` : `ERROR: ${index.error}`}`,
     `Vault key: ${vault.keyPresent ? "present" : "missing"}`,
-    `Vault file: ${vault.secretsFilePresent ? "present" : "missing"}`
+    `Vault file: ${vault.secretsFilePresent ? "present" : "missing"}`,
+    `Manifest gaps: ${manifestGaps.length === 0 ? "none" : manifestGaps.join(", ")}`
   ];
   process.stdout.write(`${lines.join("\n")}
 `);
@@ -1361,6 +1381,1314 @@ async function cmdGet(argv) {
   process.stdout.write(`${value}
 `);
   return 0;
+}
+
+// src/cli/commands/import.ts
+import { existsSync as existsSync9, readFileSync as readFileSync6 } from "node:fs";
+import { isAbsolute, join as join4 } from "node:path";
+
+// src/mcp/result-text.ts
+function findJustWrittenEntry(name, cwd) {
+  const entries = listSecrets({ scope: "all", cwd }).filter((e) => e.name === name);
+  if (entries.length <= 1) return entries[0];
+  return entries.reduce((latest, entry) => entry.updatedAt > latest.updatedAt ? entry : latest);
+}
+function renderStoredLine(name, cwd) {
+  const entry = findJustWrittenEntry(name, cwd);
+  return entry ? `Stored ${name} in ${entry.depository} (${entry.scope})` : `Stored ${name}`;
+}
+function renderStoredLines(names, cwd) {
+  return names.map((name) => renderStoredLine(name, cwd));
+}
+function renderOutcome(results, cwd) {
+  const failed = results.filter((r) => !r.ok);
+  const succeeded = results.filter((r) => r.ok);
+  const lines = [
+    ...failed.map((r) => `${r.name}: failed (${r.errorCode ?? "E_UNKNOWN"})`),
+    ...renderStoredLines(succeeded.map((r) => r.name), cwd)
+  ];
+  return { text: lines.join("\n"), isError: succeeded.length === 0 };
+}
+
+// src/request/store.ts
+import { randomBytes as randomBytes3 } from "node:crypto";
+var REQUEST_TTL_MS = 15 * 60 * 1e3;
+var REVEAL_TTL_MS = 5 * 60 * 1e3;
+var SWEEP_INTERVAL_MS = 60 * 1e3;
+var USED_GRACE_MS = 5 * 60 * 1e3;
+function deferred() {
+  let resolve2;
+  let reject;
+  const promise = new Promise((res, rej) => {
+    resolve2 = res;
+    reject = rej;
+  });
+  return { promise, resolve: resolve2, reject };
+}
+function defaultTtlMs(kind) {
+  return kind === "reveal" ? REVEAL_TTL_MS : REQUEST_TTL_MS;
+}
+var records = /* @__PURE__ */ new Map();
+var waiters = /* @__PURE__ */ new Map();
+var sweepTimer;
+function isExpired(record, now) {
+  return now > record.expiresAt;
+}
+function startSweeper() {
+  if (sweepTimer) return;
+  sweepTimer = setInterval(sweep, SWEEP_INTERVAL_MS);
+  sweepTimer.unref();
+}
+function sweep() {
+  const now = Date.now();
+  for (const [id, record] of records) {
+    if (record.usedAt !== void 0) {
+      if (now - record.usedAt > USED_GRACE_MS) records.delete(id);
+      continue;
+    }
+    if (isExpired(record, now)) {
+      records.delete(id);
+      const waiter = waiters.get(id);
+      if (waiter) {
+        waiter.reject(new Error("request expired"));
+        waiters.delete(id);
+      }
+    }
+  }
+}
+var RequestStore = {
+  /** 32-hex id (128-bit random). Throws on a malformed kind/names combination (a caller bug, not reachable via HTTP input). */
+  create(opts) {
+    if (opts.kind === "reveal") {
+      if (opts.names.length !== 1) throw new Error("a reveal covers exactly one secret name");
+    } else if (opts.kind === "import") {
+      if (opts.names.length < 1 || opts.names.length > 200) {
+        throw new Error("an import must cover between 1 and 200 secret names");
+      }
+    } else if (opts.names.length < 1 || opts.names.length > 10) {
+      throw new Error("a request must cover between 1 and 10 secret names");
+    }
+    const id = randomBytes3(16).toString("hex");
+    const now = Date.now();
+    const record = {
+      id,
+      kind: opts.kind,
+      names: [...opts.names],
+      reason: opts.reason,
+      usage: opts.usage,
+      depository: opts.depository,
+      scope: opts.scope,
+      rotate: opts.rotate,
+      createdAt: now,
+      expiresAt: now + (opts.ttlMs ?? defaultTtlMs(opts.kind)),
+      values: opts.values ? { ...opts.values } : void 0,
+      envFilePath: opts.envFilePath
+    };
+    records.set(id, record);
+    startSweeper();
+    return record;
+  },
+  /** Expiry-aware lookup. Returns the record while it is used-and-within-grace even past its TTL, so a 410 (not 404) can be rendered. */
+  get(id) {
+    const record = records.get(id);
+    if (!record) return void 0;
+    if (record.usedAt === void 0 && isExpired(record, Date.now())) return void 0;
+    return record;
+  },
+  /**
+   * Atomically checks existence, non-expiry, and non-use, then marks used.
+   * This is the security boundary (S2.1): once it returns a record, every
+   * later call for the same id returns undefined until the sweeper's grace
+   * period elapses. Deliberately does NOT resolve the fulfilment waiter —
+   * marking a token used and reporting what happened are two different
+   * moments (see `fulfill`); a caller that wrote a value after this call
+   * returns is still free to fail before ever calling `fulfill`.
+   */
+  tryMarkUsed(id) {
+    const record = records.get(id);
+    if (!record) return void 0;
+    if (isExpired(record, Date.now())) {
+      records.delete(id);
+      return void 0;
+    }
+    if (record.usedAt !== void 0) return void 0;
+    record.usedAt = Date.now();
+    return record;
+  },
+  /**
+   * Records the outcome of a used request/reveal and THEN resolves the
+   * fulfilment waiter, in that order — a caller waking up from
+   * `waitForFulfilled` is therefore guaranteed `get(id)?.results` is already
+   * readable. `results` defaults to `[]` for a reveal, which has no
+   * per-name write outcome to report but still needs the waiter to resolve
+   * once the human has revealed it. No-op if the id is unknown.
+   */
+  fulfill(id, results = []) {
+    const record = records.get(id);
+    if (record) record.results = results;
+    const waiter = waiters.get(id);
+    if (waiter) {
+      waiter.resolve("fulfilled");
+      waiters.delete(id);
+    }
+  },
+  /**
+   * Resolves to the literal 'fulfilled' once `fulfill` has run for this id —
+   * meaning the single-use token was consumed AND its outcome (`results`) is
+   * already readable — or rejects if the id is unknown or expires first.
+   * `fulfilled` means only that: a human completed the interaction. It says
+   * nothing about per-name outcome, which `results` alone carries. Never
+   * carries a value.
+   */
+  waitForFulfilled(id) {
+    const record = records.get(id);
+    if (!record) return Promise.reject(new Error("request not found"));
+    if (record.results !== void 0) return Promise.resolve("fulfilled");
+    let waiter = waiters.get(id);
+    if (!waiter) {
+      waiter = deferred();
+      waiters.set(id, waiter);
+    }
+    return waiter.promise;
+  },
+  /** Test-only: clears all records/waiters and stops the sweeper so state never leaks between test files. */
+  __resetForTests() {
+    records.clear();
+    waiters.clear();
+    if (sweepTimer) {
+      clearInterval(sweepTimer);
+      sweepTimer = void 0;
+    }
+  }
+};
+
+// src/storage/dotenv-file.ts
+var BEGIN_MARKER2 = "# enigma:begin";
+var END_MARKER2 = "# enigma:end";
+function detectEol2(content) {
+  return content.includes("\r\n") ? "\r\n" : "\n";
+}
+function findManagedBlock(lines) {
+  const beginIdx = lines.findIndex((l) => l === BEGIN_MARKER2);
+  if (beginIdx === -1) return void 0;
+  const endIdx = lines.findIndex((l, i) => l === END_MARKER2 && i > beginIdx);
+  if (endIdx === -1) return void 0;
+  return { beginIdx, endIdx };
+}
+var ASSIGNMENT = /^(?:export\s+)?([^\s=]+)=(.*)$/;
+function scanAssignments(lines, block) {
+  const assignments = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (block && i >= block.beginIdx && i <= block.endIdx) {
+      i++;
+      continue;
+    }
+    const line = lines[i];
+    const trimmed = line.trim();
+    if (trimmed === "" || trimmed.startsWith("#")) {
+      i++;
+      continue;
+    }
+    const match = ASSIGNMENT.exec(trimmed);
+    if (!match) {
+      i++;
+      continue;
+    }
+    const name = match[1];
+    const rest = match[2];
+    const quote = rest[0];
+    if (quote === '"' || quote === "'") {
+      let joined = rest.slice(1);
+      let endIdx = i;
+      let closed = false;
+      for (; ; ) {
+        const closeIdx = findUnescapedQuote(joined, quote);
+        if (closeIdx !== -1) {
+          joined = joined.slice(0, closeIdx);
+          closed = true;
+          break;
+        }
+        endIdx++;
+        if (endIdx >= lines.length || block && endIdx >= block.beginIdx && endIdx <= block.endIdx) break;
+        joined += `
+${lines[endIdx]}`;
+      }
+      assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), startIdx: i, endIdx: closed ? endIdx : i });
+      i = (closed ? endIdx : i) + 1;
+      continue;
+    }
+    assignments.push({ name, value: rest.trim(), valid: NAME_PATTERN.test(name), startIdx: i, endIdx: i });
+    i++;
+  }
+  return assignments;
+}
+function findUnescapedQuote(text, quote) {
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === quote && text[i - 1] !== "\\") return i;
+  }
+  return -1;
+}
+function parseDotEnv(content) {
+  const eol = detectEol2(content);
+  const lines = content.length === 0 ? [] : content.split(eol);
+  const block = findManagedBlock(lines);
+  const assignments = scanAssignments(lines, block);
+  const order = [];
+  const values = /* @__PURE__ */ new Map();
+  const invalidSeen = /* @__PURE__ */ new Set();
+  const duplicateSeen = /* @__PURE__ */ new Set();
+  for (const a of assignments) {
+    if (!a.valid) {
+      invalidSeen.add(a.name);
+      continue;
+    }
+    if (values.has(a.name)) duplicateSeen.add(a.name);
+    else order.push(a.name);
+    values.set(a.name, a.value);
+  }
+  return {
+    entries: order.map((name) => ({ name, value: values.get(name) })),
+    invalidNames: [...invalidSeen],
+    duplicateNames: [...duplicateSeen]
+  };
+}
+function removeDotEnvEntries(content, names, opts = {}) {
+  const eol = detectEol2(content);
+  const lines = content.length === 0 ? [] : content.split(eol);
+  const block = findManagedBlock(lines);
+  const assignments = scanAssignments(lines, block);
+  const targets = new Set(names);
+  const toRemove = assignments.filter((a) => a.valid && targets.has(a.name));
+  if (toRemove.length === 0) return content;
+  const removedLineIdx = /* @__PURE__ */ new Set();
+  for (const a of toRemove) {
+    for (let idx = a.startIdx; idx <= a.endIdx; idx++) removedLineIdx.add(idx);
+  }
+  const firstRemovedIdx = Math.min(...toRemove.map((a) => a.startIdx));
+  const newLines = [];
+  for (let idx = 0; idx < lines.length; idx++) {
+    if (!removedLineIdx.has(idx)) {
+      newLines.push(lines[idx]);
+      continue;
+    }
+    if (idx === firstRemovedIdx && opts.comment) newLines.push(opts.comment);
+  }
+  return newLines.join(eol);
+}
+
+// src/storage/import-commit.ts
+import { existsSync as existsSync8, readFileSync as readFileSync5, writeFileSync as writeFileSync4 } from "node:fs";
+var FILE_MODE4 = 384;
+async function commitImport(opts) {
+  const succeeded = [];
+  const failed = [];
+  for (const entry of opts.entries) {
+    try {
+      await setSecret({
+        name: entry.name,
+        value: entry.value,
+        scope: opts.scope,
+        depository: opts.depository,
+        cwd: opts.cwd,
+        actor: opts.actor,
+        rotate: opts.rotate,
+        createVault: opts.createVault,
+        auditOp: "import"
+      });
+      succeeded.push(entry.name);
+    } catch (err) {
+      failed.push({ name: entry.name, errorCode: err instanceof EnigmaError ? err.code : "E_UNKNOWN" });
+      break;
+    }
+  }
+  const attempted = /* @__PURE__ */ new Set([...succeeded, ...failed.map((f) => f.name)]);
+  const notAttempted = opts.entries.map((e) => e.name).filter((name) => !attempted.has(name));
+  const warnings = checkEnvGitignore(opts.projectPath);
+  if (failed.length > 0) {
+    if (opts.depository === "env" && succeeded.length > 0) {
+      warnings.push(
+        `${succeeded.length} secret(s) (${succeeded.join(", ")}) were already written into the .env managed block before the failure on ${failed[0].name}; the original plaintext line(s) were deliberately left in place. Fix the issue and rerun import, or remove them from .env manually.`
+      );
+    }
+    return { succeeded, failed, notAttempted, fileRewritten: false, warnings };
+  }
+  const currentContent = existsSync8(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
+  const movedComment = opts.depository === "env" ? void 0 : `# Moved to Enigma (${opts.depository}) by \`enigma import\` on ${(/* @__PURE__ */ new Date()).toISOString()}: ${succeeded.join(", ")}`;
+  const rewritten = removeDotEnvEntries(currentContent, succeeded, { comment: movedComment });
+  const fileRewritten = rewritten !== currentContent;
+  if (fileRewritten) writeFileSync4(opts.envFilePath, rewritten, { mode: FILE_MODE4 });
+  return { succeeded, failed: [], notAttempted: [], fileRewritten, warnings };
+}
+
+// src/web/server.ts
+import * as http from "node:http";
+
+// src/web/network-policy.ts
+import { isIP } from "node:net";
+var LOCALHOST_ADDRESSES = /* @__PURE__ */ new Set(["localhost", "127.0.0.1", "::1"]);
+function isLocalhostBinding(host) {
+  return LOCALHOST_ADDRESSES.has(host);
+}
+function isTailscaleHost(host) {
+  const lower = host.toLowerCase();
+  if (lower.endsWith(".ts.net")) return true;
+  if (isIP(host) !== 4) return false;
+  const parts = host.split(".").map(Number);
+  if (parts.length !== 4 || parts.some((n) => Number.isNaN(n) || n < 0 || n > 255)) return false;
+  const [a, b] = parts;
+  return a === 100 && b >= 64 && b <= 127;
+}
+function decideInsecureHttpPolicy(host, allowOverride) {
+  if (isLocalhostBinding(host)) return { allow: true, reason: "localhost" };
+  if (isTailscaleHost(host)) return { allow: true, reason: "tailscale" };
+  if (allowOverride) return { allow: true, reason: "override" };
+  return { allow: false, reason: "refuse" };
+}
+
+// src/web/headers.ts
+function applySecurityHeaders(res) {
+  res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'");
+  res.setHeader("X-Frame-Options", "DENY");
+  res.setHeader("Referrer-Policy", "no-referrer");
+  res.setHeader("Cache-Control", "no-store");
+}
+
+// src/web/templates/request-form.html?raw
+var request_form_default = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Enigma \u2014 secret request</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    max-width: 480px;
+    margin: 6vh auto 40px;
+    padding: 0 16px;
+    box-sizing: border-box;
+    color: #18181b;
+    background: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e4e4e7; background: #18181b; }
+    .card, fieldset { border-color: #3f3f46 !important; background: #27272a !important; }
+    input, select { background: #18181b !important; color: #e4e4e7 !important; border-color: #3f3f46 !important; }
+    button[type="submit"] { background: #e4e4e7 !important; color: #18181b !important; }
+    .warn { background: #422006 !important; color: #fde68a !important; }
+    .error { background: #450a0a !important; color: #fecaca !important; }
+  }
+  * { box-sizing: border-box; }
+  .card { border: 1px solid #e4e4e7; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  h1 { font-size: 1.1rem; margin: 0 0 4px; }
+  p.muted { color: #71717a; margin: 4px 0 16px; }
+  fieldset { border: 1px solid #e4e4e7; border-radius: 10px; margin: 0 0 12px; padding: 12px; }
+  legend { padding: 0 6px; font-weight: 600; font-size: 0.9rem; }
+  label { display: block; font-size: 0.85rem; margin: 10px 0 4px; }
+  input[type="password"], input[type="text"], select {
+    width: 100%; padding: 10px; border: 1px solid #d4d4d8; border-radius: 8px; font-size: 1rem;
+  }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .checkbox-row label { margin: 0; }
+  button[type="submit"] {
+    width: 100%; padding: 12px; border: none; border-radius: 8px;
+    background: #18181b; color: #fff; font-size: 1rem; cursor: pointer; margin-top: 8px;
+  }
+  .warn { background: #fef9c3; color: #713f12; border-radius: 8px; padding: 10px; font-size: 0.85rem; margin-bottom: 12px; }
+  .error { background: #fee2e2; color: #7f1d1d; border-radius: 8px; padding: 10px; font-size: 0.85rem; margin-bottom: 12px; }
+  .rotate-note { color: #ca8a04; font-size: 0.8rem; margin-top: 2px; }
+  .rotate-note:empty { display: none; margin: 0; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Secret request</h1>
+    <p class="muted">{{REASON}}</p>
+
+    <!--BLOCK:ERROR_BLOCK-->
+    <div class="error">{{ERROR_MESSAGE}}</div>
+    <!--/BLOCK:ERROR_BLOCK-->
+
+    <!--BLOCK:CONFIRM_BLOCK-->
+    <div class="warn">
+      The <strong>{{CONFIRM_DEPOSITORY}}</strong> depository isn't set up yet. Check the box below to confirm creating it and try again.
+    </div>
+    <!--/BLOCK:CONFIRM_BLOCK-->
+
+    <form method="post" action="/r/{{ID}}">
+      <!--BLOCK:NAME_ROW-->
+      <label for="field-{{NAME}}">{{NAME}}<br /><span class="muted">{{DESCRIPTION}} ({{USAGE}})</span></label>
+      <input id="field-{{NAME}}" type="password" name="{{NAME}}" autocomplete="off" required />
+      <p class="rotate-note">{{ROTATE_NOTE}}</p>
+      <!--/BLOCK:NAME_ROW-->
+
+      <fieldset>
+        <legend>Where to store it</legend>
+        <label for="depository">Depository</label>
+        <select id="depository" name="depository">
+          <!--BLOCK:DEP_OPTION-->
+          <option value="{{DEP_ID}}" {{DEP_SELECTED}}>{{DEP_LABEL}}</option>
+          <!--/BLOCK:DEP_OPTION-->
+        </select>
+
+        <label for="scope">Scope</label>
+        <select id="scope" name="scope">
+          <option value="project" {{SCOPE_PROJECT_SELECTED}}>This project</option>
+          <option value="global" {{SCOPE_GLOBAL_SELECTED}}>Global</option>
+        </select>
+
+        <div class="checkbox-row">
+          <input id="rotate" type="checkbox" name="rotate" {{ROTATE_CHECKED}} />
+          <label for="rotate">Rotate if already present</label>
+        </div>
+
+        <!--BLOCK:CONFIRM_CHECKBOX-->
+        <div class="checkbox-row">
+          <input id="confirmCreateVault" type="checkbox" name="confirmCreateVault" />
+          <label for="confirmCreateVault">Create the {{CONFIRM_DEPOSITORY}} depository</label>
+        </div>
+        <!--/BLOCK:CONFIRM_CHECKBOX-->
+      </fieldset>
+
+      <button type="submit">Submit</button>
+    </form>
+  </div>
+</body>
+</html>
+`;
+
+// src/web/templates/request-done.html?raw
+var request_done_default = '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8" />\n<meta name="viewport" content="width=device-width, initial-scale=1" />\n<title>Enigma \u2014 done</title>\n<style>\n  :root { color-scheme: light dark; }\n  body {\n    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;\n    max-width: 480px;\n    margin: 10vh auto 0;\n    padding: 0 16px;\n    box-sizing: border-box;\n    color: #18181b;\n    background: #ffffff;\n  }\n  @media (prefers-color-scheme: dark) {\n    body { color: #e4e4e7; background: #18181b; }\n    .card { border-color: #3f3f46 !important; background: #27272a !important; }\n  }\n  * { box-sizing: border-box; }\n  .card { border: 1px solid #e4e4e7; border-radius: 12px; padding: 20px; }\n  h1 { font-size: 1.1rem; margin: 0 0 12px; }\n  ul { list-style: none; margin: 0; padding: 0; }\n  li { padding: 6px 0; border-top: 1px solid #e4e4e7; }\n  li:first-child { border-top: none; }\n  .ok { color: #16a34a; }\n  .fail { color: #dc2626; }\n  p.muted { color: #71717a; margin-top: 16px; font-size: 0.9rem; }\n</style>\n</head>\n<body>\n  <div class="card">\n    <h1>Request complete</h1>\n    <ul>\n      <!--BLOCK:RESULT_ROW-->\n      <li class="{{STATUS_CLASS}}">{{NAME}} \u2014 {{STATUS_TEXT}}</li>\n      <!--/BLOCK:RESULT_ROW-->\n    </ul>\n    <p class="muted">You can close this tab.</p>\n  </div>\n</body>\n</html>\n';
+
+// src/web/templates/reveal-shell.html?raw
+var reveal_shell_default = '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8" />\n<meta name="viewport" content="width=device-width, initial-scale=1" />\n<title>Enigma \u2014 reveal {{NAME}}</title>\n<style>\n  :root { color-scheme: light dark; }\n  body {\n    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;\n    max-width: 480px;\n    margin: 10vh auto 0;\n    padding: 0 16px;\n    box-sizing: border-box;\n    color: #18181b;\n    background: #ffffff;\n  }\n  @media (prefers-color-scheme: dark) {\n    body { color: #e4e4e7; background: #18181b; }\n    .card { border-color: #3f3f46 !important; background: #27272a !important; }\n    button { background: #e4e4e7 !important; color: #18181b !important; }\n    code { background: #3f3f46 !important; }\n  }\n  * { box-sizing: border-box; }\n  .card { border: 1px solid #e4e4e7; border-radius: 12px; padding: 20px; }\n  h1 { font-size: 1.1rem; margin: 0 0 4px; }\n  p.muted { color: #71717a; margin: 4px 0 16px; }\n  button { width: 100%; padding: 12px; border: none; border-radius: 8px; background: #18181b; color: #fff; font-size: 1rem; cursor: pointer; }\n  button:disabled { opacity: 0.6; cursor: default; }\n  code { display: block; word-break: break-all; background: #f4f4f5; padding: 10px; border-radius: 8px; margin-top: 12px; }\n  #status { margin-top: 12px; color: #71717a; font-size: 0.9rem; }\n</style>\n</head>\n<body>\n  <div class="card">\n    <h1>Reveal {{NAME}}</h1>\n    <p class="muted">This link works once. The value never appears until you click Reveal, and it is hidden again after 60 seconds.</p>\n    <button id="revealBtn" type="button" data-id="{{ID}}">Reveal</button>\n    <code id="valueBox" hidden></code>\n    <p id="status"></p>\n  </div>\n  <script src="/static/reveal.js"></script>\n</body>\n</html>\n';
+
+// src/web/templates/error.html?raw
+var error_default = '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8" />\n<meta name="viewport" content="width=device-width, initial-scale=1" />\n<title>Enigma \u2014 {{STATUS}}</title>\n<style>\n  :root { color-scheme: light dark; }\n  body {\n    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;\n    max-width: 480px;\n    margin: 15vh auto 0;\n    padding: 0 16px;\n    color: #18181b;\n    background: #ffffff;\n  }\n  @media (prefers-color-scheme: dark) {\n    body { color: #e4e4e7; background: #18181b; }\n  }\n  h1 { font-size: 1.25rem; }\n  p { color: #71717a; }\n</style>\n</head>\n<body>\n  <h1>{{STATUS}}</h1>\n  <p>{{MESSAGE}}</p>\n</body>\n</html>\n';
+
+// src/web/templates/import-form.html?raw
+var import_form_default = `<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Enigma \u2014 import</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    max-width: 480px;
+    margin: 6vh auto 40px;
+    padding: 0 16px;
+    box-sizing: border-box;
+    color: #18181b;
+    background: #ffffff;
+  }
+  @media (prefers-color-scheme: dark) {
+    body { color: #e4e4e7; background: #18181b; }
+    .card, fieldset { border-color: #3f3f46 !important; background: #27272a !important; }
+    select { background: #18181b !important; color: #e4e4e7 !important; border-color: #3f3f46 !important; }
+    button[type="submit"] { background: #e4e4e7 !important; color: #18181b !important; }
+    .warn { background: #422006 !important; color: #fde68a !important; }
+    .error { background: #450a0a !important; color: #fecaca !important; }
+  }
+  * { box-sizing: border-box; }
+  .card { border: 1px solid #e4e4e7; border-radius: 12px; padding: 20px; margin-bottom: 16px; }
+  h1 { font-size: 1.1rem; margin: 0 0 4px; }
+  p.muted { color: #71717a; margin: 4px 0 16px; }
+  fieldset { border: 1px solid #e4e4e7; border-radius: 10px; margin: 0 0 12px; padding: 12px; }
+  legend { padding: 0 6px; font-weight: 600; font-size: 0.9rem; }
+  label { display: block; font-size: 0.85rem; margin: 10px 0 4px; }
+  select { width: 100%; padding: 10px; border: 1px solid #d4d4d8; border-radius: 8px; font-size: 1rem; }
+  ul.names { list-style: none; margin: 0 0 12px; padding: 0; }
+  ul.names li { padding: 6px 0; border-top: 1px solid #e4e4e7; font-size: 0.9rem; }
+  ul.names li:first-child { border-top: none; }
+  .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
+  .checkbox-row label { margin: 0; }
+  button[type="submit"] {
+    width: 100%; padding: 12px; border: none; border-radius: 8px;
+    background: #18181b; color: #fff; font-size: 1rem; cursor: pointer; margin-top: 8px;
+  }
+  .warn { background: #fef9c3; color: #713f12; border-radius: 8px; padding: 10px; font-size: 0.85rem; margin-bottom: 12px; }
+  .error { background: #fee2e2; color: #7f1d1d; border-radius: 8px; padding: 10px; font-size: 0.85rem; margin-bottom: 12px; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>Import secrets</h1>
+    <p class="muted">{{COUNT}} secret(s) parsed from the project's .env. Choose where to store them.</p>
+
+    <!--BLOCK:ERROR_BLOCK-->
+    <div class="error">{{ERROR_MESSAGE}}</div>
+    <!--/BLOCK:ERROR_BLOCK-->
+
+    <!--BLOCK:WARN_BLOCK-->
+    <div class="warn">{{WARN_MESSAGE}}</div>
+    <!--/BLOCK:WARN_BLOCK-->
+
+    <!--BLOCK:CONFIRM_BLOCK-->
+    <div class="warn">
+      The <strong>{{CONFIRM_DEPOSITORY}}</strong> depository isn't set up yet. Check the box below to confirm creating it and try again.
+    </div>
+    <!--/BLOCK:CONFIRM_BLOCK-->
+
+    <ul class="names">
+      <!--BLOCK:NAME_ROW-->
+      <li>{{NAME}}</li>
+      <!--/BLOCK:NAME_ROW-->
+    </ul>
+
+    <form method="post" action="/i/{{ID}}">
+      <fieldset>
+        <legend>Where to store them</legend>
+        <label for="depository">Depository</label>
+        <select id="depository" name="depository">
+          <!--BLOCK:DEP_OPTION-->
+          <option value="{{DEP_ID}}" {{DEP_SELECTED}}>{{DEP_LABEL}}</option>
+          <!--/BLOCK:DEP_OPTION-->
+        </select>
+
+        <div class="checkbox-row">
+          <input id="rotate" type="checkbox" name="rotate" />
+          <label for="rotate">Rotate any that already exist</label>
+        </div>
+
+        <!--BLOCK:CONFIRM_CHECKBOX-->
+        <div class="checkbox-row">
+          <input id="confirmCreateVault" type="checkbox" name="confirmCreateVault" />
+          <label for="confirmCreateVault">Create the {{CONFIRM_DEPOSITORY}} depository</label>
+        </div>
+        <!--/BLOCK:CONFIRM_CHECKBOX-->
+      </fieldset>
+
+      <button type="submit">Import</button>
+    </form>
+  </div>
+</body>
+</html>
+`;
+
+// src/web/templates/render.ts
+function escapeHtml(value) {
+  return value.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+}
+function renderTemplate(html, vars) {
+  return html.replace(
+    /\{\{([A-Z0-9_]+)\}\}/g,
+    (match, token) => Object.prototype.hasOwnProperty.call(vars, token) ? escapeHtml(vars[token]) : match
+  );
+}
+function renderRepeatingBlock(html, blockName, rows) {
+  const start = `<!--BLOCK:${blockName}-->`;
+  const end = `<!--/BLOCK:${blockName}-->`;
+  const startIndex = html.indexOf(start);
+  const endIndex = html.indexOf(end);
+  if (startIndex === -1 || endIndex === -1) return html;
+  const rowTemplate = html.slice(startIndex + start.length, endIndex);
+  const rendered = rows.map((row) => renderTemplate(rowTemplate, row)).join("");
+  return html.slice(0, startIndex) + rendered + html.slice(endIndex + end.length);
+}
+
+// src/web/responses.ts
+function sendHtml(res, status, html) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "text/html; charset=utf-8");
+  res.end(html);
+}
+function sendJson(res, status, body) {
+  res.statusCode = status;
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.end(JSON.stringify(body));
+}
+function sendStaticJs(res, content) {
+  res.statusCode = 200;
+  res.setHeader("Content-Type", "text/javascript; charset=utf-8");
+  res.end(content);
+}
+function sendErrorPage(res, status, statusText, message) {
+  sendHtml(res, status, renderTemplate(error_default, { STATUS: statusText, MESSAGE: message }));
+}
+
+// src/web/body.ts
+var MAX_BODY_BYTES = 64 * 1024;
+var PayloadTooLargeError = class extends Error {
+  constructor() {
+    super(`request body exceeds ${MAX_BODY_BYTES} bytes`);
+    this.name = "PayloadTooLargeError";
+  }
+};
+function readBody(req, maxBytes = MAX_BODY_BYTES) {
+  return new Promise((resolve2, reject) => {
+    const chunks = [];
+    let total = 0;
+    let settled2 = false;
+    const settleError = (err) => {
+      if (settled2) return;
+      settled2 = true;
+      reject(err);
+    };
+    req.on("data", (chunk) => {
+      if (settled2) return;
+      total += chunk.length;
+      if (total > maxBytes) {
+        settleError(new PayloadTooLargeError());
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on("end", () => {
+      if (settled2) return;
+      settled2 = true;
+      resolve2(Buffer.concat(chunks));
+    });
+    req.on("error", settleError);
+  });
+}
+function truthy(value) {
+  return value === "on" || value === "true" || value === "1";
+}
+function parseSubmission(contentType, body, names) {
+  const text = body.toString("utf8");
+  if (contentType?.toLowerCase().includes("application/json")) {
+    const parsed = JSON.parse(text);
+    const values2 = {};
+    for (const name of names) {
+      const raw = parsed.values?.[name];
+      if (typeof raw === "string") values2[name] = raw;
+    }
+    return {
+      values: values2,
+      depository: typeof parsed.depository === "string" ? parsed.depository : void 0,
+      scope: typeof parsed.scope === "string" ? parsed.scope : void 0,
+      rotate: Boolean(parsed.rotate),
+      confirmCreateVault: Boolean(parsed.confirmCreateVault)
+    };
+  }
+  const params = new URLSearchParams(text);
+  const values = {};
+  for (const name of names) {
+    const raw = params.get(name);
+    if (raw !== null) values[name] = raw;
+  }
+  return {
+    values,
+    depository: params.get("depository") ?? void 0,
+    scope: params.get("scope") ?? void 0,
+    rotate: truthy(params.get("rotate")),
+    confirmCreateVault: truthy(params.get("confirmCreateVault"))
+  };
+}
+
+// src/web/depository-picker.ts
+var PROMPT_PROFILE_LABEL = {
+  none: "no prompt",
+  "may-prompt": "may prompt",
+  "prompts-each-read": "prompts every read"
+};
+function pickDefaultDepository(detections, opts = {}) {
+  const available = detections.filter((d) => d.available);
+  if (opts.sticky && available.some((d) => d.id === opts.sticky)) return opts.sticky;
+  if (opts.usage === "unattended") {
+    const noPrompt = available.find((d) => d.promptProfile === "none");
+    if (noPrompt) return noPrompt.id;
+  }
+  return available[0]?.id;
+}
+function buildDepositoryOptions(detections, opts = {}) {
+  const preselected = opts.requested ?? pickDefaultDepository(detections, opts);
+  return detections.map((d) => ({
+    id: d.id,
+    label: `${d.id} (${PROMPT_PROFILE_LABEL[d.promptProfile]})`,
+    promptProfile: d.promptProfile,
+    available: d.available,
+    reason: d.reason,
+    selected: d.id === preselected
+  }));
+}
+function needsAvailabilityConfirmation(detections, id) {
+  if (!id) return false;
+  const match = detections.find((d) => d.id === id);
+  return !match || !match.available;
+}
+
+// src/web/routes/import-form.ts
+async function renderForm(res, record, opts = {}) {
+  const detections = await detectAll();
+  const config = loadConfig();
+  const requested = opts.selectedDepositoryId ?? record.depository;
+  const options = buildDepositoryOptions(detections, { sticky: config.defaultDepository, requested });
+  const warnings = checkEnvGitignore(findProjectPath(process.cwd()));
+  let html = import_form_default;
+  html = renderTemplate(html, { ID: record.id, COUNT: String(record.names.length) });
+  html = renderRepeatingBlock(html, "NAME_ROW", record.names.map((name) => ({ NAME: name })));
+  html = renderRepeatingBlock(
+    html,
+    "DEP_OPTION",
+    options.map((o) => ({ DEP_ID: o.id, DEP_LABEL: o.label, DEP_SELECTED: o.selected ? "selected" : "" }))
+  );
+  html = renderRepeatingBlock(html, "ERROR_BLOCK", opts.errorMessage ? [{ ERROR_MESSAGE: opts.errorMessage }] : []);
+  html = renderRepeatingBlock(html, "WARN_BLOCK", warnings.map((w) => ({ WARN_MESSAGE: w })));
+  const confirmRows = opts.confirmDepository ? [{ CONFIRM_DEPOSITORY: opts.confirmDepository }] : [];
+  html = renderRepeatingBlock(html, "CONFIRM_BLOCK", confirmRows);
+  html = renderRepeatingBlock(html, "CONFIRM_CHECKBOX", confirmRows);
+  sendHtml(res, opts.status ?? 200, html);
+}
+function getUsableImportRecord(id) {
+  const record = RequestStore.get(id);
+  if (!record || record.kind !== "import") return "not-found";
+  if (record.usedAt !== void 0) return "used";
+  return record;
+}
+async function handleImportFormGet(res, id) {
+  const record = getUsableImportRecord(id);
+  if (record === "not-found") {
+    sendErrorPage(res, 404, "Not found", "This link is unknown or has expired.");
+    return;
+  }
+  if (record === "used") {
+    sendErrorPage(res, 410, "Already used", "This link has already been used.");
+    return;
+  }
+  await renderForm(res, record);
+}
+async function handleImportFormPost(req, res, id) {
+  const record = getUsableImportRecord(id);
+  if (record === "not-found") {
+    sendErrorPage(res, 404, "Not found", "This link is unknown or has expired.");
+    return;
+  }
+  if (record === "used") {
+    sendErrorPage(res, 410, "Already used", "This link has already been used.");
+    return;
+  }
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (err) {
+    if (err instanceof PayloadTooLargeError) {
+      sendErrorPage(res, 413, "Payload too large", "The submission is too large.");
+      return;
+    }
+    sendErrorPage(res, 400, "Bad request", "Could not read the submission.");
+    return;
+  }
+  let submission;
+  try {
+    submission = parseSubmission(req.headers["content-type"], body, []);
+  } catch {
+    sendErrorPage(res, 400, "Bad request", "Could not parse the submission.");
+    return;
+  }
+  const chosenDepository = submission.depository;
+  if (!chosenDepository) {
+    await renderForm(res, record, { errorMessage: "Choose a depository." });
+    return;
+  }
+  const detections = await detectAll();
+  if (needsAvailabilityConfirmation(detections, chosenDepository) && !submission.confirmCreateVault) {
+    await renderForm(res, record, { confirmDepository: chosenDepository, selectedDepositoryId: chosenDepository });
+    return;
+  }
+  const marked = RequestStore.tryMarkUsed(id);
+  if (!marked) {
+    sendErrorPage(res, 410, "Already used", "This link has already been used.");
+    return;
+  }
+  const cwd = process.cwd();
+  const projectPath = findProjectPath(cwd);
+  const scope = record.scope ?? "project";
+  const values = record.values ?? {};
+  const entries = record.names.map((name) => ({ name, value: values[name] ?? "" }));
+  const commitResult = await commitImport({
+    entries,
+    depository: chosenDepository,
+    scope,
+    cwd,
+    projectPath,
+    envFilePath: record.envFilePath ?? `${projectPath}/.env`,
+    actor: "user",
+    rotate: submission.rotate,
+    createVault: submission.confirmCreateVault
+  });
+  const results = [
+    ...commitResult.failed.map((f) => ({ name: f.name, ok: false, errorCode: f.errorCode })),
+    ...commitResult.notAttempted.map((name) => ({ name, ok: false, errorCode: "E_NOT_ATTEMPTED" })),
+    ...commitResult.succeeded.map((name) => ({ name, ok: true }))
+  ];
+  record.importOutcome = { fileRewritten: commitResult.fileRewritten, warnings: commitResult.warnings, depository: chosenDepository };
+  RequestStore.fulfill(id, results);
+  let html = request_done_default;
+  html = renderRepeatingBlock(
+    html,
+    "RESULT_ROW",
+    results.map((r) => ({
+      NAME: r.name,
+      STATUS_CLASS: r.ok ? "ok" : "fail",
+      STATUS_TEXT: r.ok ? "stored" : `failed (${r.errorCode})`
+    }))
+  );
+  sendHtml(res, 200, html);
+}
+
+// src/web/routes/request-form.ts
+async function renderForm2(res, record, opts = {}) {
+  const detections = await detectAll();
+  const config = loadConfig();
+  const scope = opts.selectedScope ?? record.scope ?? "project";
+  const requested = opts.selectedDepositoryId ?? record.depository;
+  const options = buildDepositoryOptions(detections, {
+    usage: record.usage,
+    sticky: config.defaultDepository,
+    requested
+  });
+  const entries = listSecrets({ scope: "all", cwd: process.cwd() });
+  const nameRows = record.names.map((name) => {
+    const existing = entries.find((e) => e.name === name && e.scope === scope) ?? entries.find((e) => e.name === name);
+    return {
+      NAME: name,
+      DESCRIPTION: existing?.description ?? "",
+      USAGE: record.usage ?? "interactive",
+      ROTATE_NOTE: existing ? `${name} already exists and will be rotated.` : ""
+    };
+  });
+  let html = request_form_default;
+  html = renderTemplate(html, {
+    ID: record.id,
+    REASON: record.reason ?? "",
+    SCOPE_PROJECT_SELECTED: scope === "project" ? "selected" : "",
+    SCOPE_GLOBAL_SELECTED: scope === "global" ? "selected" : "",
+    ROTATE_CHECKED: opts.rotateChecked ?? record.rotate ? "checked" : ""
+  });
+  html = renderRepeatingBlock(html, "NAME_ROW", nameRows);
+  html = renderRepeatingBlock(
+    html,
+    "DEP_OPTION",
+    options.map((o) => ({ DEP_ID: o.id, DEP_LABEL: o.label, DEP_SELECTED: o.selected ? "selected" : "" }))
+  );
+  html = renderRepeatingBlock(html, "ERROR_BLOCK", opts.errorMessage ? [{ ERROR_MESSAGE: opts.errorMessage }] : []);
+  const confirmRows = opts.confirmDepository ? [{ CONFIRM_DEPOSITORY: opts.confirmDepository }] : [];
+  html = renderRepeatingBlock(html, "CONFIRM_BLOCK", confirmRows);
+  html = renderRepeatingBlock(html, "CONFIRM_CHECKBOX", confirmRows);
+  sendHtml(res, opts.status ?? 200, html);
+}
+async function handleRequestFormGet(res, id) {
+  const record = RequestStore.get(id);
+  if (!record || record.kind !== "request") {
+    sendErrorPage(res, 404, "Not found", "This link is unknown or has expired.");
+    return;
+  }
+  if (record.usedAt !== void 0) {
+    sendErrorPage(res, 410, "Already used", "This link has already been used.");
+    return;
+  }
+  await renderForm2(res, record);
+}
+async function handleRequestFormPost(req, res, id) {
+  const record = RequestStore.get(id);
+  if (!record || record.kind !== "request") {
+    sendErrorPage(res, 404, "Not found", "This link is unknown or has expired.");
+    return;
+  }
+  if (record.usedAt !== void 0) {
+    sendErrorPage(res, 410, "Already used", "This link has already been used.");
+    return;
+  }
+  let body;
+  try {
+    body = await readBody(req);
+  } catch (err) {
+    if (err instanceof PayloadTooLargeError) {
+      sendErrorPage(res, 413, "Payload too large", "The submission is too large.");
+      return;
+    }
+    sendErrorPage(res, 400, "Bad request", "Could not read the submission.");
+    return;
+  }
+  let submission;
+  try {
+    submission = parseSubmission(req.headers["content-type"], body, record.names);
+  } catch {
+    sendErrorPage(res, 400, "Bad request", "Could not parse the submission.");
+    return;
+  }
+  const chosenDepository = submission.depository;
+  const scope = submission.scope ?? record.scope ?? "project";
+  if (!chosenDepository) {
+    await renderForm2(res, record, { errorMessage: "Choose a depository.", selectedScope: scope, rotateChecked: submission.rotate });
+    return;
+  }
+  const detections = await detectAll();
+  if (needsAvailabilityConfirmation(detections, chosenDepository) && !submission.confirmCreateVault) {
+    await renderForm2(res, record, {
+      confirmDepository: chosenDepository,
+      selectedDepositoryId: chosenDepository,
+      selectedScope: scope,
+      rotateChecked: submission.rotate
+    });
+    return;
+  }
+  const marked = RequestStore.tryMarkUsed(id);
+  if (!marked) {
+    sendErrorPage(res, 410, "Already used", "This link has already been used.");
+    return;
+  }
+  const results = [];
+  for (const name of record.names) {
+    const value = submission.values[name];
+    if (!value) {
+      results.push({ name, ok: false, errorCode: "E_MISSING_VALUE" });
+      continue;
+    }
+    try {
+      await setSecret({
+        name,
+        value,
+        scope,
+        depository: chosenDepository,
+        cwd: process.cwd(),
+        rotate: submission.rotate,
+        actor: "user",
+        createVault: submission.confirmCreateVault
+      });
+      results.push({ name, ok: true });
+    } catch (err) {
+      results.push({ name, ok: false, errorCode: err instanceof EnigmaError ? err.code : "E_UNKNOWN" });
+    }
+  }
+  RequestStore.fulfill(id, results);
+  let html = request_done_default;
+  html = renderRepeatingBlock(
+    html,
+    "RESULT_ROW",
+    results.map((r) => ({
+      NAME: r.name,
+      STATUS_CLASS: r.ok ? "ok" : "fail",
+      STATUS_TEXT: r.ok ? "stored" : `failed (${r.errorCode})`
+    }))
+  );
+  sendHtml(res, 200, html);
+}
+
+// src/web/routes/reveal.ts
+function handleRevealGet(res, id) {
+  const record = RequestStore.get(id);
+  if (!record || record.kind !== "reveal") {
+    sendErrorPage(res, 404, "Not found", "This link is unknown or has expired.");
+    return;
+  }
+  if (record.usedAt !== void 0) {
+    sendErrorPage(res, 410, "Already used", "This link has already been used.");
+    return;
+  }
+  const [name] = record.names;
+  const html = renderTemplate(reveal_shell_default, { ID: record.id, NAME: name ?? "" });
+  sendHtml(res, 200, html);
+}
+async function handleRevealPost(res, id) {
+  const record = RequestStore.get(id);
+  if (!record || record.kind !== "reveal") {
+    sendErrorPage(res, 404, "Not found", "This link is unknown or has expired.");
+    return;
+  }
+  const marked = RequestStore.tryMarkUsed(id);
+  if (!marked) {
+    sendErrorPage(res, 410, "Already used", "This link has already been used.");
+    return;
+  }
+  RequestStore.fulfill(id);
+  const [name] = marked.names;
+  if (!name) {
+    sendErrorPage(res, 404, "Not found", "This link is unknown or has expired.");
+    return;
+  }
+  try {
+    const value = await resolveSecret(name, { scope: marked.scope, cwd: process.cwd(), actor: "user", auditOp: "reveal" });
+    sendJson(res, 200, { name, value });
+  } catch (err) {
+    if (err instanceof EnigmaError && err.code === "E_NOT_FOUND") {
+      sendErrorPage(res, 404, "Not found", "This secret no longer exists.");
+      return;
+    }
+    sendErrorPage(res, 500, "Internal error", "Could not reveal this secret.");
+  }
+}
+
+// src/web/static/reveal-script.ts
+var REVEAL_CLIENT_JS = `(() => {
+  const btn = document.getElementById('revealBtn');
+  const box = document.getElementById('valueBox');
+  const status = document.getElementById('status');
+  if (!btn || !box || !status) return;
+
+  btn.addEventListener('click', async () => {
+    btn.disabled = true;
+    status.textContent = 'Revealing...';
+    const id = btn.getAttribute('data-id');
+    try {
+      const resp = await fetch('/v/' + encodeURIComponent(id) + '/reveal', { method: 'POST' });
+      if (resp.status === 410) {
+        status.textContent = 'This link has already been used.';
+        return;
+      }
+      if (resp.status === 404) {
+        status.textContent = 'This link has expired.';
+        return;
+      }
+      if (!resp.ok) {
+        status.textContent = 'Something went wrong.';
+        return;
+      }
+      const data = await resp.json();
+      box.textContent = data.value;
+      box.hidden = false;
+      status.textContent = 'Hides again in 60s.';
+      setTimeout(() => {
+        box.textContent = '';
+        box.hidden = true;
+        status.textContent = 'Hidden.';
+      }, 60000);
+    } catch (err) {
+      status.textContent = 'Network error.';
+    }
+  });
+})();
+`;
+
+// src/web/router.ts
+var ID = "[0-9a-f]{32}";
+var REQUEST_PATH = new RegExp(`^/r/(${ID})$`);
+var IMPORT_PATH = new RegExp(`^/i/(${ID})$`);
+var REVEAL_SHELL_PATH = new RegExp(`^/v/(${ID})$`);
+var REVEAL_ACTION_PATH = new RegExp(`^/v/(${ID})/reveal$`);
+async function handleRequest(req, res) {
+  applySecurityHeaders(res);
+  const method = req.method ?? "GET";
+  let pathname;
+  try {
+    pathname = new URL(req.url ?? "/", "http://internal").pathname;
+  } catch {
+    sendErrorPage(res, 400, "Bad request", "Malformed URL.");
+    return;
+  }
+  try {
+    if (method === "GET" && pathname === "/healthz") {
+      sendJson(res, 200, { ok: true });
+      return;
+    }
+    if (method === "GET" && pathname === "/static/reveal.js") {
+      sendStaticJs(res, REVEAL_CLIENT_JS);
+      return;
+    }
+    const requestMatch = pathname.match(REQUEST_PATH);
+    if (requestMatch) {
+      const id = requestMatch[1];
+      if (method === "GET") return await handleRequestFormGet(res, id);
+      if (method === "POST") return await handleRequestFormPost(req, res, id);
+    }
+    const importMatch = pathname.match(IMPORT_PATH);
+    if (importMatch) {
+      const id = importMatch[1];
+      if (method === "GET") return await handleImportFormGet(res, id);
+      if (method === "POST") return await handleImportFormPost(req, res, id);
+    }
+    const revealShellMatch = pathname.match(REVEAL_SHELL_PATH);
+    if (revealShellMatch && method === "GET") {
+      return handleRevealGet(res, revealShellMatch[1]);
+    }
+    const revealActionMatch = pathname.match(REVEAL_ACTION_PATH);
+    if (revealActionMatch && method === "POST") {
+      return await handleRevealPost(res, revealActionMatch[1]);
+    }
+    sendErrorPage(res, 404, "Not found", "Nothing lives at this address.");
+  } catch {
+    sendErrorPage(res, 500, "Internal error", "Something went wrong.");
+  }
+}
+
+// src/web/server.ts
+var DEFAULT_HOST = "127.0.0.1";
+var DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1e3;
+var state;
+var starting;
+function settled(value) {
+  return new Promise((resolve2) => resolve2(value));
+}
+function toHandle(s) {
+  return { port: s.port, origin: `http://${s.host}:${s.port}`, close: stopServer };
+}
+function resetIdleTimer(s) {
+  if (s.idleTimer) clearTimeout(s.idleTimer);
+  s.idleTimer = setTimeout(() => {
+    void stopServer();
+  }, s.idleTimeoutMs);
+  s.idleTimer.unref();
+}
+function startServer(opts = {}) {
+  if (state) {
+    resetIdleTimer(state);
+    return settled(toHandle(state));
+  }
+  if (starting) return starting;
+  const host = opts.host ?? DEFAULT_HOST;
+  const policy = decideInsecureHttpPolicy(host, opts.allowInsecureHttp ?? false);
+  if (!policy.allow) {
+    return new Promise(
+      (_resolve, reject) => reject(new Error(`refusing to bind ${host} over plain HTTP; pass allowInsecureHttp to override (ADR-005)`))
+    );
+  }
+  starting = new Promise((resolve2, reject) => {
+    const server = http.createServer((req, res) => {
+      if (state) resetIdleTimer(state);
+      void handleRequest(req, res);
+    });
+    server.on("error", (err) => {
+      starting = void 0;
+      reject(err);
+    });
+    server.listen(0, host, () => {
+      const addr = server.address();
+      const port = typeof addr === "object" && addr ? addr.port : 0;
+      const newState = { server, port, host, idleTimeoutMs: opts.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS };
+      state = newState;
+      resetIdleTimer(newState);
+      starting = void 0;
+      resolve2(toHandle(newState));
+    });
+  });
+  return starting;
+}
+function stopServer() {
+  const current = state;
+  if (!current) return settled(void 0);
+  state = void 0;
+  if (current.idleTimer) clearTimeout(current.idleTimer);
+  return new Promise((resolve2) => current.server.close(() => resolve2()));
+}
+
+// src/cli/commands/import.ts
+var USAGE3 = "enigma import [PATH] [--depository ID] [--json]";
+function report(data, json, cwd, note) {
+  if (json) {
+    process.stdout.write(`${JSON.stringify(data)}
+`);
+  } else {
+    const lines = [];
+    if (note) lines.push(note);
+    if (data.imported.length > 0 || data.failed.length > 0) {
+      const results = [
+        ...data.failed.map((f) => ({ name: f.name, ok: false, errorCode: f.errorCode })),
+        ...data.imported.map((name) => ({ name, ok: true }))
+      ];
+      lines.push(renderOutcome(results, cwd).text);
+    }
+    for (const name of data.notAttempted) lines.push(`${name}: not attempted (aborted after an earlier failure)`);
+    for (const name of data.skippedInvalid) lines.push(`${name}: skipped (invalid secret name)`);
+    for (const warning of data.warnings) lines.push(`warning: ${warning}`);
+    if (data.failed.length > 0 && !data.fileRewritten) {
+      lines.push(".env was left untouched because not every key succeeded.");
+    }
+    process.stdout.write(`${lines.filter((l) => l.length > 0).join("\n")}
+`);
+  }
+  return data.failed.length > 0 ? 1 : 0;
+}
+async function runBrowserFlow(entries, opts) {
+  const handle = await startServer();
+  const record = RequestStore.create({
+    kind: "import",
+    names: entries.map((e) => e.name),
+    values: Object.fromEntries(entries.map((e) => [e.name, e.value])),
+    scope: "project",
+    envFilePath: opts.absPath
+  });
+  const url = `${handle.origin}/i/${record.id}`;
+  process.stderr.write(
+    `Open ${url} to choose where to store ${entries.length} secret(s): ${entries.map((e) => e.name).join(", ")}
+`
+  );
+  try {
+    await RequestStore.waitForFulfilled(record.id);
+  } catch {
+    return report(
+      {
+        imported: [],
+        failed: [],
+        notAttempted: entries.map((e) => e.name),
+        skippedInvalid: opts.skippedInvalid,
+        warnings: [],
+        fileRewritten: false
+      },
+      opts.json,
+      opts.cwd,
+      "Import link expired before it was completed."
+    );
+  }
+  const finalRecord = RequestStore.get(record.id);
+  const results = finalRecord?.results ?? [];
+  const outcome = finalRecord?.importOutcome;
+  return report(
+    {
+      imported: results.filter((r) => r.ok).map((r) => r.name),
+      failed: results.filter((r) => !r.ok && r.errorCode !== "E_NOT_ATTEMPTED").map((r) => ({ name: r.name, errorCode: r.errorCode ?? "E_UNKNOWN" })),
+      notAttempted: results.filter((r) => r.errorCode === "E_NOT_ATTEMPTED").map((r) => r.name),
+      skippedInvalid: opts.skippedInvalid,
+      warnings: outcome?.warnings ?? [],
+      fileRewritten: outcome?.fileRewritten ?? false,
+      depository: outcome?.depository
+    },
+    opts.json,
+    opts.cwd
+  );
+}
+async function cmdImport(argv) {
+  const { positionals, flags } = parseArgs(argv, { value: ["depository"], boolean: ["json"] });
+  const pathArg = positionals[0] ?? ".env";
+  const depository = flags.depository;
+  const json = Boolean(flags.json);
+  if (positionals.length > 1) throw new UsageError(USAGE3);
+  const cwd = process.cwd();
+  const projectPath = findProjectPath(cwd);
+  const absPath = isAbsolute(pathArg) ? pathArg : join4(cwd, pathArg);
+  if (!existsSync9(absPath)) {
+    throw new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` });
+  }
+  const content = readFileSync6(absPath, "utf8");
+  const parsed = parseDotEnv(content);
+  if (parsed.entries.length === 0) {
+    return report(
+      { imported: [], failed: [], notAttempted: [], skippedInvalid: parsed.invalidNames, warnings: [], fileRewritten: false },
+      json,
+      cwd,
+      "No importable secrets found."
+    );
+  }
+  if (!depository) {
+    return runBrowserFlow(parsed.entries, { cwd, absPath, json, skippedInvalid: parsed.invalidNames });
+  }
+  const result = await commitImport({
+    entries: parsed.entries,
+    depository,
+    scope: "project",
+    cwd,
+    projectPath,
+    envFilePath: absPath,
+    actor: "cli"
+  });
+  return report(
+    {
+      imported: result.succeeded,
+      failed: result.failed,
+      notAttempted: result.notAttempted,
+      skippedInvalid: parsed.invalidNames,
+      warnings: result.warnings,
+      fileRewritten: result.fileRewritten,
+      depository
+    },
+    json,
+    cwd
+  );
 }
 
 // src/cli/commands/list.ts
@@ -1400,12 +2728,12 @@ async function cmdList(argv) {
 }
 
 // src/cli/commands/move.ts
-var USAGE3 = "enigma move NAME --to ID [--scope project|global]";
+var USAGE4 = "enigma move NAME --to ID [--scope project|global]";
 async function cmdMove(argv) {
   const { positionals, flags } = parseArgs(argv, { value: ["to", "scope"] });
   const [name] = positionals;
   const to = flags.to;
-  if (!name || typeof to !== "string") throw new UsageError(USAGE3);
+  if (!name || typeof to !== "string") throw new UsageError(USAGE4);
   const target = to;
   const scopeFlag = parseScope(flags.scope);
   const cwd = process.cwd();
@@ -1453,11 +2781,11 @@ async function cmdMove(argv) {
 }
 
 // src/cli/commands/remove.ts
-var USAGE4 = "enigma remove NAME [--scope project|global]";
+var USAGE5 = "enigma remove NAME [--scope project|global]";
 async function cmdRemove(argv) {
   const { positionals, flags } = parseArgs(argv, { value: ["scope"] });
   const [name] = positionals;
-  if (!name) throw new UsageError(USAGE4);
+  if (!name) throw new UsageError(USAGE5);
   const scope = parseScope(flags.scope);
   await deleteSecret(name, { scope, cwd: process.cwd(), actor: "cli" });
   process.stdout.write(`Removed ${name}${scope ? ` (${scope})` : ""}
@@ -1468,7 +2796,7 @@ async function cmdRemove(argv) {
 // src/cli/commands/run.ts
 import { spawn } from "node:child_process";
 import { constants as osConstants } from "node:os";
-var USAGE5 = "enigma run [--only A,B] [--scope project|global] -- <command> [args...]";
+var USAGE6 = "enigma run [--only A,B] [--scope project|global] -- <command> [args...]";
 var FORWARDED_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
 function entriesToInject(entries, only) {
   const visible = only ? entries : entries.filter((e) => !e.shadowed);
@@ -1508,9 +2836,9 @@ function spawnChild(command, args, env) {
 }
 async function cmdRun(argv) {
   const dashIdx = argv.indexOf("--");
-  if (dashIdx === -1) throw new UsageError(USAGE5);
+  if (dashIdx === -1) throw new UsageError(USAGE6);
   const commandArgv = argv.slice(dashIdx + 1);
-  if (commandArgv.length === 0) throw new UsageError(USAGE5);
+  if (commandArgv.length === 0) throw new UsageError(USAGE6);
   const { flags } = parseArgs(argv.slice(0, dashIdx), { value: ["only", "scope"] });
   const scope = parseScope(flags.scope) ?? "all";
   const only = typeof flags.only === "string" ? flags.only.split(",").map((n) => n.trim()).filter((n) => n.length > 0) : void 0;
@@ -1534,7 +2862,7 @@ function notImplemented(command) {
 }
 
 // src/cli/index.ts
-var USAGE6 = `Usage: enigma <command> [options]
+var USAGE7 = `Usage: enigma <command> [options]
 
 Commands:
   add NAME [--depository ID] [--scope project|global] [--description TEXT] [--usage interactive|unattended]
@@ -1543,9 +2871,10 @@ Commands:
   move NAME --to ID [--scope project|global]
   run [--only A,B] [--scope project|global] -- <command> [args...]
   get NAME [--scope project|global]
+  import [PATH] [--depository ID] [--json]
   doctor [--json]
 
-Not yet implemented: request, reveal, import, install
+Not yet implemented: request, reveal, install
 `;
 var COMMANDS = {
   add: cmdAdd,
@@ -1555,21 +2884,21 @@ var COMMANDS = {
   run: cmdRun,
   get: cmdGet,
   doctor: cmdDoctor,
+  import: cmdImport,
   request: notImplemented("request"),
   reveal: notImplemented("reveal"),
-  import: notImplemented("import"),
   install: notImplemented("install")
 };
 async function main(argv) {
   const [command, ...rest] = argv;
   if (!command) {
-    process.stderr.write(USAGE6);
+    process.stderr.write(USAGE7);
     return 2;
   }
   const handler = COMMANDS[command];
   if (!handler) {
     process.stderr.write(`enigma: unknown command '${command}'
-${USAGE6}`);
+${USAGE7}`);
     return 2;
   }
   try {
