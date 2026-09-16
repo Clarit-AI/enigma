@@ -52,10 +52,26 @@ function parseUsage(raw) {
   return raw;
 }
 
+// src/core/errors.ts
+var EnigmaError = class _EnigmaError extends Error {
+  code;
+  secretName;
+  depository;
+  constructor(options) {
+    super(options.message);
+    this.name = "EnigmaError";
+    this.code = options.code;
+    this.secretName = options.secretName;
+    this.depository = options.depository;
+    Object.setPrototypeOf(this, _EnigmaError.prototype);
+  }
+};
+
 // src/cli/prompt.ts
 var ETX = "";
 var BACKSPACE = "\x7F";
 var CTRL_H = "\b";
+var RAW_MODE_SIGNALS = ["SIGINT", "SIGTERM"];
 async function readOneLine(stdin) {
   let buffered = "";
   const iterable = stdin;
@@ -74,6 +90,11 @@ async function readWithEchoDisabled(stdin, stderr) {
   stdin.setRawMode?.(true);
   stdin.setEncoding("utf8");
   stdin.resume();
+  const restoreTerminal = () => {
+    stdin.setRawMode?.(wasRaw);
+    stdin.pause();
+  };
+  let handleSignal;
   try {
     return await new Promise((resolve2, reject) => {
       let value = "";
@@ -97,10 +118,19 @@ async function readWithEchoDisabled(stdin, stderr) {
         }
       };
       stdin.on("data", onData);
+      handleSignal = (signal) => {
+        stdin.removeListener("data", onData);
+        for (const s of RAW_MODE_SIGNALS) process.removeListener(s, handleSignal);
+        restoreTerminal();
+        process.kill(process.pid, signal);
+      };
+      for (const signal of RAW_MODE_SIGNALS) process.on(signal, handleSignal);
     });
   } finally {
-    stdin.setRawMode?.(wasRaw);
-    stdin.pause();
+    if (handleSignal) {
+      for (const signal of RAW_MODE_SIGNALS) process.removeListener(signal, handleSignal);
+    }
+    restoreTerminal();
     stderr.write("\n");
   }
 }
@@ -109,6 +139,12 @@ async function promptSecretValue(promptText, streams = {}) {
   const stderr = streams.stderr ?? process.stderr;
   if (!stdin.isTTY) {
     return readOneLine(stdin);
+  }
+  if (typeof stdin.setRawMode !== "function") {
+    throw new EnigmaError({
+      code: "E_NO_TTY_CONTROL",
+      message: "cannot disable terminal echo on this TTY: setRawMode is unavailable"
+    });
   }
   stderr.write(promptText);
   return readWithEchoDisabled(stdin, stderr);
@@ -157,21 +193,6 @@ function loadConfig() {
   if (raw.ui === "web" || raw.ui === "native") config.ui = raw.ui;
   return config;
 }
-
-// src/core/errors.ts
-var EnigmaError = class _EnigmaError extends Error {
-  code;
-  secretName;
-  depository;
-  constructor(options) {
-    super(options.message);
-    this.name = "EnigmaError";
-    this.code = options.code;
-    this.secretName = options.secretName;
-    this.depository = options.depository;
-    Object.setPrototypeOf(this, _EnigmaError.prototype);
-  }
-};
 
 // src/core/naming.ts
 var NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
@@ -837,7 +858,12 @@ async function cmdMove(argv) {
   const oldModule = DEPOSITORY_MODULES.find((m) => m.id === entry.depository);
   if (oldModule) {
     const projectPath = entry.scope === "project" ? entry.projectPath : void 0;
-    await oldModule.create({ projectPath }).delete(entry.ref).catch(() => void 0);
+    await oldModule.create({ projectPath }).delete(entry.ref).catch((err) => {
+      process.stderr.write(
+        `Warning: failed to delete old copy from ${entry.depository} (ref ${entry.ref}): ${auditErrorText(err)}
+`
+      );
+    });
   }
   appendAuditEvent({ op: "move", name, scope: entry.scope, depository: target, actor: "cli", ok: true, error: null });
   process.stdout.write(`Moved ${name} to ${target} (${entry.scope})
