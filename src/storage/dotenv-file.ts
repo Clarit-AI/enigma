@@ -1,0 +1,176 @@
+// Parses and rewrites a plain (non-Enigma-managed) `.env` file for `enigma
+// import` (Issue #13, D4.3). Lives under src/storage/** because it handles
+// raw secret values while parsing/removing them from text (style-guide
+// secret-handling conventions).
+import { NAME_PATTERN } from '../core/naming.js';
+
+const BEGIN_MARKER = '# enigma:begin';
+const END_MARKER = '# enigma:end';
+
+export interface ParsedDotEnvEntry {
+  name: string;
+  value: string;
+}
+
+export interface ParseDotEnvResult {
+  /** One entry per distinct valid name, in first-seen order, holding the LAST value assigned to it (shell/dotenv semantics). */
+  entries: ParsedDotEnvEntry[];
+  /** Names that don't match the canonical `^[A-Z][A-Z0-9_]*$` pattern (src/core/naming.ts) — never imported, their line(s) left untouched. */
+  invalidNames: string[];
+  /** Valid names assigned more than once; every occurrence is still removed on migration (only the last value is imported). */
+  duplicateNames: string[];
+}
+
+interface ScannedAssignment {
+  name: string;
+  value: string;
+  valid: boolean;
+  startIdx: number;
+  /** Inclusive. */
+  endIdx: number;
+}
+
+function detectEol(content: string): '\r\n' | '\n' {
+  return content.includes('\r\n') ? '\r\n' : '\n';
+}
+
+function findManagedBlock(lines: string[]): { beginIdx: number; endIdx: number } | undefined {
+  const beginIdx = lines.findIndex((l) => l === BEGIN_MARKER);
+  if (beginIdx === -1) return undefined;
+  const endIdx = lines.findIndex((l, i) => l === END_MARKER && i > beginIdx);
+  if (endIdx === -1) return undefined;
+  return { beginIdx, endIdx };
+}
+
+const ASSIGNMENT = /^(?:export\s+)?([^\s=]+)=(.*)$/;
+
+/**
+ * Scans `lines` outside `block` (the existing managed block, if any — those
+ * entries are already imported) for `[export] NAME=VALUE` assignments,
+ * consuming a `"`- or `'`-opened value across as many physical lines as
+ * needed until its matching unescaped closing quote (so a PEM-style
+ * multi-line value parses, and later removes, as one unit).
+ */
+function scanAssignments(lines: string[], block: { beginIdx: number; endIdx: number } | undefined): ScannedAssignment[] {
+  const assignments: ScannedAssignment[] = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (block && i >= block.beginIdx && i <= block.endIdx) {
+      i++;
+      continue;
+    }
+    const line = lines[i]!;
+    const trimmed = line.trim();
+    if (trimmed === '' || trimmed.startsWith('#')) {
+      i++;
+      continue;
+    }
+    const match = ASSIGNMENT.exec(trimmed);
+    if (!match) {
+      i++;
+      continue;
+    }
+    const name = match[1]!;
+    const rest = match[2]!;
+    const quote = rest[0];
+
+    if (quote === '"' || quote === "'") {
+      // Scan forward (joining physical lines with \n) for the matching unescaped closing quote.
+      let joined = rest.slice(1);
+      let endIdx = i;
+      let closed = false;
+      for (;;) {
+        const closeIdx = findUnescapedQuote(joined, quote);
+        if (closeIdx !== -1) {
+          joined = joined.slice(0, closeIdx);
+          closed = true;
+          break;
+        }
+        endIdx++;
+        if (endIdx >= lines.length || (block && endIdx >= block.beginIdx && endIdx <= block.endIdx)) break;
+        joined += `\n${lines[endIdx]}`;
+      }
+      assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), startIdx: i, endIdx: closed ? endIdx : i });
+      i = (closed ? endIdx : i) + 1;
+      continue;
+    }
+
+    assignments.push({ name, value: rest.trim(), valid: NAME_PATTERN.test(name), startIdx: i, endIdx: i });
+    i++;
+  }
+  return assignments;
+}
+
+/** Index of the first `quote` character in `text` not preceded by a backslash, or -1. */
+function findUnescapedQuote(text: string, quote: string): number {
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === quote && text[i - 1] !== '\\') return i;
+  }
+  return -1;
+}
+
+/** Parses a plain `.env` file's content into importable entries (D4.3). Never throws on malformed input — unparseable lines are simply skipped. */
+export function parseDotEnv(content: string): ParseDotEnvResult {
+  const eol = detectEol(content);
+  const lines = content.length === 0 ? [] : content.split(eol);
+  const block = findManagedBlock(lines);
+  const assignments = scanAssignments(lines, block);
+
+  const order: string[] = [];
+  const values = new Map<string, string>();
+  const invalidSeen = new Set<string>();
+  const duplicateSeen = new Set<string>();
+
+  for (const a of assignments) {
+    if (!a.valid) {
+      invalidSeen.add(a.name);
+      continue;
+    }
+    if (values.has(a.name)) duplicateSeen.add(a.name);
+    else order.push(a.name);
+    values.set(a.name, a.value);
+  }
+
+  return {
+    entries: order.map((name) => ({ name, value: values.get(name)! })),
+    invalidNames: [...invalidSeen],
+    duplicateNames: [...duplicateSeen],
+  };
+}
+
+/**
+ * Removes every raw assignment line for each name in `names` (every
+ * occurrence, per the duplicate-key decision above), preserving every other
+ * line byte-identical — including the file's EOL style and whether it ends
+ * with a trailing newline. When `opts.comment` is given, the first removed
+ * line's position is replaced with that single comment line instead of being
+ * elided entirely; omit it to remove silently (the `env` depository case,
+ * where the managed block itself already documents the move).
+ */
+export function removeDotEnvEntries(content: string, names: string[], opts: { comment?: string } = {}): string {
+  const eol = detectEol(content);
+  const lines = content.length === 0 ? [] : content.split(eol);
+  const block = findManagedBlock(lines);
+  const assignments = scanAssignments(lines, block);
+
+  const targets = new Set(names);
+  const toRemove = assignments.filter((a) => a.valid && targets.has(a.name));
+  if (toRemove.length === 0) return content;
+
+  const removedLineIdx = new Set<number>();
+  for (const a of toRemove) {
+    for (let idx = a.startIdx; idx <= a.endIdx; idx++) removedLineIdx.add(idx);
+  }
+  const firstRemovedIdx = Math.min(...toRemove.map((a) => a.startIdx));
+
+  const newLines: string[] = [];
+  for (let idx = 0; idx < lines.length; idx++) {
+    if (!removedLineIdx.has(idx)) {
+      newLines.push(lines[idx]!);
+      continue;
+    }
+    if (idx === firstRemovedIdx && opts.comment) newLines.push(opts.comment);
+  }
+
+  return newLines.join(eol);
+}
