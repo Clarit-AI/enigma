@@ -5,8 +5,8 @@ describe('parseDotEnv', () => {
   it('parses a simple NAME=value file', () => {
     const result = parseDotEnv('OPENAI_API_KEY=sk-abc\nGITHUB_TOKEN=ghp-xyz\n');
     expect(result.entries).toEqual([
-      { name: 'OPENAI_API_KEY', value: 'sk-abc' },
-      { name: 'GITHUB_TOKEN', value: 'ghp-xyz' },
+      { name: 'OPENAI_API_KEY', value: 'sk-abc', ambiguous: false },
+      { name: 'GITHUB_TOKEN', value: 'ghp-xyz', ambiguous: false },
     ]);
     expect(result.invalidNames).toEqual([]);
     expect(result.duplicateNames).toEqual([]);
@@ -14,49 +14,49 @@ describe('parseDotEnv', () => {
 
   it('skips blank lines and comments', () => {
     const result = parseDotEnv('# a comment\n\nOPENAI_API_KEY=sk-abc\n  # indented comment\n');
-    expect(result.entries).toEqual([{ name: 'OPENAI_API_KEY', value: 'sk-abc' }]);
+    expect(result.entries).toEqual([{ name: 'OPENAI_API_KEY', value: 'sk-abc', ambiguous: false }]);
   });
 
   it('strips an "export " prefix, treating it identically to a bare assignment', () => {
     const result = parseDotEnv('export OPENAI_API_KEY=sk-abc\n');
-    expect(result.entries).toEqual([{ name: 'OPENAI_API_KEY', value: 'sk-abc' }]);
+    expect(result.entries).toEqual([{ name: 'OPENAI_API_KEY', value: 'sk-abc', ambiguous: false }]);
   });
 
   it('duplicate key: last value wins, and the name is reported as a duplicate', () => {
     const result = parseDotEnv('OPENAI_API_KEY=first\nOPENAI_API_KEY=second\n');
-    expect(result.entries).toEqual([{ name: 'OPENAI_API_KEY', value: 'second' }]);
+    expect(result.entries).toEqual([{ name: 'OPENAI_API_KEY', value: 'second', ambiguous: false }]);
     expect(result.duplicateNames).toEqual(['OPENAI_API_KEY']);
   });
 
   it('a name that does not match ^[A-Z][A-Z0-9_]*$ is skipped and reported as invalid, not imported', () => {
     const result = parseDotEnv('lower_case=value\nOPENAI_API_KEY=sk-abc\n123_BAD=x\n');
-    expect(result.entries).toEqual([{ name: 'OPENAI_API_KEY', value: 'sk-abc' }]);
+    expect(result.entries).toEqual([{ name: 'OPENAI_API_KEY', value: 'sk-abc', ambiguous: false }]);
     expect(result.invalidNames).toEqual(['lower_case', '123_BAD']);
   });
 
   it('single-line double-quoted value is unwrapped', () => {
     const result = parseDotEnv('MESSAGE="hello world"\n');
-    expect(result.entries).toEqual([{ name: 'MESSAGE', value: 'hello world' }]);
+    expect(result.entries).toEqual([{ name: 'MESSAGE', value: 'hello world', ambiguous: false }]);
   });
 
   it('single-line single-quoted value is unwrapped', () => {
     const result = parseDotEnv("MESSAGE='hello world'\n");
-    expect(result.entries).toEqual([{ name: 'MESSAGE', value: 'hello world' }]);
+    expect(result.entries).toEqual([{ name: 'MESSAGE', value: 'hello world', ambiguous: false }]);
   });
 
   it('a multi-line double-quoted value (e.g. a PEM key) parses as one entry', () => {
     const content = 'PRIVATE_KEY="-----BEGIN KEY-----\nline1\nline2\n-----END KEY-----"\nOTHER=1\n';
     const result = parseDotEnv(content);
     expect(result.entries).toEqual([
-      { name: 'PRIVATE_KEY', value: '-----BEGIN KEY-----\nline1\nline2\n-----END KEY-----' },
-      { name: 'OTHER', value: '1' },
+      { name: 'PRIVATE_KEY', value: '-----BEGIN KEY-----\nline1\nline2\n-----END KEY-----', ambiguous: false },
+      { name: 'OTHER', value: '1', ambiguous: false },
     ]);
   });
 
   it('ignores entries already inside an existing managed block', () => {
     const content = 'RAW_KEY=plain\n# enigma:begin\nALREADY_MANAGED=x\n# enigma:end\n';
     const result = parseDotEnv(content);
-    expect(result.entries).toEqual([{ name: 'RAW_KEY', value: 'plain' }]);
+    expect(result.entries).toEqual([{ name: 'RAW_KEY', value: 'plain', ambiguous: false }]);
   });
 
   it('returns no entries for an empty file', () => {
@@ -67,10 +67,47 @@ describe('parseDotEnv', () => {
     const content = 'BROKEN="never closed\nOPENAI_API_KEY=sk-abc\nGITHUB_TOKEN=ghp-xyz\n';
     const result = parseDotEnv(content);
     expect(result.entries).toEqual([
-      { name: 'BROKEN', value: '"never closed' },
-      { name: 'OPENAI_API_KEY', value: 'sk-abc' },
-      { name: 'GITHUB_TOKEN', value: 'ghp-xyz' },
+      { name: 'BROKEN', value: '"never closed', ambiguous: false },
+      { name: 'OPENAI_API_KEY', value: 'sk-abc', ambiguous: false },
+      { name: 'GITHUB_TOKEN', value: 'ghp-xyz', ambiguous: false },
     ]);
+  });
+
+  describe('ambiguous inline-comment-like values (Issue #13 review, round 2, A2)', () => {
+    it('an unquoted value with " #" is flagged ambiguous, refusing to guess whether it is a comment or part of the secret', () => {
+      const result = parseDotEnv('PORT=3000 # dev port\n');
+      expect(result.entries).toEqual([{ name: 'PORT', value: '3000 # dev port', ambiguous: true }]);
+    });
+
+    it('a passphrase-shaped value with " #" is flagged ambiguous too, rather than being silently truncated', () => {
+      const result = parseDotEnv('PASSPHRASE=hunter2 #1\n');
+      expect(result.entries).toEqual([{ name: 'PASSPHRASE', value: 'hunter2 #1', ambiguous: true }]);
+    });
+
+    it('a quoted value containing "#" is never ambiguous, whatever it contains', () => {
+      const result = parseDotEnv('TOKEN="abc#def"\n');
+      expect(result.entries).toEqual([{ name: 'TOKEN', value: 'abc#def', ambiguous: false }]);
+    });
+
+    it('a quoted value containing " #" (space then hash) is still unambiguous — the quote already delimits it', () => {
+      const result = parseDotEnv('TOKEN="abc # def"\n');
+      expect(result.entries).toEqual([{ name: 'TOKEN', value: 'abc # def', ambiguous: false }]);
+    });
+
+    it('a plain unquoted value with no "#" at all is unaffected', () => {
+      const result = parseDotEnv('OPENAI_API_KEY=sk-abc\n');
+      expect(result.entries).toEqual([{ name: 'OPENAI_API_KEY', value: 'sk-abc', ambiguous: false }]);
+    });
+
+    it('a "#" with no preceding space is not treated as ambiguous (no plausible comment reading)', () => {
+      const result = parseDotEnv('TOKEN=abc#def\n');
+      expect(result.entries).toEqual([{ name: 'TOKEN', value: 'abc#def', ambiguous: false }]);
+    });
+
+    it('the duplicate-key last-value-wins rule also carries the LAST occurrence\'s ambiguity flag', () => {
+      const result = parseDotEnv('PORT=3000\nPORT=8080 # overridden\n');
+      expect(result.entries).toEqual([{ name: 'PORT', value: '8080 # overridden', ambiguous: true }]);
+    });
   });
 });
 

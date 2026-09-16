@@ -10,6 +10,15 @@ const END_MARKER = '# enigma:end';
 export interface ParsedDotEnvEntry {
   name: string;
   value: string;
+  /**
+   * True when an UNQUOTED value contains a space followed by `#` (e.g.
+   * `PORT=3000 # dev port`) — ambiguous whether the `#` starts a trailing
+   * comment or is itself part of the secret (e.g. a passphrase like
+   * `hunter2 #1`). Never auto-resolved either way (Issue #13 review, round
+   * 2, A2): the caller must refuse the entry rather than guess. A quoted
+   * value is never ambiguous — its boundary is already explicit.
+   */
+  ambiguous: boolean;
 }
 
 export interface ParseDotEnvResult {
@@ -25,9 +34,15 @@ interface ScannedAssignment {
   name: string;
   value: string;
   valid: boolean;
+  ambiguous: boolean;
   startIdx: number;
   /** Inclusive. */
   endIdx: number;
+}
+
+/** An unquoted raw remainder is ambiguous when it contains a space immediately before `#` — the classic inline-comment signal most dotenv readers use, so we must not guess which side of it the user meant. */
+function isAmbiguousUnquoted(raw: string): boolean {
+  return / #/.test(raw);
 }
 
 function detectEol(content: string): '\r\n' | '\n' {
@@ -95,16 +110,31 @@ function scanAssignments(lines: string[], block: { beginIdx: number; endIdx: num
         joined += `\n${lines[endIdx]}`;
       }
       if (closed) {
-        assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), startIdx: i, endIdx });
+        // A closed quote's boundary is explicit — never ambiguous, whatever it contains.
+        assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), ambiguous: false, startIdx: i, endIdx });
         i = endIdx + 1;
       } else {
-        assignments.push({ name, value: rest.trim(), valid: NAME_PATTERN.test(name), startIdx: i, endIdx: i });
+        assignments.push({
+          name,
+          value: rest.trim(),
+          valid: NAME_PATTERN.test(name),
+          ambiguous: isAmbiguousUnquoted(rest),
+          startIdx: i,
+          endIdx: i,
+        });
         i++;
       }
       continue;
     }
 
-    assignments.push({ name, value: rest.trim(), valid: NAME_PATTERN.test(name), startIdx: i, endIdx: i });
+    assignments.push({
+      name,
+      value: rest.trim(),
+      valid: NAME_PATTERN.test(name),
+      ambiguous: isAmbiguousUnquoted(rest),
+      startIdx: i,
+      endIdx: i,
+    });
     i++;
   }
   return assignments;
@@ -127,6 +157,7 @@ export function parseDotEnv(content: string): ParseDotEnvResult {
 
   const order: string[] = [];
   const values = new Map<string, string>();
+  const ambiguousFlags = new Map<string, boolean>();
   const invalidSeen = new Set<string>();
   const duplicateSeen = new Set<string>();
 
@@ -138,10 +169,11 @@ export function parseDotEnv(content: string): ParseDotEnvResult {
     if (values.has(a.name)) duplicateSeen.add(a.name);
     else order.push(a.name);
     values.set(a.name, a.value);
+    ambiguousFlags.set(a.name, a.ambiguous);
   }
 
   return {
-    entries: order.map((name) => ({ name, value: values.get(name)! })),
+    entries: order.map((name) => ({ name, value: values.get(name)!, ambiguous: ambiguousFlags.get(name)! })),
     invalidNames: [...invalidSeen],
     duplicateNames: [...duplicateSeen],
   };
