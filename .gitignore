@@ -1,0 +1,26 @@
+# graft's local graph cache — regenerable, not committed (run `graft build`).
+/graft/
+
+# /dev workflow local state
+/.agent/
+/.dev.json
+/prototypes/
+/PRD-draft.md
+
+# Claude Code local overrides
+.claude/settings.local.json
+
+# Node
+node_modules/
+coverage/
+*.tsbuildinfo
+.eslintcache
+npm-debug.log*
+
+# Secrets — Enigma never commits these
+.env
+.env.*
+!.env.example
+
+# OS
+.DS_Store
