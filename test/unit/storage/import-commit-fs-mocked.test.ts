@@ -13,14 +13,22 @@ let readFileOverride: ((path: unknown) => string | undefined) | undefined;
 /**
  * `setSecret` itself writes index.json (and, for 'encrypted', secrets.enc)
  * through the SAME temp-file-plus-rename pattern this test is probing on
- * the .env rewrite — so throwing on every renameSync/unlinkSync call also
- * breaks the depository write before it ever reaches the .env rewrite.
- * Scoped to the exact target path under test.
+ * the .env rewrite — so throwing on every renameSync/unlinkSync/writeFileSync
+ * call also breaks the depository write before it ever reaches the .env
+ * rewrite. Scoped to the exact target path (or, for the temp file itself,
+ * its known prefix) under test.
  */
 let renameShouldThrowForTarget: string | undefined;
 let unlinkShouldThrow = false;
+/** Set to the .env path being tested: matches only ITS OWN `<path>.<hex>.tmp` write, never index.json/secrets.enc's own temp files. */
+let writeShouldThrowForEnvPath: string | undefined;
 const renameCalls: Array<[unknown, unknown]> = [];
 const unlinkCalls: unknown[] = [];
+const writeCalls: unknown[] = [];
+
+function isOwnTempFile(path: unknown, envPath: string): boolean {
+  return typeof path === 'string' && path.startsWith(`${envPath}.`) && path.endsWith('.tmp');
+}
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof import('node:fs')>();
@@ -30,6 +38,13 @@ vi.mock('node:fs', async (importOriginal) => {
       const override = readFileOverride?.(path);
       if (override !== undefined) return override;
       return actual.readFileSync(path as never, opts as never);
+    },
+    writeFileSync: (path: unknown, data: unknown, opts: unknown) => {
+      writeCalls.push(path);
+      if (writeShouldThrowForEnvPath !== undefined && isOwnTempFile(path, writeShouldThrowForEnvPath)) {
+        throw new Error('simulated disk full');
+      }
+      return actual.writeFileSync(path as never, data as never, opts as never);
     },
     renameSync: (from: unknown, to: unknown) => {
       renameCalls.push([from, to]);
@@ -69,8 +84,10 @@ describe('commitImport (fs-mocked edge cases, Issue #13 review round 2)', () => 
     readFileOverride = undefined;
     renameShouldThrowForTarget = undefined;
     unlinkShouldThrow = false;
+    writeShouldThrowForEnvPath = undefined;
     renameCalls.length = 0;
     unlinkCalls.length = 0;
+    writeCalls.length = 0;
   });
 
   afterEach(() => {
@@ -81,6 +98,7 @@ describe('commitImport (fs-mocked edge cases, Issue #13 review round 2)', () => 
     readFileOverride = undefined;
     renameShouldThrowForTarget = undefined;
     unlinkShouldThrow = false;
+    writeShouldThrowForEnvPath = undefined;
   });
 
   describe('B1: parse/rewrite interleaving', () => {
@@ -176,6 +194,29 @@ describe('commitImport (fs-mocked edge cases, Issue #13 review round 2)', () => 
       expect(result.fileRewritten).toBe(false);
       expect(result.warnings.some((w) => w.includes('Failed to rewrite') && w.includes('simulated crash before rename'))).toBe(true);
       expect(realReadFileSync(envFilePath, 'utf8')).toBe(original);
+    });
+
+    it('a failure during the initial temp-file write (before rename is ever reached) never leaves the original file corrupted, and never throws (Issue #13 review, round 4, QA advisory b)', async () => {
+      const original = '# header\nKEEP_ME=1\nOPENAI_API_KEY=sk-abc\n';
+      writeFileSync(envFilePath, original);
+      writeShouldThrowForEnvPath = envFilePath;
+
+      const result = await commitImport({
+        entries: [entry('OPENAI_API_KEY', 'sk-abc')],
+        depository: 'encrypted',
+        scope: 'project',
+        cwd: tmpProject,
+        projectPath: tmpProject,
+        envFilePath,
+        actor: 'cli',
+      });
+
+      expect(result.succeeded).toEqual(['OPENAI_API_KEY']);
+      expect(result.fileRewritten).toBe(false);
+      expect(result.warnings.some((w) => w.includes('Failed to rewrite') && w.includes('simulated disk full'))).toBe(true);
+      expect(realReadFileSync(envFilePath, 'utf8')).toBe(original);
+      // The temp write never landed anything to clean up — no rename was ever reached, so no rename call happened for this path.
+      expect(renameCalls.some(([, to]) => to === envFilePath)).toBe(false);
     });
 
     describe('item 2: temp file cleanup (Issue #13 review, round 3)', () => {
