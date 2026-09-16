@@ -14,13 +14,14 @@
 // and running it, or reading through an interpreter (python/node/perl) are
 // not chased, and cannot be without turning this into a shell parser. Nor is
 // a rename-then-read through the small non-reading-verb allowlist below
-// (`mv .env safe && cat safe`): `mv`/`cp`/etc. are allowed on a `.env` path
-// because they're lifecycle operations, not reads, but nothing here tracks a
-// file's identity across two separate commands, so the renamed copy's new
-// name is just an ordinary path to every later rule. (`cp` and encode/decode
-// commands like `base64`/`tar` are NOT in that gap — they aren't in the
-// allowlist, so `cp .env x` and `base64 .env` are both still denied on the
-// `.env` argument itself, before a second command ever runs.) The
+// (`mv .env safe && cat safe`): `mv`/`rm`/`touch`/etc. (the exact set is
+// NON_READING_BASH_VERBS below) are allowed on a `.env` path because they're
+// lifecycle operations, not reads, but nothing here tracks a file's identity
+// across two separate commands, so the renamed copy's new name is just an
+// ordinary path to every later rule. (`cp` and encode/decode commands like
+// `base64`/`tar` are NOT in that gap — they aren't in the allowlist, so
+// `cp .env x` and `base64 .env` are both still denied on the `.env`
+// argument itself, before a second command ever runs.) The
 // PostToolUse tripwire is the second layer, but only for secrets Enigma
 // already tracks, and only when the value is actually printed somewhere in
 // tool output — a `source`/`.`-style load into the current shell surfaces in
