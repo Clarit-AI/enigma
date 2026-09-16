@@ -11,9 +11,16 @@
 // Shell word-splitting (`${IFS}`) and ANSI-C quoting (`$'...'`) are normalized
 // before matching because they're cheap and the first things anyone probes,
 // but variable indirection, `eval` of an assembled string, writing a script
-// and running it, reading through an interpreter (python/node/perl), or an
-// encode/decode round-trip (base64, a copy-then-read via `cp .env x`) are not
-// chased, and cannot be without turning this into a shell parser. The
+// and running it, or reading through an interpreter (python/node/perl) are
+// not chased, and cannot be without turning this into a shell parser. Nor is
+// a rename-then-read through the small non-reading-verb allowlist below
+// (`mv .env safe && cat safe`): `mv`/`cp`/etc. are allowed on a `.env` path
+// because they're lifecycle operations, not reads, but nothing here tracks a
+// file's identity across two separate commands, so the renamed copy's new
+// name is just an ordinary path to every later rule. (`cp` and encode/decode
+// commands like `base64`/`tar` are NOT in that gap — they aren't in the
+// allowlist, so `cp .env x` and `base64 .env` are both still denied on the
+// `.env` argument itself, before a second command ever runs.) The
 // PostToolUse tripwire is the second layer, but only for secrets Enigma
 // already tracks, and only when the value is actually printed somewhere in
 // tool output — a `source`/`.`-style load into the current shell surfaces in
@@ -108,9 +115,18 @@ function decodeAnsiCEscapes(body: string): string {
  * extraction runs on the result) so every rule below benefits without each
  * one re-implementing this:
  *
- * - `${IFS}`/bare `$IFS` — IFS defaults to space/tab/newline, so unquoted
- *   `cat${IFS}.env` word-splits into `cat .env` exactly like a literal space
- *   would. Replaced with a literal space.
+ * - `${IFS}`/bare `$IFS` — IFS defaults to space/tab/newline, so in real bash
+ *   an UNQUOTED `cat${IFS}.env` word-splits into `cat .env` exactly like a
+ *   literal space would. This function has no quote tracking at all, though
+ *   — it runs over the whole command text regardless of single/double quotes
+ *   — so it also rewrites `${IFS}` inside a single-quoted string, where bash
+ *   itself would never expand it. That's a deliberate, accepted trade: the
+ *   failure direction is an occasional denial of a quoted literal that
+ *   merely looks like `cat${IFS}.env` once collapsed (e.g.
+ *   `echo '${IFS}.env'`), never a bypass. Tracking quote context correctly
+ *   means re-implementing shell quoting, which trades a working guard for
+ *   one that can fail open instead of closed — see `test/unit/hooks/
+ *   read-guard.test.ts` for the pinned false-positive case.
  * - `$'...'` ANSI-C quoting — decoded via `decodeAnsiCEscapes`, then
  *   re-wrapped in double quotes (escaping `\` and `"` in the decoded text)
  *   so `tokenize`'s existing quote handling treats it as one word, the same

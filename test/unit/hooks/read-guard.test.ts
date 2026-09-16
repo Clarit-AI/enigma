@@ -148,6 +148,23 @@ describe('PreToolUse read-guard', () => {
     ])('%s -> allowed', (_label, input) => {
       expect(isDenied(input)).toBe(false);
     });
+
+    it(
+      'KNOWN AND ACCEPTED gap: mv .env safe && cat safe is allowed end to end — mv is a lifecycle operation ' +
+        "(correctly allowed on .env itself), but nothing here tracks a file's identity across two separate " +
+        "commands, so the renamed copy's new name is just an ordinary path to the second command. Not chased: " +
+        'nobody renames a .env and reads it back by accident, so this is deliberate evasion (see the top-of-file comment).',
+      () => {
+        expect(isDenied(bash('mv .env safe'))).toBe(false);
+        expect(isDenied(bash('cat safe'))).toBe(false);
+      },
+    );
+
+    it('cp and encode/decode commands are NOT part of that gap: they deny on the .env argument directly, before any second command runs', () => {
+      expect(isDenied(bash('cp .env x'))).toBe(true);
+      expect(isDenied(bash('base64 .env'))).toBe(true);
+      expect(isDenied(bash('tar cf t.tar .env'))).toBe(true);
+    });
   });
 
   describe('command substitution is unwrapped (fix batch #2/#3)', () => {
@@ -204,6 +221,21 @@ describe('PreToolUse read-guard', () => {
 
     it('normalizing $\'...\' does not affect an ordinary quoted string', () => {
       expect(isDenied(bash(String.raw`echo $'hello world'`))).toBe(false);
+    });
+
+    it(
+      "KNOWN AND ACCEPTED false positive: echo '${IFS}.env' denies even though bash never expands ${IFS} inside " +
+        'single quotes — normalizeShellEscapes has no quote tracking (round-3 review), and adding it would mean ' +
+        're-implementing shell quoting, trading a guard that fails closed for a parser that can fail open. Do not ' +
+        '"fix" this by adding quote awareness; see the comment on normalizeShellEscapes.',
+      () => {
+        expect(isDenied(bash("echo '${IFS}.env'"))).toBe(true);
+      },
+    );
+
+    it('the false positive above is narrow: it only fires when the quoted text collapses to exactly a dotenv-looking token, not on ordinary surrounding text', () => {
+      expect(isDenied(bash("echo 'write ${IFS}.env to docs'"))).toBe(false);
+      expect(isDenied(bash(String.raw`grep -r '\$IFS' src/`))).toBe(false);
     });
   });
 
