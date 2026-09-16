@@ -1417,7 +1417,7 @@ function renderOutcome(results, cwd) {
   const failed = results.filter((r) => !r.ok);
   const succeeded = results.filter((r) => r.ok);
   const lines = [
-    ...failed.map((r) => `${r.name}: failed (${r.errorCode ?? "E_UNKNOWN"})`),
+    ...failed.map((r) => r.reason ? `${r.name}: failed (${r.errorCode ?? "E_UNKNOWN"}) \u2014 ${r.reason}` : `${r.name}: failed (${r.errorCode ?? "E_UNKNOWN"})`),
     ...renderStoredLines(succeeded.map((r) => r.name), cwd)
   ];
   return { text: lines.join("\n"), isError: succeeded.length === 0 };
@@ -2345,7 +2345,17 @@ async function handleImportFormPost(req, res, id) {
     createVault: submission.confirmCreateVault
   });
   const results = [
-    ...commitResult.failed.map((f) => ({ name: f.name, ok: false, errorCode: f.errorCode })),
+    // reason is populated ONLY for the ambiguity refusal — static structural text computed
+    // by the parser before any value is looked at (see RequestNameResult's doc comment).
+    // Never widen this to other error codes, whose messages aren't guaranteed value-free.
+    ...commitResult.failed.map(
+      (f) => ({
+        name: f.name,
+        ok: false,
+        errorCode: f.errorCode,
+        reason: f.errorCode === "E_VALUE_AMBIGUOUS" ? f.message : void 0
+      })
+    ),
     ...commitResult.notAttempted.map((name) => ({ name, ok: false, errorCode: "E_NOT_ATTEMPTED" })),
     ...commitResult.succeeded.map((name) => ({ name, ok: true }))
   ];
@@ -2363,7 +2373,7 @@ async function handleImportFormPost(req, res, id) {
     results.map((r) => ({
       NAME: r.name,
       STATUS_CLASS: r.ok ? "ok" : "fail",
-      STATUS_TEXT: r.ok ? "stored" : `failed (${r.errorCode})`
+      STATUS_TEXT: r.ok ? "stored" : r.reason ? `failed (${r.errorCode}): ${r.reason}` : `failed (${r.errorCode})`
     }))
   );
   sendHtml(res, 200, html);
@@ -4443,6 +4453,7 @@ async function runBrowserFlow(entries, opts) {
   try {
     await RequestStore.waitForFulfilled(record.id);
   } catch {
+    await handle.close();
     return report(
       {
         imported: [],
@@ -4458,13 +4469,14 @@ async function runBrowserFlow(entries, opts) {
       "Import link expired before it was completed."
     );
   }
+  await handle.close();
   const finalRecord = RequestStore.get(record.id);
   const results = finalRecord?.results ?? [];
   const outcome = finalRecord?.importOutcome;
   return report(
     {
       imported: results.filter((r) => r.ok).map((r) => r.name),
-      failed: results.filter((r) => !r.ok && r.errorCode !== "E_NOT_ATTEMPTED").map((r) => ({ name: r.name, errorCode: r.errorCode ?? "E_UNKNOWN" })),
+      failed: results.filter((r) => !r.ok && r.errorCode !== "E_NOT_ATTEMPTED").map((r) => ({ name: r.name, errorCode: r.errorCode ?? "E_UNKNOWN", message: r.reason })),
       notAttempted: results.filter((r) => r.errorCode === "E_NOT_ATTEMPTED").map((r) => r.name),
       skippedInvalid: opts.skippedInvalid,
       skippedMismatch: outcome?.skippedMismatch ?? [],

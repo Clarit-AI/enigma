@@ -43733,7 +43733,7 @@ function renderOutcome(results, cwd) {
   const failed = results.filter((r) => !r.ok);
   const succeeded = results.filter((r) => r.ok);
   const lines = [
-    ...failed.map((r) => `${r.name}: failed (${r.errorCode ?? "E_UNKNOWN"})`),
+    ...failed.map((r) => r.reason ? `${r.name}: failed (${r.errorCode ?? "E_UNKNOWN"}) \u2014 ${r.reason}` : `${r.name}: failed (${r.errorCode ?? "E_UNKNOWN"})`),
     ...renderStoredLines(succeeded.map((r) => r.name), cwd)
   ];
   return { text: lines.join("\n"), isError: succeeded.length === 0 };
@@ -44687,7 +44687,17 @@ async function handleImportFormPost(req, res, id) {
     createVault: submission.confirmCreateVault
   });
   const results = [
-    ...commitResult.failed.map((f) => ({ name: f.name, ok: false, errorCode: f.errorCode })),
+    // reason is populated ONLY for the ambiguity refusal — static structural text computed
+    // by the parser before any value is looked at (see RequestNameResult's doc comment).
+    // Never widen this to other error codes, whose messages aren't guaranteed value-free.
+    ...commitResult.failed.map(
+      (f) => ({
+        name: f.name,
+        ok: false,
+        errorCode: f.errorCode,
+        reason: f.errorCode === "E_VALUE_AMBIGUOUS" ? f.message : void 0
+      })
+    ),
     ...commitResult.notAttempted.map((name) => ({ name, ok: false, errorCode: "E_NOT_ATTEMPTED" })),
     ...commitResult.succeeded.map((name) => ({ name, ok: true }))
   ];
@@ -44705,7 +44715,7 @@ async function handleImportFormPost(req, res, id) {
     results.map((r) => ({
       NAME: r.name,
       STATUS_CLASS: r.ok ? "ok" : "fail",
-      STATUS_TEXT: r.ok ? "stored" : `failed (${r.errorCode})`
+      STATUS_TEXT: r.ok ? "stored" : r.reason ? `failed (${r.errorCode}): ${r.reason}` : `failed (${r.errorCode})`
     }))
   );
   sendHtml(res, 200, html);
