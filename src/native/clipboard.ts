@@ -37,16 +37,19 @@ async function readClipboard(): Promise<string> {
 /**
  * Clears the clipboard 60s after a reveal, but only if it still holds the
  * revealed value — if the user copied something else meanwhile, it is left
- * alone. Fire-and-forget: never rejects, never surfaces the value.
+ * alone. Fire-and-forget: never rejects, never surfaces the value. `unref`ed
+ * so a short-lived caller (e.g. a CLI command) can exit right after printing
+ * the status string instead of the event loop staying alive for 60s.
  */
 function scheduleClear(value: string): void {
-  setTimeout(() => {
+  const timer = setTimeout(() => {
     readClipboard()
       .then((current) => (current === value ? writeClipboard('') : undefined))
       .catch(() => {
         // best-effort clear; a failure here must never surface the value
       });
   }, CLEAR_DELAY_MS);
+  timer.unref();
 }
 
 /**

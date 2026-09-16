@@ -110,6 +110,29 @@ describe('clipboardReveal', () => {
     expect(spawnMock.mock.calls[1]![0]).toBe('pbpaste');
   });
 
+  it('unrefs the 60s clear timer so a short-lived caller is not kept alive after it returns', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
+    const children: FakeChild[] = [];
+    mockClipboardBinaries(children);
+    vi.useRealTimers(); // hasRef()/unref() need a real Node Timeout, not the fake-timer stand-in
+
+    const realSetTimeout = globalThis.setTimeout;
+    let capturedTimer: ReturnType<typeof setTimeout> | undefined;
+    globalThis.setTimeout = ((fn: (...args: unknown[]) => void, ms?: number, ...args: unknown[]) => {
+      capturedTimer = realSetTimeout(fn, ms, ...args);
+      return capturedTimer;
+    }) as typeof setTimeout;
+
+    try {
+      await clipboardReveal('OPENAI_API_KEY', { scope: 'global' });
+      expect(capturedTimer).toBeDefined();
+      expect(capturedTimer!.hasRef()).toBe(false);
+    } finally {
+      globalThis.setTimeout = realSetTimeout;
+      if (capturedTimer) clearTimeout(capturedTimer);
+    }
+  });
+
   it('audits the disclosure with exactly one reveal line, no stray read line, and never the value', async () => {
     await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
     const children: FakeChild[] = [];
