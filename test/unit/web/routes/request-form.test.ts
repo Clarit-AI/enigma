@@ -29,6 +29,7 @@ vi.mock('node:child_process', () => ({
 const { startServer, stopServer } = await import('../../../../src/web/server.js');
 const { RequestStore } = await import('../../../../src/request/store.js');
 const { setSecret } = await import('../../../../src/storage/manager.js');
+const { registerActiveTunnel } = await import('../../../../src/remote/index.js');
 
 describe('GET/POST /r/:id', () => {
   let tmpHome: string;
@@ -127,6 +128,46 @@ describe('GET/POST /r/:id', () => {
     expect(RequestStore.get(record.id)?.results).toEqual([
       { name: 'OPENAI_API_KEY', ok: false, errorCode: 'E_WRITE_FAILED' },
     ]);
+  });
+
+  it('GET shows no QR code when no tunnel is active for this request (Issue #12 AC4)', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    const resp = await fetch(`${origin}/r/${record.id}`);
+    const html = await resp.text();
+    expect(html).not.toContain('<svg');
+  });
+
+  it('GET shows a QR code of the active tunnel URL when one is up for this request (Issue #12 AC4)', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    registerActiveTunnel(record.id, {
+      tunnel: {
+        url: 'https://qr-test.trycloudflare.com',
+        binary: 'cloudflared',
+        stop: () => {},
+        waitForUnexpectedExit: () => new Promise(() => {}),
+      },
+    });
+
+    const resp = await fetch(`${origin}/r/${record.id}`);
+    const html = await resp.text();
+    expect(html).toContain('<svg');
+    expect(html).toContain('viewBox=');
+
+    // The QR encodes the URL as geometry, not literal text — confirm it's
+    // actually derived from this request's tunnel URL (and not some fixed
+    // placeholder) by checking a different active URL renders differently.
+    const otherRecord = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    registerActiveTunnel(otherRecord.id, {
+      tunnel: {
+        url: 'https://a-totally-different-host.trycloudflare.com',
+        binary: 'cloudflared',
+        stop: () => {},
+        waitForUnexpectedExit: () => new Promise(() => {}),
+      },
+    });
+    const otherHtml = await (await fetch(`${origin}/r/${otherRecord.id}`)).text();
+    const svgOf = (page: string): string => page.slice(page.indexOf('<svg'), page.indexOf('</svg>') + '</svg>'.length);
+    expect(svgOf(html)).not.toBe(svgOf(otherHtml));
   });
 
   it('GET shows a rotate warning when the name already exists', async () => {

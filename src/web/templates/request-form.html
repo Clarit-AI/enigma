@@ -43,6 +43,9 @@
   .error { background: #fee2e2; color: #7f1d1d; border-radius: 8px; padding: 10px; font-size: 0.85rem; margin-bottom: 12px; }
   .rotate-note { color: #ca8a04; font-size: 0.8rem; margin-top: 2px; }
   .rotate-note:empty { display: none; margin: 0; }
+  .qr-card { text-align: center; }
+  .qr-card svg { width: 180px; height: 180px; background: #ffffff; padding: 10px; border-radius: 8px; }
+  .qr-card p.muted { margin: 8px 0 0; }
 </style>
 </head>
 <body>
@@ -53,6 +56,13 @@
     <!--BLOCK:ERROR_BLOCK-->
     <div class="error">{{ERROR_MESSAGE}}</div>
     <!--/BLOCK:ERROR_BLOCK-->
+
+    <!--BLOCK:QR_BLOCK-->
+    <div class="qr-card">
+      {{RAW_QR_SVG}}
+      <p class="muted">Scan to open this request on your phone</p>
+    </div>
+    <!--/BLOCK:QR_BLOCK-->
 
     <!--BLOCK:CONFIRM_BLOCK-->
     <div class="warn">
