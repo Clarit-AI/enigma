@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { deleteSecret, hasSecret, listSecrets, resolveSecret, setSecret } from '../../src/storage/manager.js';
 import { EnigmaError } from '../../src/core/errors.js';
+import { auditLogPath } from '../../src/core/paths.js';
 
 const SENTINEL = 'sk-sentinel-value-should-never-appear';
 
@@ -121,5 +122,21 @@ describe('storage manager', () => {
     await expect(
       setSecret({ name: 'not-valid', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' }),
     ).rejects.toThrow(expect.objectContaining({ code: 'E_NAME_INVALID' }));
+  });
+
+  it('resolveSecret defaults to audit op "read" when auditOp is omitted (Issue #7)', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
+    await resolveSecret('OPENAI_API_KEY', { scope: 'global', actor: 'user' });
+
+    const lines = readFileSync(auditLogPath(), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { op: string });
+    expect(lines.at(-1)?.op).toBe('read');
+  });
+
+  it('resolveSecret records the overridden audit op when auditOp is given (Issue #7)', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
+    await resolveSecret('OPENAI_API_KEY', { scope: 'global', actor: 'user', auditOp: 'reveal' });
+
+    const lines = readFileSync(auditLogPath(), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { op: string });
+    expect(lines.at(-1)?.op).toBe('reveal');
   });
 });
