@@ -1,5 +1,5 @@
 import { EventEmitter } from 'node:events';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { promptSecretValue } from '../../../src/cli/prompt.js';
 
 const SENTINEL = 'sk-sentinel-value-should-never-appear';
@@ -92,5 +92,61 @@ describe('promptSecretValue', () => {
 
     await expect(promise).rejects.toThrow('aborted');
     expect(stdin.rawModeCalls).toEqual([true, false]);
+  });
+
+  it('throws E_NO_TTY_CONTROL before reading any input when the TTY has no setRawMode', async () => {
+    const onSpy = vi.fn();
+    const stdin = {
+      isTTY: true,
+      setEncoding() {},
+      resume() {},
+      pause() {},
+      on: onSpy,
+      removeListener() {},
+    };
+    const stderr = fakeStderr();
+
+    await expect(promptSecretValue('Enter value: ', { stdin, stderr })).rejects.toMatchObject({
+      name: 'EnigmaError',
+      code: 'E_NO_TTY_CONTROL',
+    });
+    expect(onSpy).not.toHaveBeenCalled();
+    expect(stderr.chunks.join('')).toBe('');
+  });
+
+  it('installs SIGINT/SIGTERM handlers during a raw-mode read and removes them afterwards', async () => {
+    const stdin = new FakeTtyStdin();
+    const stderr = fakeStderr();
+    const before = { SIGINT: process.listenerCount('SIGINT'), SIGTERM: process.listenerCount('SIGTERM') };
+
+    const promise = promptSecretValue('Enter value: ', { stdin, stderr });
+    expect(process.listenerCount('SIGINT')).toBe(before.SIGINT + 1);
+    expect(process.listenerCount('SIGTERM')).toBe(before.SIGTERM + 1);
+
+    for (const ch of SENTINEL) stdin.emit('data', ch);
+    stdin.emit('data', '\n');
+    await promise;
+
+    expect(process.listenerCount('SIGINT')).toBe(before.SIGINT);
+    expect(process.listenerCount('SIGTERM')).toBe(before.SIGTERM);
+  });
+
+  it('restores the terminal and re-raises SIGTERM with default disposition instead of swallowing it', async () => {
+    const stdin = new FakeTtyStdin();
+    const stderr = fakeStderr();
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    const promise = promptSecretValue('Enter value: ', { stdin, stderr });
+    for (const ch of 'partial') stdin.emit('data', ch);
+    process.emit('SIGTERM', 'SIGTERM');
+
+    expect(stdin.rawModeCalls).toEqual([true, false]);
+    expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+    expect(process.listenerCount('SIGINT')).toBe(0);
+    expect(process.listenerCount('SIGTERM')).toBe(0);
+
+    killSpy.mockRestore();
+    // The read never got a terminator, so it hangs forever; let the test finish without awaiting it.
+    void promise.catch(() => undefined);
   });
 });

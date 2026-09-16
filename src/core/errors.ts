@@ -8,7 +8,8 @@ export type EnigmaErrorCode =
   | 'E_REQUEST_USED'
   | 'E_AMBIGUOUS_SCOPE'
   | 'E_SCOPE_INVALID'
-  | 'E_INDEX_CORRUPT';
+  | 'E_INDEX_CORRUPT'
+  | 'E_NO_TTY_CONTROL';
 
 export interface EnigmaErrorOptions {
   code: EnigmaErrorCode;
