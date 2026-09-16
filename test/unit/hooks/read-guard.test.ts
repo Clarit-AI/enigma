@@ -207,10 +207,47 @@ describe('PreToolUse read-guard', () => {
       expect(updated?.glob).toBe('!.env*');
     });
 
-    it('falls back to deny when the caller already set a glob filter (cannot combine in one field)', () => {
-      const input = grep('.', tmpProject, { glob: '*.ts' });
-      expect(isDenied(input)).toBe(true);
-      expect(denialReason(input)).toContain('--glob');
+    describe('a Grep call that already set a glob filter is judged by whether that glob could reach .env (fix batch review)', () => {
+      it.each<[string, string]>([
+        ['*.ts', 'a TypeScript-only filter'],
+        ['**/*.json', 'a JSON-only filter, nested'],
+        ['src/**/*.tsx', 'a restricted, path-prefixed filter'],
+        ['*.{js,ts}', 'a brace-expanded, still non-.env filter'],
+      ])('passes through unchanged: glob "%s" (%s) cannot match a .env file', (glob) => {
+        const input = grep('.', tmpProject, { glob });
+        const result = runReadGuard(input);
+        expect(result).toBeUndefined();
+      });
+
+      it.each<[string, string]>([
+        // .env and .env.{local,production} are denied even earlier, by the
+        // generic per-field dotenv check that runs before this glob logic
+        // (their literal string already looks like a dotenv path) — still a
+        // deny, just via a different, still-accurate reason. Asserted below,
+        // separately, only for gloBs that specifically exercise the new logic.
+        ['.env', 'names .env exactly'],
+        ['.env*', 'matches every .env-family file'],
+        ['*', 'unrestricted — matches anything'],
+        ['**', 'unrestricted — matches anything, any depth'],
+        ['**/*', 'unrestricted — matches anything, any depth (explicit form)'],
+        ['.env.{local,production}', 'brace-expanded, but every alternative is a real .env file'],
+      ])('falls back to deny: glob "%s" (%s) could reach a .env file', (glob) => {
+        const input = grep('.', tmpProject, { glob });
+        expect(isDenied(input)).toBe(true);
+      });
+
+      it.each(['.env*', '*', '**', '**/*'])(
+        'glob "%s" is denied specifically via the --glob fallback reason (reaches globCouldMatchDotEnv)',
+        (glob) => {
+          const reason = denialReason(grep('.', tmpProject, { glob }));
+          expect(reason).toContain('--glob');
+        },
+      );
+
+      it('treats a bracket character class as "could match" rather than approximating it', () => {
+        const input = grep('.', tmpProject, { glob: '.env[a-z]*' });
+        expect(isDenied(input)).toBe(true);
+      });
     });
 
     it('does not rewrite a Grep targeting one specific existing non-directory file', () => {

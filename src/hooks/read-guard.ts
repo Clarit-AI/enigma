@@ -186,6 +186,73 @@ function isKnownNonDirectoryPath(pathLike: string | undefined, cwd: string): boo
   }
 }
 
+/** Representative `.env`-family basenames to probe a glob against — real
+ * filenames, not pattern-syntax reasoning, per the "match against the real
+ * filenames" principle: `.env.example` is deliberately excluded, since that
+ * file is safe to search and a glob that only reaches it is not dangerous. */
+const DOTENV_PROBE_BASENAMES = ['.env', '.env.local', '.env.production', '.env.development', '.env.test', '.env.staging'];
+
+/** Expands one level of `{a,b,c}` brace groups (recursively, so nested groups
+ * work) into every concrete alternative, e.g. `.env.{local,production}` ->
+ * [".env.local", ".env.production"] — needed so a glob like that is matched
+ * against real names instead of literal, always-failing brace characters. */
+function expandBraces(pattern: string): string[] {
+  const match = pattern.match(/\{([^{}]*)\}/);
+  if (!match || match.index === undefined) return [pattern];
+  const whole = match[0];
+  const inner = match[1] ?? '';
+  const prefix = pattern.slice(0, match.index);
+  const suffix = pattern.slice(match.index + whole.length);
+  return inner.split(',').flatMap((option) => expandBraces(`${prefix}${option}${suffix}`));
+}
+
+/** Converts one glob alternative (no braces, no `!`) to a RegExp: `**`
+ * crosses `/`, `*` and `?` don't, everything else is escaped. Not a full
+ * glob engine — bracket character classes (`[jt]`) aren't modeled, and
+ * `globCouldMatchDotEnv` treats those as "could match" rather than guessing. */
+function globToRegExp(glob: string): RegExp {
+  let out = '';
+  for (let i = 0; i < glob.length; i++) {
+    const c = glob[i];
+    if (c === '*' && glob[i + 1] === '*') {
+      out += '.*';
+      i++;
+      if (glob[i + 1] === '/') i++;
+    } else if (c === '*') {
+      out += '[^/]*';
+    } else if (c === '?') {
+      out += '[^/]';
+    } else if (c && '.+^${}()|[]\\'.includes(c)) {
+      out += `\\${c}`;
+    } else {
+      out += c;
+    }
+  }
+  return new RegExp(`^${out}$`);
+}
+
+/**
+ * Whether `glob` (as ripgrep's `--glob` would interpret it) could match any
+ * real `.env`-family file, decided empirically against `DOTENV_PROBE_BASENAMES`
+ * rather than by reasoning about glob syntax in the abstract — `*.ts` and
+ * `**\/*.json` cannot, `.env`, `.env*`, `*`, `**`, and `**\/*` all can.
+ * A leading `!` (ripgrep negation) is stripped before testing, and a bracket
+ * character class anywhere in the pattern is treated as "could match" rather
+ * than approximated, since getting that wrong in the unsafe direction (a
+ * glob that actually reaches `.env` being waved through) is worse than an
+ * occasional unnecessary deny.
+ */
+function globCouldMatchDotEnv(glob: string): boolean {
+  const pattern = glob.startsWith('!') ? glob.slice(1) : glob;
+  if (pattern.includes('[') || pattern.includes(']')) return true;
+
+  const hasSlash = pattern.includes('/');
+  return expandBraces(pattern).some((alt) => {
+    const regex = globToRegExp(alt);
+    return DOTENV_PROBE_BASENAMES.some((name) => regex.test(name) || (hasSlash && regex.test(`some/dir/${name}`)));
+  });
+}
+
 /**
  * Grep recurses over a directory by default, and the per-path checks above
  * only catch a call that names a `.env` file directly — the common miss is
@@ -195,20 +262,25 @@ function isKnownNonDirectoryPath(pathLike: string | undefined, cwd: string): boo
  * directory-rooted (or omitted-path) search rather than first checking
  * whether a `.env` actually exists there.
  *
- * The one case this can't handle: ripgrep's `--glob` takes one pattern per
+ * The one case this can't rewrite: ripgrep's `--glob` takes one pattern per
  * flag, and the Grep tool only exposes a single `glob` string, so there is no
  * way to express "this include AND that exclude" in the same field. When the
- * caller already set `glob`, this falls back to deny rather than silently
- * dropping the caller's filter or guessing whether it would have matched
- * `.env` anyway.
+ * caller already set `glob`, whether that's a problem depends on whether the
+ * existing filter could reach a `.env` file at all: `*.ts` or `**\/*.json`
+ * can't, so denying "search every TypeScript file for X" to protect a file
+ * that filter could never match anyway would be exactly the kind of
+ * false-positive that gets a guard switched off. Only a glob that could
+ * actually match `.env*` (or is unrestrictive, like `*` or `**`) falls back
+ * to deny.
  */
 function grepDotEnvExclusion(toolInput: Record<string, unknown>, cwd: string): PreToolUseOutput | undefined {
   if (isKnownNonDirectoryPath(stringField(toolInput, 'path'), cwd)) return undefined;
 
   const existingGlob = stringField(toolInput, 'glob');
   if (existingGlob) {
+    if (!globCouldMatchDotEnv(existingGlob)) return undefined;
     return deny(
-      `This Grep call already filters by --glob "${existingGlob}", which can't be safely combined with an exclusion for .env files in the same call. Retry without --glob, or use \`enigma list\`/\`enigma doctor\` if you're looking for what Enigma has stored.`,
+      `This Grep call already filters by --glob "${existingGlob}", which could still reach a .env file and can't be safely combined with an additional exclusion in the same call. Narrow --glob to exclude .env files yourself, or use \`enigma list\`/\`enigma doctor\` if you're looking for what Enigma has stored.`,
     );
   }
 
