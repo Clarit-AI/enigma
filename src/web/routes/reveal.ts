@@ -37,6 +37,11 @@ export async function handleRevealPost(res: ServerResponse, id: string): Promise
     sendErrorPage(res, 410, 'Already used', 'This link has already been used.');
     return;
   }
+  // A reveal has no per-name write outcome to report, but "fulfilled" means
+  // only that a human completed the interaction (Issue #10) — true the
+  // moment the token above is consumed, regardless of whether the resolve
+  // below succeeds.
+  RequestStore.fulfill(id);
 
   const [name] = marked.names;
   if (!name) {
