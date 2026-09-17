@@ -388,6 +388,108 @@ describe('PreToolUse read-guard', () => {
     });
   });
 
+  describe('splitSegments is quote-aware (Issue #48): a separator character inside a quoted span is a literal, not a command boundary', () => {
+    it(
+      'CONFIRMED LIVE BYPASS before this fix, verified against the built hook binary: a standalone quoted ' +
+        'separator token right after a command name sliced one real bash command into two fragments — one with ' +
+        "the command name and no target, one with the target and no command name — so segmentEchoesKnownSecret's " +
+        "head==='echo' check never saw the fragment containing the secret name. `echo ';' $NAME` is, in real bash, " +
+        'a single `echo` invocation that prints both the literal `;` and the secret value; probing it against ' +
+        'plugins/enigma/dist/hooks.mjs with a seeded OPENAI_API_KEY returned no denial at all prior to this fix. ' +
+        'All three separator characters this guard recognizes are pinned here, not just `;`.',
+      () => {
+        expect(isDenied(bash("echo ';' $OPENAI_API_KEY"))).toBe(true);
+        expect(isDenied(bash("echo '&' $OPENAI_API_KEY"))).toBe(true);
+        expect(isDenied(bash("echo '|' $OPENAI_API_KEY"))).toBe(true);
+        expect(isDenied(bash('echo "&" $OPENAI_API_KEY'))).toBe(true);
+      },
+    );
+
+    it(
+      'NOT independently vulnerable — pinned as a regression guard, not a second bypass: verified against the ' +
+        'pre-fix binary that both of these were ALREADY correctly denied before this change, for a structural ' +
+        "reason, not luck. segmentTargetsDotEnvByPath checks every token in a segment's rest array regardless of " +
+        "position, so even when the old blind split displaced .env into its own fragment, the leftover stray " +
+        "quote character from the split always became that fragment's head, pushing .env into rest where it was " +
+        "still checked. segmentIsBareEnvDump only ever needs a single head token match with no separate target " +
+        'reference elsewhere in the command, so there was nothing for over-splitting to displace away from it. ' +
+        'This asymmetry — some rules structurally immune, others not — is why the fix could not be "just re-run ' +
+        'the same probe on every rule and see which still fail": the two rules below stayed correct throughout.',
+      () => {
+        expect(isDenied(bash("cat ';' .env"))).toBe(true);
+        expect(isDenied(bash("printenv ';' -0"))).toBe(true);
+    });
+
+    it(
+      'NOT a live bypass, deliberately not "fixed" further: the same quoted-separator shape placed between a ' +
+        "command name and its exact-position subcommand (segmentIsEnigmaGetOrEnv/segmentIsKeychainRead/" +
+        "segmentIsOpRead all destructure tokenize(segment) as [head, sub]) makes the guard's parse of the " +
+        "real argv accurately show sub !== 'get'/'find-generic-password'/'read' — because in real bash, " +
+        "`enigma ';' get NAME` genuinely puts the literal `;` at that argv position, not `get`. The guard is " +
+        "now agreeing with reality, not missing anything: the real `enigma`/`security`/`op` binaries would see " +
+        'that same corrupted argv and reject it as an unrecognized subcommand before ever reading anything. ' +
+        'This is different in kind from the echo case above, where the real command DOES still function ' +
+        '(echo tolerates and prints extra arguments) — these do not.',
+      () => {
+        expect(isDenied(bash("enigma ';' get OPENAI_API_KEY"))).toBe(false);
+        expect(isDenied(bash("security ';' find-generic-password -s x -w"))).toBe(false);
+        expect(isDenied(bash("op ';' read op://vault/item/field"))).toBe(false);
+      },
+    );
+
+    it('a quoted separator anywhere else in an already-recognized command does not change the outcome', () => {
+      expect(isDenied(bash("enigma get OPENAI_API_KEY ';'"))).toBe(true);
+      expect(isDenied(bash("security find-generic-password -s x -w ';'"))).toBe(true);
+      expect(isDenied(bash("op read ';' op://vault/item/field"))).toBe(true);
+    });
+
+    it('a quoted separator character is still a literal when it sits inside a longer quoted word, not only when quoted alone', () => {
+      expect(isDenied(bash("echo 'a;b' $OPENAI_API_KEY"))).toBe(true);
+      expect(isDenied(bash('cat "foo;.env"'))).toBe(false); // real filename is "foo;.env", not .env — correctly not a dotenv match
+    });
+
+    it('real command chains (unquoted separators) still split and get checked independently — this is not a regression to "never split"', () => {
+      expect(isDenied(bash('cat .env && echo hi'))).toBe(true);
+      expect(isDenied(bash('echo hi && cat .env'))).toBe(true);
+      expect(isDenied(bash('true; cat .env'))).toBe(true);
+      expect(isDenied(bash('cat .env | grep KEY'))).toBe(true);
+      expect(isDenied(bash('echo hi; echo $OPENAI_API_KEY'))).toBe(true);
+    });
+
+    it('quote-aware splitting composes correctly with command-substitution unwrapping', () => {
+      expect(isDenied(bash('eval "$(cat .env)"'))).toBe(true);
+      expect(isDenied(bash("eval \"$(echo ';' $OPENAI_API_KEY)\""))).toBe(true);
+    });
+
+    it(
+      'KNOWN AND ACCEPTED decision, same "mis-parse toward allow" direction as tokenize: an unmatched quote mark ' +
+        'does not turn the rest of the command into a protected span. A separator after an unterminated quote ' +
+        'still splits normally.',
+      () => {
+        expect(isDenied(bash("echo unmatched' ; cat .env"))).toBe(true);
+      },
+    );
+
+    describe('false-positive sweep, re-run against this change specifically (the previous sweep was against a different change and does not carry over)', () => {
+      it.each<[string, PreToolUseInput]>([
+        ['git status', bash('git status')],
+        ['npm test', bash('npm test')],
+        ['make BUILD=release', bash('make BUILD=release')],
+        ["curl -H 'Authorization: Bearer x=y' url", bash("curl -H 'Authorization: Bearer x=y' url")],
+        ['sql -e "select \'a=b.env\'"', bash('sql -e "select \'a=b.env\'"')],
+        ['docker run -e NODE_ENV=prod img', bash('docker run -e NODE_ENV=prod img')],
+        ['cat .env.example', bash('cat .env.example')],
+        ['enigma run -- npm start', bash('enigma run -- npm start')],
+        ["echo 'hello world'", bash("echo 'hello world'")],
+        ["echo 'a;b' (quoted separator, ordinary content)", bash("echo 'a;b'")],
+        ["grep 'foo|bar' file (quoted separator, ordinary content)", bash("grep 'foo|bar' file")],
+        ['awk \'{print $1 && $2}\' f (quoted separator, ordinary content)', bash("awk '{print $1 && $2}' f")],
+      ])('%s -> allowed', (_label, input) => {
+        expect(isDenied(input)).toBe(false);
+      });
+    });
+  });
+
   describe('Grep directory-rooted searches get a .env exclusion instead of an outright deny (fix batch #1)', () => {
     let tmpProject: string;
 
