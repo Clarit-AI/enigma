@@ -1073,6 +1073,12 @@ function normalizeShellEscapes(command) {
     return `"${escaped}"`;
   });
 }
+function matchQuoteSpan(text, i) {
+  const c = text[i];
+  if (c !== '"' && c !== "'") return void 0;
+  const close = text.indexOf(c, i + 1);
+  return close === -1 ? void 0 : close + 1;
+}
 function tokenize(segment) {
   const tokens = [];
   let current = "";
@@ -1089,14 +1095,12 @@ function tokenize(segment) {
       i++;
       continue;
     }
-    if (c === '"' || c === "'") {
-      const close = segment.indexOf(c, i + 1);
-      if (close !== -1) {
-        current += segment.slice(i + 1, close);
-        inWord = true;
-        i = close + 1;
-        continue;
-      }
+    const spanEnd = matchQuoteSpan(segment, i);
+    if (spanEnd !== void 0) {
+      current += segment.slice(i + 1, spanEnd - 1);
+      inWord = true;
+      i = spanEnd;
+      continue;
     }
     current += c;
     inWord = true;
@@ -1105,8 +1109,35 @@ function tokenize(segment) {
   if (inWord) tokens.push(current);
   return tokens;
 }
+function matchSeparatorAt(command, i) {
+  if (command[i] === "|" && command[i + 1] === "|") return "||";
+  if (command[i] === "&" && command[i + 1] === "&") return "&&";
+  const c = command[i];
+  return c === "|" || c === ";" || c === "&" ? c : void 0;
+}
 function splitSegments(command) {
-  return command.split(/\|\||&&|[|;&]/).map((s) => s.trim()).filter((s) => s.length > 0);
+  const segments = [];
+  let current = "";
+  let i = 0;
+  while (i < command.length) {
+    const spanEnd = matchQuoteSpan(command, i);
+    if (spanEnd !== void 0) {
+      current += command.slice(i, spanEnd);
+      i = spanEnd;
+      continue;
+    }
+    const sep2 = matchSeparatorAt(command, i);
+    if (sep2 !== void 0) {
+      segments.push(current);
+      current = "";
+      i += sep2.length;
+      continue;
+    }
+    current += command[i];
+    i++;
+  }
+  segments.push(current);
+  return segments.map((s) => s.trim()).filter((s) => s.length > 0);
 }
 function extractSubstitutions(command) {
   const results = [];

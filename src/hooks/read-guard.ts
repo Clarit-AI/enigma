@@ -71,12 +71,41 @@
 // them wanted quote marks preserved, and the two decisions this required
 // (an unmatched quote mark, and a filename that genuinely contains a quote
 // character). `stripEdgeQuotes` is gone; `tokenize` already hands
-// `tokenTargetsPath` a clean value now. Three rounds, one shape each time:
-// correctness depending on incidental syntax the guard hadn't actually
-// normalized (a slash, a quote's position, an `=`'s position, a quote
-// character's position) rather than on anything it deliberately declined to
-// chase. Read the pinned tests before changing this file again — they are
-// what actually got probed to find rounds 2 and 3.
+// `tokenTargetsPath` a clean value now.
+//
+// Round 4 (Issue #48): round 3 fixed quote resolution inside `tokenize`, but
+// `splitSegments` — which runs BEFORE `tokenize`, cutting the raw command
+// into segments on `;`/`&`/`|`/`&&`/`||` — was still a blind
+// `.split(/\|\||&&|[|;&]/)` with no quote awareness at all. A standalone
+// quoted separator token placed right after a command name (`echo ';'
+// $SECRET`, real bash: one `echo` invocation with two arguments, the literal
+// `;` and the secret value) was sliced by the blind split into two fragments
+// — one with the command name and no target, one with the target and no
+// command name — so a rule keyed to a fragment's `head` token
+// (`segmentEchoesKnownSecret`'s `head === 'echo'` check, in particular)
+// never saw the fragment holding the actual secret reference. Confirmed as a
+// live, functioning bypass against the built hook binary before this fix:
+// `echo ';' $NAME`/`echo '&' $NAME`/`echo '|' $NAME` all printed the secret
+// and were allowed. `splitSegments` now shares `tokenize`'s own quote-pairing
+// logic (extracted into `matchQuoteSpan`, one implementation instead of two)
+// so a separator inside a matched quote span is left as a literal, the same
+// direction `tokenize` already treats quoting. The `.env`-by-path rules and
+// the bare `env`/`printenv` rule were checked against the pre-fix binary too
+// and were NOT independently vulnerable to this shape — see the pinned test
+// for why (a structural difference in what each rule checks, not luck) —
+// and the `enigma get`/`security find-generic-password`/`op read` rules,
+// which check an exact `head`+next-token pair, can still be evaded by the
+// same shape but only in a way that also breaks the target CLI's own
+// argument parsing (also pinned, as a deliberate non-fix: the guard's parse
+// is accurate to what real bash hands that process, and PR #32's boundary is
+// that a command which doesn't work isn't a bypass worth chasing).
+//
+// Four rounds, one shape each time: correctness depending on incidental
+// syntax the guard hadn't actually normalized (a slash, a quote's position,
+// an `=`'s position, a quote character's position, a separator's position
+// relative to a quote span) rather than on anything it deliberately declined
+// to chase. Read the pinned tests before changing this file again — they are
+// what actually got probed to find rounds 2 through 4.
 import { basename, resolve, sep } from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { enigmaHome } from '../core/paths.js';
@@ -186,6 +215,32 @@ function normalizeShellEscapes(command: string): string {
 }
 
 /**
+ * If `text[i]` is a quote character (`'` or `"`) that has a matching close
+ * quote somewhere ahead in `text` (searched from `i + 1`), returns the index
+ * immediately after that close quote. Returns `undefined` when `text[i]`
+ * isn't a quote character, or is one with no matching close anywhere ahead —
+ * an unmatched quote mark is never treated as an unterminated span that
+ * swallows the rest of `text`; every caller falls through and treats it as
+ * an ordinary literal character instead, the same "mis-parse toward allow"
+ * direction used everywhere else in this file.
+ *
+ * This is the one place quote-pairing is decided. Both `tokenize` (which
+ * resolves a span to its inner text) and `splitSegments` (which only needs
+ * to know a span exists, so a `;`/`&`/`|` inside it isn't mistaken for a
+ * real command separator) call this instead of each re-implementing their
+ * own pairing rule — two implementations of the same rule is exactly what
+ * drifted apart before (`tokenize` gained real quoting in Issue #46 round 3
+ * while `splitSegments` stayed a blind regex split, which is what Issue #48
+ * turned out to be).
+ */
+function matchQuoteSpan(text: string, i: number): number | undefined {
+  const c = text[i];
+  if (c !== '"' && c !== "'") return undefined;
+  const close = text.indexOf(c, i + 1);
+  return close === -1 ? undefined : close + 1;
+}
+
+/**
  * Good-enough shell tokenizer for a heuristic guard, not a full parser: splits on
  * whitespace outside quotes, and resolves every `'...'`/`"..."` span *inside* a
  * token to its inner content — wherever it appears, not only at the token's own
@@ -204,19 +259,17 @@ function normalizeShellEscapes(command: string): string {
  * sees its own argv, so every caller wants the dequoted form; none wants the
  * original quote marks preserved.
  *
- * Quote spans are matched as real pairs (searching ahead for the next
- * matching quote character, not blindly deleting every quote character in
- * the token), so a filename that legitimately contains a quote character —
- * expressed the way bash itself requires, by switching quote types
- * (`'it'"'"'s.env'` -> `it's.env`) — is still reconstructed correctly. A
- * quote mark with no matching close anywhere later in the token (malformed
- * input, or a literal quote bash itself would only accept backslash-escaped)
- * is treated as an ordinary literal character rather than as an unterminated
- * span that swallows the rest of the token — the same "mis-parse toward
- * allow" direction as everywhere else in this file, and it means a genuine
- * `.env` reference later in the same segment is still caught rather than
- * getting absorbed into one unmatched blob. See the pinned tests for both
- * decisions. The tripwire is the backstop if a value still leaks regardless.
+ * Quote spans are matched as real pairs via `matchQuoteSpan` (searching ahead
+ * for the next matching quote character, not blindly deleting every quote
+ * character in the token), so a filename that legitimately contains a quote
+ * character — expressed the way bash itself requires, by switching quote types
+ * (`'it'"'"'s.env'` -> `it's.env`) — is still reconstructed correctly. An
+ * unmatched quote mark (malformed input, or a literal quote bash itself would
+ * only accept backslash-escaped) is treated as an ordinary literal character,
+ * which means a genuine `.env` reference later in the same segment is still
+ * caught rather than getting absorbed into one unmatched blob. See the pinned
+ * tests for both decisions. The tripwire is the backstop if a value still
+ * leaks regardless.
  */
 function tokenize(segment: string): string[] {
   const tokens: string[] = [];
@@ -234,16 +287,12 @@ function tokenize(segment: string): string[] {
       i++;
       continue;
     }
-    if (c === '"' || c === "'") {
-      const close = segment.indexOf(c, i + 1);
-      if (close !== -1) {
-        current += segment.slice(i + 1, close);
-        inWord = true;
-        i = close + 1;
-        continue;
-      }
-      // No matching close quote anywhere ahead in this token: fall through
-      // and treat this quote mark as an ordinary literal character.
+    const spanEnd = matchQuoteSpan(segment, i);
+    if (spanEnd !== undefined) {
+      current += segment.slice(i + 1, spanEnd - 1);
+      inWord = true;
+      i = spanEnd;
+      continue;
     }
     current += c;
     inWord = true;
@@ -253,11 +302,82 @@ function tokenize(segment: string): string[] {
   return tokens;
 }
 
+/** Matches a segment-separator operator (`||`, `&&`, `|`, `;`, `&`) starting
+ * exactly at `command[i]`, checking the two-character operators first so
+ * `||`/`&&` aren't mistaken for two single-character ones — the same
+ * operator set and precedence as the original `/\|\||&&|[|;&]/` split
+ * regex, just tested at a position instead of matched globally. */
+function matchSeparatorAt(command: string, i: number): string | undefined {
+  if (command[i] === '|' && command[i + 1] === '|') return '||';
+  if (command[i] === '&' && command[i + 1] === '&') return '&&';
+  const c = command[i];
+  return c === '|' || c === ';' || c === '&' ? c : undefined;
+}
+
+/**
+ * Splits `command` into segments at top-level `;`, `&`, `|`, `&&`, `||` — the
+ * same operators the original blind `.split(/\|\||&&|[|;&]/)` used, but now
+ * quote-aware via `matchQuoteSpan`: a separator character sitting inside a
+ * matched quote span is left as a literal part of its segment, not treated
+ * as a command boundary.
+ *
+ * Before this fix, `splitSegments` ran with zero quote awareness at all, even
+ * after `tokenize` gained real quote-pair resolution (Issue #46 round 3). A
+ * standalone quoted separator token placed right after a command name —
+ * `echo ';' $SECRET`, `enigma ';' get NAME`, `security ';' find-generic-password
+ * ...`, `op ';' read ...` — is, in real bash, one single command (the quoted
+ * `;` is a literal argument, not a boundary), but the blind split cut it into
+ * two fragments anyway: one with the command name and no target, one with the
+ * target and no command name. Neither fragment's `head` (or `head`+second
+ * token, for the rules that check both) matched what a rule needed to see, so
+ * the whole command sailed through undenied while still doing exactly what
+ * the rule exists to stop — confirmed live against the built hook binary
+ * (`echo ';' $API_KEY` actually echoes the secret in real bash and was
+ * allowed by the guard) before this fix. This is a different failure shape
+ * than the `.env`-by-path rules (`segmentTargetsDotEnvByPath` and friends),
+ * which check every token in a segment's `rest` regardless of position — the
+ * bypass here specifically hits rules keyed to `head`, or `head`+an exact
+ * next-token position, because over-splitting can relocate a target's *whole
+ * fragment* to one whose head doesn't match, not just shuffle it within a
+ * fragment's own token list.
+ *
+ * Quote characters themselves are preserved here (not stripped) — that's
+ * still `tokenize`'s job once each segment is chosen; this function only
+ * needs to know a quote span exists, not what's inside it. An unmatched
+ * quote mark (no closing quote anywhere later in `command`) is not treated
+ * as an unterminated span — same "mis-parse toward allow, never toward
+ * missing a real separator" direction as `tokenize` and everywhere else in
+ * this file: a separator after it still splits normally.
+ *
+ * Deliberately not chased here, same PR #32 boundary as the rest of this
+ * file: this still isn't a shell parser, so it doesn't track `$(...)`/`` ` ``
+ * nesting or backslash escapes for the purpose of deciding segment
+ * boundaries (those are handled separately, before this function ever runs —
+ * see `normalizeShellEscapes` and `extractSubstitutions`/`allCommandTexts`).
+ */
 function splitSegments(command: string): string[] {
-  return command
-    .split(/\|\||&&|[|;&]/)
-    .map((s) => s.trim())
-    .filter((s) => s.length > 0);
+  const segments: string[] = [];
+  let current = '';
+  let i = 0;
+  while (i < command.length) {
+    const spanEnd = matchQuoteSpan(command, i);
+    if (spanEnd !== undefined) {
+      current += command.slice(i, spanEnd);
+      i = spanEnd;
+      continue;
+    }
+    const sep = matchSeparatorAt(command, i);
+    if (sep !== undefined) {
+      segments.push(current);
+      current = '';
+      i += sep.length;
+      continue;
+    }
+    current += command[i];
+    i++;
+  }
+  segments.push(current);
+  return segments.map((s) => s.trim()).filter((s) => s.length > 0);
 }
 
 /**
