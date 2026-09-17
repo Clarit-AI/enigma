@@ -6,7 +6,7 @@ This document is Enigma's threat model. It states what Enigma protects against, 
 
 Enigma exists to keep one thing true: **no secret value ever enters the model's context window.** Everything else in this document is a consequence of that one line, or a boundary around it.
 
-The MCP server exposes no tool that returns a value. `resolve()`, the only function that ever reads a plaintext secret, is internal to the storage layer and is called from exactly three places: `enigma run`, `enigma_reveal`'s server-side handler, and the tripwire hook. `npm run leak-fence` statically fails the build if `src/mcp/**` or `src/web/**` references `resolve(`. Error messages, audit lines, logs, and every MCP tool result carry names and depository ids, never values (see [`docs/architecture.md`](architecture.md) ADR-001, and the tool table in [`docs/api-contracts.md`](api-contracts.md) §1).
+The MCP server exposes no tool that returns a value. `Depository.resolve()` is the only function that ever reads a plaintext secret. `resolveSecret()` wraps it with audit logging and is called from five sites: `enigma run`, `enigma get`, `enigma move`, the reveal web route, and the clipboard-reveal path; the tripwire hook calls `Depository.resolve()` directly instead, bypassing that audit logging by design (see [`docs/architecture.md`](architecture.md) ADR-001, the authoritative enumeration this paragraph follows). `npm run leak-fence` statically fails the build if `src/mcp/**` or `src/web/**` references `resolve(`. Error messages, audit lines, logs, and every MCP tool result carry names and depository ids, never values (also ADR-001, and the tool table in [`docs/api-contracts.md`](api-contracts.md) §1).
 
 ## What Enigma protects against
 
