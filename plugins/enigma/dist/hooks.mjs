@@ -1074,8 +1074,36 @@ function normalizeShellEscapes(command) {
   });
 }
 function tokenize(segment) {
-  const raw = segment.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
-  return raw.map((t) => t.replace(/^["']|["']$/g, ""));
+  const tokens = [];
+  let current = "";
+  let inWord = false;
+  let i = 0;
+  while (i < segment.length) {
+    const c = segment[i];
+    if (c === " " || c === "	" || c === "\n" || c === "\r") {
+      if (inWord) {
+        tokens.push(current);
+        current = "";
+        inWord = false;
+      }
+      i++;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      const close = segment.indexOf(c, i + 1);
+      if (close !== -1) {
+        current += segment.slice(i + 1, close);
+        inWord = true;
+        i = close + 1;
+        continue;
+      }
+    }
+    current += c;
+    inWord = true;
+    i++;
+  }
+  if (inWord) tokens.push(current);
+  return tokens;
 }
 function splitSegments(command) {
   return command.split(/\|\||&&|[|;&]/).map((s) => s.trim()).filter((s) => s.length > 0);
@@ -1119,9 +1147,6 @@ function commandName(token) {
   const parts = token.split("/");
   return parts[parts.length - 1] ?? token;
 }
-function stripEdgeQuotes(value) {
-  return value.replace(/^["']|["']$/g, "");
-}
 function equalsSuffixes(token) {
   const suffixes = [];
   let idx = token.indexOf("=");
@@ -1132,7 +1157,7 @@ function equalsSuffixes(token) {
   return suffixes;
 }
 function tokenTargetsPath(token, isTarget) {
-  if (equalsSuffixes(token).some((suffix) => isTarget(stripEdgeQuotes(suffix)))) return true;
+  if (equalsSuffixes(token).some((suffix) => isTarget(suffix))) return true;
   return !token.startsWith("-") && isTarget(token);
 }
 function segmentTargetsDotEnvByPath(segment) {

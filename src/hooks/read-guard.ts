@@ -51,14 +51,32 @@
 // consistent with the guard's existing stance, not a new one.
 //
 // Round 2 (Issue #46): the value half is checked against EVERY `=` in the
-// token, not just the first (`a=b=.env` hid `.env` behind a second `=`), and
-// with one layer of surrounding quotes stripped first (`if='.env'` — see
-// `stripEdgeQuotes`), so correctness no longer depends on where a quote mark
-// or an extra `=` happens to land. `$'...'`/`${IFS}` reach this same check
+// token, not just the first (`a=b=.env` hid `.env` behind a second `=`), so
+// correctness no longer depends on an extra `=` happening to land somewhere
+// `equalsSuffixes` wouldn't reach. `$'...'`/`${IFS}` reach this same check
 // for free, since `normalizeShellEscapes` already runs on the whole command
 // before tokenization. What's still deliberately not chased, same as before:
 // a bare backslash escape outside of `$'...'` (`if=\.env`) — see
 // `tokenTargetsPath`'s comment for why, and the pinned test for the decision.
+//
+// Round 3 (Issue #46): round 2 fixed value-side quoting with a value-side
+// `stripEdgeQuotes` helper, but that only patched the symptom — `cat
+// ''.env`/`cat .en''v` (quote-splicing on a BARE path, no `=` involved at
+// all) proved the defect was in `tokenize` itself, which only ever stripped
+// a quote character sitting at a token's own first/last position, so a
+// quoted span glued onto bare text with no space (`''`, `.en''v`) left its
+// quote characters stuck in the middle, unremoved. `tokenize` now resolves
+// every quote span inline, wherever it falls in the token — see its own
+// comment for the full reasoning, the caller-by-caller check that none of
+// them wanted quote marks preserved, and the two decisions this required
+// (an unmatched quote mark, and a filename that genuinely contains a quote
+// character). `stripEdgeQuotes` is gone; `tokenize` already hands
+// `tokenTargetsPath` a clean value now. Three rounds, one shape each time:
+// correctness depending on incidental syntax the guard hadn't actually
+// normalized (a slash, a quote's position, an `=`'s position, a quote
+// character's position) rather than on anything it deliberately declined to
+// chase. Read the pinned tests before changing this file again — they are
+// what actually got probed to find rounds 2 and 3.
 import { basename, resolve, sep } from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { enigmaHome } from '../core/paths.js';
@@ -167,13 +185,72 @@ function normalizeShellEscapes(command: string): string {
   });
 }
 
-/** Good-enough shell tokenizer for a heuristic guard, not a full parser: splits on
- * whitespace, keeping a `"quoted"` or `'quoted'` run as one token, then strips one
- * layer of matching quotes. A guard that mis-parses toward "allow" is the safe
- * failure direction here — the tripwire is the backstop if a value still leaks. */
+/**
+ * Good-enough shell tokenizer for a heuristic guard, not a full parser: splits on
+ * whitespace outside quotes, and resolves every `'...'`/`"..."` span *inside* a
+ * token to its inner content — wherever it appears, not only at the token's own
+ * edges. `dd if=''.env` and `cat .en''v` (quote-splicing: an empty or non-empty
+ * quoted span glued to bare text with no space) previously defeated every rule
+ * below, because the old implementation only stripped a quote character sitting
+ * at a token's very first or very last position, so a spliced-in empty `''`/`""`
+ * left its two quote characters sitting in the middle of the token, unremoved
+ * (Issue #46 round 3 — the same bug `stripEdgeQuotes` round 2 worked around for
+ * the `key=value` value half specifically, but it turned out to be `tokenize`
+ * itself that needed fixing: `cat ''.env` proved this isn't specific to
+ * `key=value` parsing). Every caller of `tokenize` was checked: all of them
+ * either compare the result against a known literal (`commandName(head) ===
+ * 'rm'`/`'echo'`/`'enigma'`/…) or test it as a path (`targetsDotEnv`,
+ * `targetsEnigmaConfig`) — real bash resolves quoting before a command ever
+ * sees its own argv, so every caller wants the dequoted form; none wants the
+ * original quote marks preserved.
+ *
+ * Quote spans are matched as real pairs (searching ahead for the next
+ * matching quote character, not blindly deleting every quote character in
+ * the token), so a filename that legitimately contains a quote character —
+ * expressed the way bash itself requires, by switching quote types
+ * (`'it'"'"'s.env'` -> `it's.env`) — is still reconstructed correctly. A
+ * quote mark with no matching close anywhere later in the token (malformed
+ * input, or a literal quote bash itself would only accept backslash-escaped)
+ * is treated as an ordinary literal character rather than as an unterminated
+ * span that swallows the rest of the token — the same "mis-parse toward
+ * allow" direction as everywhere else in this file, and it means a genuine
+ * `.env` reference later in the same segment is still caught rather than
+ * getting absorbed into one unmatched blob. See the pinned tests for both
+ * decisions. The tripwire is the backstop if a value still leaks regardless.
+ */
 function tokenize(segment: string): string[] {
-  const raw = segment.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
-  return raw.map((t) => t.replace(/^["']|["']$/g, ''));
+  const tokens: string[] = [];
+  let current = '';
+  let inWord = false;
+  let i = 0;
+  while (i < segment.length) {
+    const c = segment[i] as string;
+    if (c === ' ' || c === '\t' || c === '\n' || c === '\r') {
+      if (inWord) {
+        tokens.push(current);
+        current = '';
+        inWord = false;
+      }
+      i++;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      const close = segment.indexOf(c, i + 1);
+      if (close !== -1) {
+        current += segment.slice(i + 1, close);
+        inWord = true;
+        i = close + 1;
+        continue;
+      }
+      // No matching close quote anywhere ahead in this token: fall through
+      // and treat this quote mark as an ordinary literal character.
+    }
+    current += c;
+    inWord = true;
+    i++;
+  }
+  if (inWord) tokens.push(current);
+  return tokens;
 }
 
 function splitSegments(command: string): string[] {
@@ -242,26 +319,13 @@ function commandName(token: string): string {
 }
 
 /**
- * Strips one layer of a leading and/or trailing quote character (`"`/`'`),
- * the same single-layer rule `tokenize` applies at a whole token's edges.
- * The value half of a `key=value` argument can be independently quoted while
- * the key half isn't (`if='.env'`), and because `tokenize`'s word-matching
- * treats a bare run and a `'...'`/`"..."` span glued together as one token,
- * the quote marks land inside the split-out value rather than at the token's
- * own edges — `tokenize`'s own edge-stripping never sees them (Issue #46
- * round 2). Deliberately not escape-aware (a literal `\'` inside the value
- * isn't un-escaped): that's the same level of sophistication `tokenize`
- * itself has everywhere else in this file, not a new gap introduced here.
- */
-function stripEdgeQuotes(value: string): string {
-  return value.replace(/^["']|["']$/g, '');
-}
-
-/**
  * Every substring of `token` starting right after an `=`, one per `=` in the
  * token — not just the first. `a=b=.env` must be checked as both `"b=.env"`
  * and `".env"`, not only the first split, or a second `=` hides a dotenv
- * value behind an arbitrary key of its own (Issue #46 round 2).
+ * value behind an arbitrary key of its own (Issue #46 round 2). No quote
+ * handling needed here any more: `tokenize` now fully resolves quoting
+ * before this ever runs (Issue #46 round 3), so a suffix like `.env` from
+ * `if='.env'` already arrives clean.
  */
 function equalsSuffixes(token: string): string[] {
   const suffixes: string[] = [];
@@ -274,17 +338,17 @@ function equalsSuffixes(token: string): string[] {
 }
 
 /**
- * True when `token` — or, split on any `=` it contains, the (quote-stripped)
- * text following it — is a path `isTarget` cares about (Issue #46). `dd
- * if=.env`, `awk -f=.env`, `python3 --file=.env`, and `somecmd -o=.env` all
- * name a target file using the same `key=value` shape a plain `VAR=.env`
- * assignment-style argument uses, and there is no way to tell "this key means
- * read a file" from "this key is just a variable name" from the token text
- * alone — see the top-of-file comment for why this checks the value
- * uniformly rather than trying to special-case dd/awk/etc.'s specific option
- * names (that's the enumeration this guard is deliberately table-driven to
- * avoid). The whole-token form is still skipped for anything starting with
- * `-`, since a bare flag like `-f` is never itself a path.
+ * True when `token` — or, split on any `=` it contains, the text following it
+ * — is a path `isTarget` cares about (Issue #46). `dd if=.env`, `awk
+ * -f=.env`, `python3 --file=.env`, and `somecmd -o=.env` all name a target
+ * file using the same `key=value` shape a plain `VAR=.env` assignment-style
+ * argument uses, and there is no way to tell "this key means read a file"
+ * from "this key is just a variable name" from the token text alone — see
+ * the top-of-file comment for why this checks the value uniformly rather
+ * than trying to special-case dd/awk/etc.'s specific option names (that's
+ * the enumeration this guard is deliberately table-driven to avoid). The
+ * whole-token form is still skipped for anything starting with `-`, since a
+ * bare flag like `-f` is never itself a path.
  *
  * What this deliberately does NOT chase, same boundary as the rest of this
  * file (PR #32's ruling): a backslash used to escape a character outside of
@@ -298,7 +362,7 @@ function equalsSuffixes(token: string): string[] {
  * `test/unit/hooks/read-guard.test.ts`, not silently missed.
  */
 function tokenTargetsPath(token: string, isTarget: (value: string) => boolean): boolean {
-  if (equalsSuffixes(token).some((suffix) => isTarget(stripEdgeQuotes(suffix)))) return true;
+  if (equalsSuffixes(token).some((suffix) => isTarget(suffix))) return true;
   return !token.startsWith('-') && isTarget(token);
 }
 
