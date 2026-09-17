@@ -13,7 +13,7 @@ Every tool result is text and contains names, depository ids, scopes, and status
 | `enigma_await` | `{ request_id: string }` | same success text as above, or `E_REQUEST_EXPIRED` |
 | `enigma_reveal` | `{ name: string, scope?: …, method?: "page"\|"clipboard" }` | `"Reveal link opened; expires in 5 min"` or `"Copied to clipboard; clears in 60 s"` |
 | `enigma_remove` | `{ name: string, scope?: … }` | form-mode boolean confirmation, then `"Removed NAME from <depository>"`; `E_AMBIGUOUS_SCOPE` when both scopes hold the name and none was given |
-| `enigma_import` | `{ path?: string (default ".env"), depository?: DepositoryId }` | names imported, file rewritten summary |
+| `enigma_import` | `{ path?: string (default ".env"), depository?: DepositoryId, rotate?: boolean }` | names imported, file rewritten summary |
 | `enigma_doctor` | `{}` | platform, available depositories with prompt profiles, `op` status, tunnel binaries, manifest gaps, config paths |
 
 `DepositoryId = "env" | "encrypted" | "keychain" | "secret-service" | "1password"`.
@@ -44,7 +44,7 @@ enigma remove NAME [--scope …]
 enigma move NAME --to ID [--scope …]
 enigma run [--only A,B] [--scope …] -- <command> [args...]
 enigma get NAME [--scope …]        # humans/scripts; stderr warning; blocked for the agent by the read-guard
-enigma import [PATH] [--depository ID] [--json]
+enigma import [PATH] [--depository ID] [--rotate] [--json]
 enigma doctor [--json]
 enigma install [--uninstall]       # register marketplace + enable plugin
 ```

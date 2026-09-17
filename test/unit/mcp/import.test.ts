@@ -77,6 +77,30 @@ describe('enigma_import', () => {
     await pair.close();
   });
 
+  it('Issue #42: rotate lets a rerun after a partial failure succeed via the MCP surface too, matching the web picker', async () => {
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
+    const pair = await connectWithCapabilities({});
+
+    await pair.client.callTool({ name: 'enigma_import', arguments: { depository: 'encrypted' } });
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\nGITHUB_TOKEN=ghp-xyz\n`);
+
+    const withoutRotate = await pair.client.callTool({ name: 'enigma_import', arguments: { depository: 'encrypted' } });
+    expect(withoutRotate.isError).toBe(true);
+    const withoutRotateText = (withoutRotate.content as Array<{ text: string }>)[0]?.text ?? '';
+    expect(withoutRotateText).toContain('E_EXISTS');
+
+    const withRotate = await pair.client.callTool({ name: 'enigma_import', arguments: { depository: 'encrypted', rotate: true } });
+    expect(withRotate.isError).toBeFalsy();
+    const withRotateText = (withRotate.content as Array<{ text: string }>)[0]?.text ?? '';
+    expect(withRotateText).toContain('OPENAI_API_KEY');
+    expect(withRotateText).toContain('GITHUB_TOKEN');
+    expect(withRotateText).not.toContain(SENTINEL);
+
+    const stored = listSecrets({ scope: 'all', cwd: tmpProject });
+    expect(stored.map((e) => e.name).sort()).toEqual(['GITHUB_TOKEN', 'OPENAI_API_KEY']);
+    await pair.close();
+  });
+
   it('A2: refuses an ambiguous unquoted value ("PORT=3000 # dev port") through the loud-abort path, matching the CLI', async () => {
     writeFileSync(envFilePath, 'PORT=3000 # dev port\n');
     const pair = await connectWithCapabilities({});

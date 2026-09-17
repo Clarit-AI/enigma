@@ -43613,34 +43613,46 @@ function projectPathFor(entry, cwd) {
   return cwd ? findProjectPath(cwd) : void 0;
 }
 async function setSecret(opts) {
-  validateName(opts.name);
+  const auditRefusal = (err, op2) => {
+    appendAuditEvent({ op: op2, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+  };
+  try {
+    validateName(opts.name);
+  } catch (err) {
+    auditRefusal(err, opts.auditOp ?? "set");
+    throw err;
+  }
   if (opts.depository === "env" && opts.scope === "global") {
-    throw new EnigmaError({
+    const err = new EnigmaError({
       code: "E_SCOPE_INVALID",
       message: "env depository does not support global scope; a project .env file has no global location",
       secretName: opts.name
     });
+    auditRefusal(err, opts.auditOp ?? "set");
+    throw err;
   }
   const needsProjectPath = opts.scope === "project" || opts.depository === "env";
   const projectPath = needsProjectPath ? findProjectPath(opts.cwd ?? process.cwd()) : void 0;
   const pid = opts.scope === "project" ? projectId(opts.cwd ?? process.cwd()) : void 0;
   const index = readIndex();
   const existing = findIndexEntry(index, opts.name, opts.scope, pid);
+  const op = opts.auditOp ?? (existing ? "rotated" : "set");
   if (existing && !opts.rotate) {
-    throw new EnigmaError({
+    const err = new EnigmaError({
       code: "E_EXISTS",
       message: `${opts.name} already exists in ${opts.scope} scope; pass rotate to overwrite`,
       secretName: opts.name
     });
+    auditRefusal(err, op);
+    throw err;
   }
   const providedRef = opts.depository === "env" ? opts.name : buildRef(opts.name, opts.scope, pid);
   const depository = createDepository(opts.depository, { projectPath, createVault: opts.createVault });
-  const op = opts.auditOp ?? (existing ? "rotated" : "set");
   let ref;
   try {
     ref = await depository.set(providedRef, opts.value);
   } catch (err) {
-    appendAuditEvent({ op, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+    auditRefusal(err, op);
     throw err;
   }
   const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -44113,7 +44125,11 @@ async function commitImport(opts) {
   const failed = [];
   for (const entry of opts.entries) {
     try {
-      if (entry.ambiguous) throw ambiguousValueError(entry, opts.envFilePath);
+      if (entry.ambiguous) {
+        const err = ambiguousValueError(entry, opts.envFilePath);
+        appendAuditEvent({ op: "import", name: entry.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+        throw err;
+      }
       await setSecret({
         name: entry.name,
         value: entry.value,
@@ -44139,9 +44155,10 @@ async function commitImport(opts) {
   const notAttempted = opts.entries.map((e) => e.name).filter((name) => !attempted.has(name));
   const warnings = checkEnvGitignore(opts.projectPath);
   if (failed.length > 0) {
-    if (opts.depository === "env" && succeeded.length > 0) {
+    if (succeeded.length > 0) {
+      const names = succeeded.join(", ");
       warnings.push(
-        `${succeeded.length} secret(s) (${succeeded.join(", ")}) were already written into the .env managed block before the failure on ${failed[0].name}; the original plaintext line(s) were deliberately left in place. Fix the issue and rerun import, or remove them from .env manually.`
+        opts.depository === "env" ? `${succeeded.length} secret(s) (${names}) were already written into the .env managed block before the failure on ${failed[0].name}; the original plaintext line(s) were deliberately left in place. Fix the issue and rerun import with rotate enabled to overwrite them, or remove them from .env manually.` : `${succeeded.length} secret(s) (${names}) are already stored in ${opts.depository} before the failure on ${failed[0].name}; .env was left untouched. Fix the issue and rerun import with rotate enabled to overwrite them, or remove them from ${opts.depository} manually.`
       );
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
@@ -46759,10 +46776,11 @@ function registerImportTool(server) {
     "enigma_import",
     {
       title: "Import secrets from a .env file",
-      description: "Imports NAME=value pairs from a .env file into a depository \u2014 either the one given, or a browser picker when none is given \u2014 removing them from plaintext (or moving them into the managed block for the env depository). Returns names, counts, and depository ids only, never a value (ADR-001).",
+      description: "Imports NAME=value pairs from a .env file into a depository \u2014 either the one given, or a browser picker when none is given \u2014 removing them from plaintext (or moving them into the managed block for the env depository). Pass rotate to overwrite names that already exist, matching the browser picker; without it, a name that already exists fails with E_EXISTS. Returns names, counts, and depository ids only, never a value (ADR-001).",
       inputSchema: {
         path: external_exports.string().optional(),
-        depository: DEPOSITORY_ID_SCHEMA.optional()
+        depository: DEPOSITORY_ID_SCHEMA.optional(),
+        rotate: external_exports.boolean().optional()
       }
     },
     async (args) => {
@@ -46788,7 +46806,8 @@ function registerImportTool(server) {
           cwd,
           projectPath,
           envFilePath: absPath,
-          actor: "agent"
+          actor: "agent",
+          rotate: args.rotate
         });
         const summary = renderImportSummary(result2, parsed.invalidNames, cwd);
         return textResult(summary.text, summary.isError);

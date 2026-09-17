@@ -111,12 +111,39 @@ describe('storage manager', () => {
     ).rejects.toThrow(expect.objectContaining({ code: 'E_SCOPE_INVALID' }));
   });
 
+  it('Issue #39: the E_SCOPE_INVALID refusal above is audited, even though it throws before any depository or index access', async () => {
+    await expect(
+      setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'env', actor: 'cli' }),
+    ).rejects.toThrow();
+
+    const lines = readFileSync(auditLogPath(), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { op: string; name: string; ok: boolean; error: string | null });
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toMatchObject({ name: 'OPENAI_API_KEY', ok: false });
+    expect(lines[0]?.error).toContain('E_SCOPE_INVALID');
+  });
+
   it('set on an existing name without rotate throws E_EXISTS', async () => {
     await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
 
     await expect(
       setSecret({ name: 'OPENAI_API_KEY', value: 'new-value', scope: 'global', depository: 'encrypted', actor: 'cli' }),
     ).rejects.toThrow(expect.objectContaining({ code: 'E_EXISTS' }));
+  });
+
+  it('Issue #39: the E_EXISTS refusal above is audited too — a caller reading the log sees the refusal, not silence', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
+    await expect(
+      setSecret({ name: 'OPENAI_API_KEY', value: 'new-value', scope: 'global', depository: 'encrypted', actor: 'cli' }),
+    ).rejects.toThrow();
+
+    const lines = readFileSync(auditLogPath(), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { op: string; name: string; ok: boolean; error: string | null });
+    // Line 0 is the first, successful set (op: 'set', ok: true); line 1 is the refusal.
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatchObject({ name: 'OPENAI_API_KEY', ok: false });
+    expect(lines[1]?.error).toContain('E_EXISTS');
+    // Never the value, in either the successful or the refused line.
+    expect(JSON.stringify(lines)).not.toContain(SENTINEL);
+    expect(JSON.stringify(lines)).not.toContain('new-value');
   });
 
   it('set with rotate overwrites and reports rotated: true', async () => {

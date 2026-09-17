@@ -69,14 +69,29 @@ export interface SetSecretResult {
 }
 
 export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult> {
-  validateName(opts.name);
+  // Every refusal below — not just a depository write failure — is audited with the same
+  // shape: a refusal is an operation that happened and left the world unchanged, and a
+  // reader of the audit log deserves to see it (Issue #39's reasoning, applied to every
+  // throw site setSecret itself owns, not only the one `commitImport` originally surfaced).
+  const auditRefusal = (err: unknown, op: AuditEvent['op']): void => {
+    appendAuditEvent({ op, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+  };
+
+  try {
+    validateName(opts.name);
+  } catch (err) {
+    auditRefusal(err, opts.auditOp ?? 'set');
+    throw err;
+  }
 
   if (opts.depository === 'env' && opts.scope === 'global') {
-    throw new EnigmaError({
+    const err = new EnigmaError({
       code: 'E_SCOPE_INVALID',
       message: 'env depository does not support global scope; a project .env file has no global location',
       secretName: opts.name,
     });
+    auditRefusal(err, opts.auditOp ?? 'set');
+    throw err;
   }
 
   const needsProjectPath = opts.scope === 'project' || opts.depository === 'env';
@@ -85,24 +100,27 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
 
   const index = readIndex();
   const existing = findIndexEntry(index, opts.name, opts.scope, pid);
+  const op = opts.auditOp ?? (existing ? 'rotated' : 'set');
+
   if (existing && !opts.rotate) {
-    throw new EnigmaError({
+    const err = new EnigmaError({
       code: 'E_EXISTS',
       message: `${opts.name} already exists in ${opts.scope} scope; pass rotate to overwrite`,
       secretName: opts.name,
     });
+    auditRefusal(err, op);
+    throw err;
   }
 
   // env's ref is the bare NAME — the .env file is already located via DepositoryContext.projectPath (D1.9).
   const providedRef = opts.depository === 'env' ? opts.name : buildRef(opts.name, opts.scope, pid);
   const depository = createDepository(opts.depository, { projectPath, createVault: opts.createVault });
-  const op = opts.auditOp ?? (existing ? 'rotated' : 'set');
 
   let ref: string;
   try {
     ref = await depository.set(providedRef, opts.value);
   } catch (err) {
-    appendAuditEvent({ op, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+    auditRefusal(err, op);
     throw err;
   }
 

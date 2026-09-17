@@ -13,7 +13,7 @@ import type { ImportCommitFailure } from '../../storage/import-commit.js';
 import type { DepositoryId } from '../../storage/interfaces.js';
 import { startServer } from '../../web/server.js';
 
-const USAGE = 'enigma import [PATH] [--depository ID] [--json]';
+const USAGE = 'enigma import [PATH] [--depository ID] [--rotate] [--json]';
 
 interface ImportReport {
   imported: string[];
@@ -121,10 +121,11 @@ async function runBrowserFlow(
 }
 
 export async function cmdImport(argv: string[]): Promise<number> {
-  const { positionals, flags } = parseArgs(argv, { value: ['depository'], boolean: ['json'] });
+  const { positionals, flags } = parseArgs(argv, { value: ['depository'], boolean: ['json', 'rotate'] });
   const pathArg = positionals[0] ?? '.env';
   const depository = flags.depository as DepositoryId | undefined;
   const json = Boolean(flags.json);
+  const rotate = Boolean(flags.rotate);
 
   if (positionals.length > 1) throw new UsageError(USAGE);
 
@@ -168,6 +169,7 @@ export async function cmdImport(argv: string[]): Promise<number> {
     projectPath,
     envFilePath: absPath,
     actor: 'cli',
+    rotate,
   });
 
   return report(
