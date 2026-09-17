@@ -1119,15 +1119,20 @@ function commandName(token) {
   const parts = token.split("/");
   return parts[parts.length - 1] ?? token;
 }
+function tokenTargetsPath(token, isTarget) {
+  const eq = token.indexOf("=");
+  if (eq !== -1 && isTarget(token.slice(eq + 1))) return true;
+  return !token.startsWith("-") && isTarget(token);
+}
 function segmentTargetsDotEnvByPath(segment) {
   const [head, ...rest] = tokenize(segment);
   if (head && NON_READING_BASH_VERBS.has(commandName(head))) return false;
-  return rest.some((t) => !t.startsWith("-") && targetsDotEnv(t));
+  return rest.some((t) => tokenTargetsPath(t, targetsDotEnv));
 }
 function segmentTargetsEnigmaConfigByPath(segment, cwd) {
   const [head, ...rest] = tokenize(segment);
   if (!head) return false;
-  return rest.some((t) => !t.startsWith("-") && targetsEnigmaConfig(t, cwd));
+  return rest.some((t) => tokenTargetsPath(t, (value) => targetsEnigmaConfig(value, cwd)));
 }
 function segmentIsBareEnvDump(segment) {
   const [head] = tokenize(segment);

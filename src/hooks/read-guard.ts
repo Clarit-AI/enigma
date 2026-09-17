@@ -34,6 +34,21 @@
 //
 // This module never touches a secret VALUE — only secret NAMES (to recognize
 // `echo $NAME`) and file paths. Names are safe to inspect freely per the glossary.
+//
+// A `key=value` argument (`dd if=.env`, `awk -f=.env`, `python3 --file=.env`,
+// `somecmd -o=.env`) is checked on the value half, not just the whole token —
+// see `tokenTargetsPath` (Issue #46). This is deliberately uniform rather than
+// enumerating which keys ("if", "-f", "--file") mean "read this file" for
+// which command, because that enumeration is exactly what table-driven is
+// avoiding, and it would still miss the next command's own option name. The
+// accepted cost: an argument that merely assigns a `.env`-looking string to a
+// variable — `make VAR=.env`, `FOO=.env some-command` — denies too, even
+// though nothing there necessarily reads the file's contents. That's judged
+// worth it: this guard already denies on the .env argument to `cp`, `base64`,
+// `tar`, and every other non-allowlisted command regardless of whether that
+// specific invocation would actually read the bytes (see the `cp`/encode
+// paragraph above), so treating a `key=value` argument the same way is
+// consistent with the guard's existing stance, not a new one.
 import { basename, resolve, sep } from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { enigmaHome } from '../core/paths.js';
@@ -216,20 +231,40 @@ function commandName(token: string): string {
   return parts[parts.length - 1] ?? token;
 }
 
+/**
+ * True when `token` — or, split on its first `=`, the right-hand side of it —
+ * is a path `isTarget` cares about (Issue #46). `dd if=.env`, `awk -f=.env`,
+ * `python3 --file=.env`, and `somecmd -o=.env` all name a target file using
+ * the same `key=value` shape a plain `VAR=.env` assignment-style argument
+ * uses, and there is no way to tell "this key means read a file" from "this
+ * key is just a variable name" from the token text alone — see the top-of-
+ * file comment for why this checks the value uniformly rather than trying to
+ * special-case dd/awk/etc.'s specific option names (that's the enumeration
+ * this guard is deliberately table-driven to avoid). The whole-token form is
+ * still skipped for anything starting with `-`, since a bare flag like `-f`
+ * is never itself a path.
+ */
+function tokenTargetsPath(token: string, isTarget: (value: string) => boolean): boolean {
+  const eq = token.indexOf('=');
+  if (eq !== -1 && isTarget(token.slice(eq + 1))) return true;
+  return !token.startsWith('-') && isTarget(token);
+}
+
 /** Target-based, not utility-gated: ANY command referencing a `.env` path as a
- * non-flag argument is denied, whatever that command is (`less`, `xxd`,
+ * non-flag argument (or the value half of a `key=value` argument — see
+ * `tokenTargetsPath`) is denied, whatever that command is (`less`, `xxd`,
  * `strings`, `source`, `.` …) — except the small allowlist of commands that
  * touch the file without reading its content into this session. */
 function segmentTargetsDotEnvByPath(segment: string): boolean {
   const [head, ...rest] = tokenize(segment);
   if (head && NON_READING_BASH_VERBS.has(commandName(head))) return false;
-  return rest.some((t) => !t.startsWith('-') && targetsDotEnv(t));
+  return rest.some((t) => tokenTargetsPath(t, targetsDotEnv));
 }
 
 function segmentTargetsEnigmaConfigByPath(segment: string, cwd: string): boolean {
   const [head, ...rest] = tokenize(segment);
   if (!head) return false;
-  return rest.some((t) => !t.startsWith('-') && targetsEnigmaConfig(t, cwd));
+  return rest.some((t) => tokenTargetsPath(t, (value) => targetsEnigmaConfig(value, cwd)));
 }
 
 function segmentIsBareEnvDump(segment: string): boolean {

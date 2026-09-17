@@ -239,6 +239,51 @@ describe('PreToolUse read-guard', () => {
     });
   });
 
+  describe('key=value argument tokens (Issue #46): dd if=, --file=, -o=, etc.', () => {
+    it.each<[string, PreToolUseInput]>([
+      ['dd if=.env bs=1 count=100', bash('dd if=.env bs=1 count=100')],
+      ['dd if=.env', bash('dd if=.env')],
+      ['dd if=.env.local', bash('dd if=.env.local')],
+      ['awk -f=.env', bash('awk -f=.env')],
+      ['python3 --file=.env', bash('python3 --file=.env')],
+      ['somecmd --input=.env', bash('somecmd --input=.env')],
+      ['somecmd -o=.env', bash('somecmd -o=.env')],
+      ['dd if=./.env (slash no longer the only reason this denies)', bash('dd if=./.env')],
+      ['dd if=/tmp/proj/.env', bash('dd if=/tmp/proj/.env')],
+    ])('%s -> denied', (_label, input) => {
+      expect(isDenied(input)).toBe(true);
+    });
+
+    it('still denies the already-working control cases from the issue report', () => {
+      expect(isDenied(bash('cat .env'))).toBe(true);
+      expect(isDenied(bash('base64 .env'))).toBe(true);
+    });
+
+    it('the value-side check also closes the equivalent gap for the Enigma config directory', () => {
+      const enigmaHomeDir = process.env.ENIGMA_HOME as string;
+      expect(isDenied(bash(`dd if=${join(enigmaHomeDir, 'index.json')}`))).toBe(true);
+    });
+
+    it(
+      'KNOWN AND ACCEPTED false positive: a plain key=value argument that merely assigns a .env-looking ' +
+        'string (not naming a file to read) also denies — make VAR=.env, FOO=.env some-command — because ' +
+        'there is no way to tell "this key means read a file" (dd\'s if=) from "this key is just a variable ' +
+        'name" (make\'s VAR=) from the token text alone, and this guard already denies the .env argument to ' +
+        'every non-allowlisted command regardless of whether that invocation would actually read the bytes ' +
+        '(cp, base64, tar, …). See tokenTargetsPath and the top-of-file comment.',
+      () => {
+        expect(isDenied(bash('make VAR=.env'))).toBe(true);
+        expect(isDenied(bash('cp src=.env dst'))).toBe(true);
+      },
+    );
+
+    it('does not deny an ordinary flag or key=value pair with no .env/config-path value', () => {
+      expect(isDenied(bash('grep -n=5 pattern file.ts'))).toBe(false);
+      expect(isDenied(bash('NODE_ENV=production npm start'))).toBe(false);
+      expect(isDenied(bash('make VAR=value'))).toBe(false);
+    });
+  });
+
   describe('Grep directory-rooted searches get a .env exclusion instead of an outright deny (fix batch #1)', () => {
     let tmpProject: string;
 
