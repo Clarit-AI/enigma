@@ -35,21 +35,23 @@ Headers on every response: `Content-Security-Policy`, `X-Frame-Options: DENY`, `
 
 ## 3. CLI (`enigma`)
 
+This block mirrors `enigma`'s own `USAGE` string in `src/cli/index.ts` (run `enigma` with no arguments to see it). If the two ever disagree, the CLI is correct and this file is stale.
+
 ```
 enigma add NAME [--depository ID] [--scope project|global] [--description TEXT] [--usage interactive|unattended]
-enigma request NAME... [--depository ID] [--scope …] [--remote] [--native] [--timeout-min N]
-enigma reveal NAME [--clipboard]
 enigma list [--scope …] [--json]
 enigma remove NAME [--scope …]
-enigma move NAME --to ID
+enigma move NAME --to ID [--scope …]
 enigma run [--only A,B] [--scope …] -- <command> [args...]
-enigma get NAME            # humans/scripts; stderr warning; blocked for the agent by the read-guard
-enigma import [PATH] [--depository ID]
+enigma get NAME [--scope …]        # humans/scripts; stderr warning; blocked for the agent by the read-guard
+enigma import [PATH] [--depository ID] [--json]
 enigma doctor [--json]
-enigma install             # register marketplace + enable plugin
+enigma install [--uninstall]       # register marketplace + enable plugin
 ```
 
-Exit codes: 0 ok, 1 Enigma error (code printed), 2 usage. `run` exits with the child's code.
+`enigma request` and `enigma reveal` are **not available at the CLI, by design**: `src/cli/index.ts` routes both names to a stub (`src/cli/commands/not-implemented.ts`) that prints `enigma <command> is not available at the CLI. Use \`enigma_<command>\` (MCP tool) or \`/enigma:<command>\` (slash command) instead.` and exits 2. That flow exists today only as the `enigma_request`/`enigma_reveal` MCP tools (§1) and the `/enigma:*` slash commands (Issue #14) — the stub's own header comment confirms this is a deliberate scope boundary, not a gap waiting to be filled, so this document does not carry them as CLI commands until a future decision reverses that.
+
+Exit codes: 0 ok, 1 Enigma error (code printed), 2 usage (also returned by the `request`/`reveal` stub). `run` exits with the child's code.
 
 ## 4. File formats
 

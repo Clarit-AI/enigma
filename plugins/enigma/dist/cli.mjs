@@ -4874,8 +4874,10 @@ async function cmdRun(argv) {
 // src/cli/commands/not-implemented.ts
 function notImplemented(command) {
   return async () => {
-    process.stderr.write(`enigma ${command}: not yet implemented
-`);
+    process.stderr.write(
+      `enigma ${command} is not available at the CLI. Use \`enigma_${command}\` (MCP tool) or \`/enigma:${command}\` (slash command) instead.
+`
+    );
     return 2;
   };
 }
@@ -4894,7 +4896,8 @@ Commands:
   doctor [--json]
   install [--uninstall]
 
-Not yet implemented: request, reveal
+Not available at the CLI: request, reveal
+  (use the enigma_request/enigma_reveal MCP tools, or /enigma:request and /enigma:reveal)
 `;
 var COMMANDS = {
   add: cmdAdd,
