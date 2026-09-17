@@ -4565,6 +4565,151 @@ async function cmdImport(argv) {
   );
 }
 
+// src/cli/commands/install.ts
+import { existsSync as existsSync10, mkdirSync as mkdirSync2, readFileSync as readFileSync7, renameSync as renameSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { homedir as homedir2 } from "node:os";
+import { dirname as dirname3, join as join5 } from "node:path";
+var MARKETPLACE_NAME = "clarit-enigma";
+var REPO = "Clarit-AI/enigma";
+var PLUGIN_ENTRY = `enigma@${MARKETPLACE_NAME}`;
+function claudeSettingsPath() {
+  const configDir = process.env.CLAUDE_CONFIG_DIR || join5(homedir2(), ".claude");
+  return join5(configDir, "settings.json");
+}
+var DEFAULT_STYLE = { indent: "  ", trailingNewline: true, eol: "\n" };
+function detectStyle(raw) {
+  const indentMatch = raw.match(/\n([ \t]+)\S/);
+  return {
+    indent: indentMatch?.[1] ?? DEFAULT_STYLE.indent,
+    trailingNewline: raw.endsWith("\n"),
+    eol: raw.includes("\r\n") ? "\r\n" : "\n"
+  };
+}
+function readSettings(path) {
+  if (!existsSync10(path)) return { settings: {}, style: DEFAULT_STYLE };
+  let raw;
+  try {
+    raw = readFileSync7(path, "utf8");
+  } catch (err) {
+    throw new EnigmaError({
+      code: "E_CLAUDE_SETTINGS_UNWRITABLE",
+      message: `Could not read ${path}: ${errorReason(err)}. Fix its permissions, then run enigma install again.`
+    });
+  }
+  if (raw.trim() === "") return { settings: {}, style: DEFAULT_STYLE };
+  let parsed;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new EnigmaError({
+      code: "E_CLAUDE_SETTINGS_INVALID",
+      message: `${path} is not valid JSON. Fix or remove it by hand, then run enigma install again.`
+    });
+  }
+  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+    throw new EnigmaError({
+      code: "E_CLAUDE_SETTINGS_INVALID",
+      message: `${path} must contain a JSON object. Fix or remove it by hand, then run enigma install again.`
+    });
+  }
+  return { settings: parsed, style: detectStyle(raw) };
+}
+function expectRecord(settings, key, path) {
+  const value = settings[key];
+  if (value === void 0) return {};
+  if (typeof value !== "object" || value === null || Array.isArray(value)) {
+    throw new EnigmaError({
+      code: "E_CLAUDE_SETTINGS_INVALID",
+      message: `${path}'s "${key}" must be a JSON object; it is not. Fix it by hand, then run enigma install again.`
+    });
+  }
+  return value;
+}
+function isEnigmaMarketplaceSource(entry) {
+  return entry?.source?.source === "github" && entry.source?.repo === REPO;
+}
+function errorReason(err) {
+  return err instanceof Error ? err.message : String(err);
+}
+function writeSettingsAtomic(path, settings, style) {
+  const dir = dirname3(path);
+  try {
+    mkdirSync2(dir, { recursive: true });
+  } catch (err) {
+    throw new EnigmaError({
+      code: "E_CLAUDE_SETTINGS_UNWRITABLE",
+      message: `Could not create or access the settings directory ${dir}: ${errorReason(err)}. Fix its permissions, then run enigma install again.`
+    });
+  }
+  const tmpPath = `${path}.enigma-install-${process.pid}.tmp`;
+  const lfBody = JSON.stringify(settings, null, style.indent);
+  const body = style.eol === "\r\n" ? lfBody.replace(/\n/g, "\r\n") : lfBody;
+  try {
+    writeFileSync5(tmpPath, style.trailingNewline ? `${body}${style.eol}` : body, "utf8");
+    renameSync3(tmpPath, path);
+  } catch (err) {
+    throw new EnigmaError({
+      code: "E_CLAUDE_SETTINGS_UNWRITABLE",
+      message: `Could not write ${path}: ${errorReason(err)}. Fix its permissions, then run enigma install again.`
+    });
+  }
+}
+async function cmdInstall(argv) {
+  const { flags } = parseArgs(argv, { boolean: ["uninstall"] });
+  const uninstall = Boolean(flags.uninstall);
+  const path = claudeSettingsPath();
+  const { settings: before, style } = readSettings(path);
+  const enabledPlugins = expectRecord(before, "enabledPlugins", path);
+  const marketplaces = expectRecord(before, "extraKnownMarketplaces", path);
+  const marketplaceEntry = marketplaces[MARKETPLACE_NAME];
+  if (uninstall) {
+    const isEnabled = enabledPlugins[PLUGIN_ENTRY] === true;
+    const hasOwnMarketplace = marketplaceEntry !== void 0 && isEnigmaMarketplaceSource(marketplaceEntry);
+    if (!isEnabled && !hasOwnMarketplace) {
+      process.stdout.write(`Enigma is not registered in ${path}; nothing to do.
+`);
+      return 0;
+    }
+    const nextEnabled = { ...enabledPlugins };
+    delete nextEnabled[PLUGIN_ENTRY];
+    const nextMarketplaces = { ...marketplaces };
+    if (hasOwnMarketplace) delete nextMarketplaces[MARKETPLACE_NAME];
+    const next2 = { ...before };
+    if (Object.keys(nextEnabled).length > 0) next2.enabledPlugins = nextEnabled;
+    else delete next2.enabledPlugins;
+    if (Object.keys(nextMarketplaces).length > 0) next2.extraKnownMarketplaces = nextMarketplaces;
+    else delete next2.extraKnownMarketplaces;
+    writeSettingsAtomic(path, next2, style);
+    process.stdout.write(`Disabled ${PLUGIN_ENTRY} and unregistered the ${MARKETPLACE_NAME} marketplace in ${path}.
+`);
+    return 0;
+  }
+  if (marketplaceEntry !== void 0 && !isEnigmaMarketplaceSource(marketplaceEntry)) {
+    throw new EnigmaError({
+      code: "E_CLAUDE_SETTINGS_INVALID",
+      message: `${path}'s "extraKnownMarketplaces.${MARKETPLACE_NAME}" already points somewhere other than ${REPO}. Resolve that by hand, then run enigma install again.`
+    });
+  }
+  const alreadyInstalled = enabledPlugins[PLUGIN_ENTRY] === true && isEnigmaMarketplaceSource(marketplaceEntry);
+  if (alreadyInstalled) {
+    process.stdout.write(`Enigma is already registered in ${path}; nothing to do.
+`);
+    return 0;
+  }
+  const next = {
+    ...before,
+    extraKnownMarketplaces: { ...marketplaces, [MARKETPLACE_NAME]: { source: { source: "github", repo: REPO } } },
+    enabledPlugins: { ...enabledPlugins, [PLUGIN_ENTRY]: true }
+  };
+  writeSettingsAtomic(path, next, style);
+  process.stdout.write(
+    `Registered the ${MARKETPLACE_NAME} marketplace (${REPO}) and enabled ${PLUGIN_ENTRY} in ${path}.
+Restart Claude Code to pick up the change.
+`
+  );
+  return 0;
+}
+
 // src/cli/commands/list.ts
 function promptProfileFor(depository) {
   return DEPOSITORY_MODULES.find((m) => m.id === depository)?.promptProfile ?? "unknown";
@@ -4747,8 +4892,9 @@ Commands:
   get NAME [--scope project|global]
   import [PATH] [--depository ID] [--json]
   doctor [--json]
+  install [--uninstall]
 
-Not yet implemented: request, reveal, install
+Not yet implemented: request, reveal
 `;
 var COMMANDS = {
   add: cmdAdd,
@@ -4759,9 +4905,9 @@ var COMMANDS = {
   get: cmdGet,
   doctor: cmdDoctor,
   import: cmdImport,
+  install: cmdInstall,
   request: notImplemented("request"),
-  reveal: notImplemented("reveal"),
-  install: notImplemented("install")
+  reveal: notImplemented("reveal")
 };
 async function main(argv) {
   const [command, ...rest] = argv;
