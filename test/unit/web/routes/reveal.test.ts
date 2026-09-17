@@ -58,10 +58,22 @@ describe('GET /v/:id, POST /v/:id/reveal', () => {
     const resp = await fetch(`${origin}/v/${record.id}/reveal`, { method: 'POST' });
     expect(resp.status).toBe(200);
 
-    const lines = readFileSync(auditLogPath(), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { op: string; name: string });
+    const lines = readFileSync(auditLogPath(), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { op: string; name: string; method?: string });
     const revealLine = lines.find((l) => l.op === 'reveal' && l.name === 'OPENAI_API_KEY');
     expect(revealLine).toBeDefined();
     expect(lines.some((l) => l.op === 'read')).toBe(false);
+  });
+
+  it('a successful reveal records method "page", distinguishing it from a clipboard reveal (Issue #26)', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: 'sk-value', scope: 'global', depository: 'encrypted', actor: 'cli' });
+    const record = RequestStore.create({ kind: 'reveal', names: ['OPENAI_API_KEY'], scope: 'global' });
+
+    const resp = await fetch(`${origin}/v/${record.id}/reveal`, { method: 'POST' });
+    expect(resp.status).toBe(200);
+
+    const lines = readFileSync(auditLogPath(), 'utf8').trim().split('\n').map((line) => JSON.parse(line) as { op: string; name: string; method?: string });
+    const revealLine = lines.find((l) => l.op === 'reveal' && l.name === 'OPENAI_API_KEY');
+    expect(revealLine?.method).toBe('page');
   });
 
   it('POST /reveal on an already-used id returns 410 and does not resolve again', async () => {

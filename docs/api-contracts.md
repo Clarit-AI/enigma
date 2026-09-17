@@ -9,7 +9,7 @@ Every tool result is text and contains names, depository ids, scopes, and status
 | Tool | Input (zod) | Result |
 |---|---|---|
 | `enigma_list` | `{ scope?: "project"\|"global"\|"all" }` | table of `{ name, scope, depository, promptProfile, usage, updatedAt, shadowed }` |
-| `enigma_request` | `{ names: string[] (1..10), reason: string, usage: "interactive"\|"unattended", depository?: DepositoryId, scope?: "project"\|"global", rotate?: boolean, ui?: "web"\|"native", remote?: boolean }` | with elicitation: blocks, then `"Stored NAME in <depository> (<scope>)"` per name; without: `{ request_id, url, expiresAt }` plus instruction to call `enigma_await` |
+| `enigma_request` | `{ names: string[] (1..10), reason: string, usage: "interactive"\|"unattended", depository?: DepositoryId, scope?: "project"\|"global", rotate?: boolean, ui?: "web"\|"native", remote?: boolean, confirmCreateVault?: boolean }` | with elicitation: blocks, then `"Stored NAME in <depository> (<scope>)"` per name; without: `{ request_id, url, expiresAt }` plus instruction to call `enigma_await` |
 | `enigma_await` | `{ request_id: string }` | same success text as above, or `E_REQUEST_EXPIRED` |
 | `enigma_reveal` | `{ name: string, scope?: …, method?: "page"\|"clipboard" }` | `"Reveal link opened; expires in 5 min"` or `"Copied to clipboard; clears in 60 s"` |
 | `enigma_remove` | `{ name: string, scope?: … }` | form-mode boolean confirmation, then `"Removed NAME from <depository>"`; `E_AMBIGUOUS_SCOPE` when both scopes hold the name and none was given |
@@ -19,6 +19,8 @@ Every tool result is text and contains names, depository ids, scopes, and status
 `DepositoryId = "env" | "encrypted" | "keychain" | "secret-service" | "1password"`.
 
 Errors: `isError: true`, text `E_CODE: message` (no values). `E_EXISTS` when `rotate` is not set for an existing name.
+
+`confirmCreateVault` (Issue #28) is the explicit, one-time user confirmation to create a depository's backing collection when it doesn't exist yet — currently only 1Password's `Enigma` vault. It is never defaulted to true anywhere. `enigma_request`'s `ui:"native"` path consumes it directly: an unconfirmed `E_VAULT_MISSING` is asked about via form-mode elicitation (a yes/no confirmation is not a credential, so form mode is permitted here — same reasoning as `enigma_remove`'s confirmation) before falling back to a client without form-elicitation support. The URL-mode path doesn't need the field itself — its actual write happens on the human's web form (`POST /r/:id`, §2), which asks for the same confirmation there. `enigma add` (§3) exposes the identical confirmation as `--confirm-create-vault`.
 
 ## 2. Local HTTP server (`127.0.0.1:<ephemeral>`)
 
@@ -38,7 +40,7 @@ Headers on every response: `Content-Security-Policy`, `X-Frame-Options: DENY`, `
 This block mirrors `enigma`'s own `USAGE` string in `src/cli/index.ts` (run `enigma` with no arguments to see it). If the two ever disagree, the CLI is correct and this file is stale.
 
 ```
-enigma add NAME [--depository ID] [--scope project|global] [--description TEXT] [--usage interactive|unattended]
+enigma add NAME [--depository ID] [--scope project|global] [--description TEXT] [--usage interactive|unattended] [--confirm-create-vault]
 enigma list [--scope …] [--json]
 enigma remove NAME [--scope …]
 enigma move NAME --to ID [--scope …]
@@ -62,8 +64,11 @@ Exit codes: 0 ok, 1 Enigma error (code printed), 2 usage (also returned by the `
 
 `~/.config/enigma/audit.log` (0600, JSONL):
 ```json
-{ "ts": "ISO", "op": "set|rotated|read|reveal|remove|move|import|leak", "name": "…", "scope": "…", "depository": "…", "actor": "agent|user|cli|hook", "ok": true, "error": null }
+{ "ts": "ISO", "op": "set|rotated|read|reveal|remove|move|import|leak", "name": "…", "scope": "…", "depository": "…", "actor": "agent|user|cli|hook", "ok": true, "error": null, "method"?: "clipboard"|"page" }
 ```
+`method` (Issue #26) is present only on a `reveal` line, naming the disclosure surface — never a value, ref, or anything derived from the secret. It's optional so every audit line written before this field existed stays valid; a reader encountering a `reveal` line without it should treat the method as "not recorded", never assume a specific one. The union only ever names a surface a reveal path actually produces — `enigma_reveal`'s own method is `page | clipboard` — so a new member is added only alongside the reveal path that emits it, never speculatively.
+
+Corrupt/unparsable on-disk JSON never surfaces a raw `SyntaxError` (Issue #18): `index.json` → `E_INDEX_CORRUPT`, `secrets.enc` → `E_VAULT_CORRUPT` (naming depository `encrypted`), `config.json` and project `.enigma.json` → `E_CONFIG_CORRUPT`. Every case names the file's path and says to fix or remove it by hand; none ever include the file's actual bytes.
 
 `~/.config/enigma/secrets.enc` (0600): `{ "version": 1, "entries": { "<ref>": { "iv": b64, "tag": b64, "ct": b64 } } }`; key at `~/.config/enigma/enigma.key` (0600, 32 random bytes, base64).
 

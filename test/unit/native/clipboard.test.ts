@@ -163,6 +163,7 @@ describe('clipboardReveal', () => {
       actor: 'user',
       ok: true,
       error: null,
+      method: 'clipboard',
     });
     expect(JSON.stringify(auditLines)).not.toContain(SENTINEL);
   });
@@ -190,8 +191,8 @@ describe('clipboardReveal', () => {
 
     // resolveSecret's own audit (ok: true) plus the pbcopy failure it can't see (ok: false).
     expect(revealLines).toHaveLength(2);
-    expect(revealLines[0]).toMatchObject({ ok: true, error: null });
-    expect(revealLines[1]).toMatchObject({ ok: false });
+    expect(revealLines[0]).toMatchObject({ ok: true, error: null, method: 'clipboard' });
+    expect(revealLines[1]).toMatchObject({ ok: false, method: 'clipboard' });
     expect(String(revealLines[1]!.error)).not.toContain(SENTINEL);
     expect(JSON.stringify(auditLines)).not.toContain(SENTINEL);
   });

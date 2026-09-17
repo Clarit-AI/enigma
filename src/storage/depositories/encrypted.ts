@@ -39,7 +39,7 @@ function getOrCreateKey(): Buffer {
 }
 
 function readSecretsFile(): SecretsFile {
-  return readJsonFile(secretsPath(), EMPTY_SECRETS_FILE);
+  return readJsonFile(secretsPath(), EMPTY_SECRETS_FILE, 'E_VAULT_CORRUPT', 'encrypted');
 }
 
 function writeSecretsFile(file: SecretsFile): void {

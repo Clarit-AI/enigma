@@ -8,7 +8,7 @@ import { EnigmaError } from '../core/errors.js';
 import { validateName } from '../core/naming.js';
 import { findProjectPath, projectId as computeProjectId } from '../core/project.js';
 import { appendAuditEvent, auditErrorText } from '../core/audit.js';
-import type { AuditActor, AuditEvent } from '../core/audit.js';
+import type { AuditActor, AuditEvent, AuditRevealMethod } from '../core/audit.js';
 import {
   buildRef,
   findIndexEntry,
@@ -194,6 +194,8 @@ export interface ResolveSecretOptions {
   actor: AuditActor;
   /** Audit op to record for this resolve; defaults to 'read'. The web reveal route (Issue #7) passes 'reveal' so a disclosure is audited as such rather than as a generic read. */
   auditOp?: AuditEvent['op'];
+  /** Disclosure surface to record when `auditOp` is 'reveal' (Issue #26); ignored for every other op. */
+  auditMethod?: AuditRevealMethod;
 }
 
 /**
@@ -210,13 +212,14 @@ export async function resolveSecret(name: string, opts: ResolveSecretOptions): P
   }
 
   const op = opts.auditOp ?? 'read';
+  const method = op === 'reveal' ? opts.auditMethod : undefined;
   const depository = createDepository(entry.depository, { projectPath: projectPathFor(entry, opts.cwd) });
   try {
     const value = await depository.resolve(entry.ref);
-    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: true, error: null });
+    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: true, error: null, method });
     return value;
   } catch (err) {
-    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: false, error: auditErrorText(err), method });
     throw err;
   }
 }

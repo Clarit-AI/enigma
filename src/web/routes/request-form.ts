@@ -13,7 +13,7 @@ import { readBody, parseSubmission, PayloadTooLargeError } from '../body.js';
 import { renderRepeatingBlock, renderTemplate } from '../templates/render.js';
 import { requestFormHtml, requestDoneHtml } from '../templates/loaded.js';
 import { sendHtml, sendErrorPage } from '../responses.js';
-import { buildDepositoryOptions, needsAvailabilityConfirmation } from '../depository-picker.js';
+import { buildDepositoryOptions, needsCreateVaultConfirmation } from '../depository-picker.js';
 
 interface RenderFormOptions {
   status?: number;
@@ -152,7 +152,7 @@ export async function handleRequestFormPost(req: IncomingMessage, res: ServerRes
   }
 
   const detections = await detectAll();
-  if (needsAvailabilityConfirmation(detections, chosenDepository) && !submission.confirmCreateVault) {
+  if ((await needsCreateVaultConfirmation(detections, chosenDepository)) && !submission.confirmCreateVault) {
     // Pre-flight only: nothing has been written and the id is not yet
     // consumed, so the user can resubmit with confirmation.
     await renderForm(res, record, {

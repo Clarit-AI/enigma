@@ -26,6 +26,8 @@ export interface NativeRequestOptions {
   rotate?: boolean;
   /** @default 'user' — the human answering the dialog, not the calling agent/tool. */
   actor?: AuditActor;
+  /** Explicit, one-time user confirmation to create a depository's backing collection when missing (Issue #28); forwarded to `setSecret`. Never a default. */
+  createVault?: boolean;
 }
 
 /** Names only; a value never leaves this module except through `setSecret` (ADR-001). */
@@ -74,6 +76,7 @@ export async function nativeRequest(opts: NativeRequestOptions): Promise<NativeR
       usage: opts.usage,
       rotate: opts.rotate,
       actor,
+      createVault: opts.createVault,
     });
     stored.push(name);
   }

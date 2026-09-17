@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { loadConfig, loadProjectManifest } from '../../src/core/config.js';
 import { configPath } from '../../src/core/paths.js';
+import { EnigmaError } from '../../src/core/errors.js';
 
 describe('loadConfig', () => {
   let tmpHome: string;
@@ -34,6 +35,22 @@ describe('loadConfig', () => {
     writeFileSync(configPath(), JSON.stringify({ ui: 'not-a-real-ui' }));
     expect(loadConfig()).toEqual({});
   });
+
+  it('a corrupt config.json throws EnigmaError E_CONFIG_CORRUPT naming the path, never a raw SyntaxError (Issue #18)', () => {
+    const CORRUPT_MARKER = 'totally-broken-bytes-should-never-appear-in-the-message';
+    writeFileSync(configPath(), `{ ${CORRUPT_MARKER}`);
+
+    try {
+      loadConfig();
+      expect.unreachable('loadConfig should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(EnigmaError);
+      const enigmaErr = err as EnigmaError;
+      expect(enigmaErr.code).toBe('E_CONFIG_CORRUPT');
+      expect(enigmaErr.message).toContain(configPath());
+      expect(enigmaErr.message).not.toContain(CORRUPT_MARKER);
+    }
+  });
 });
 
 describe('loadProjectManifest', () => {
@@ -57,5 +74,21 @@ describe('loadProjectManifest', () => {
       JSON.stringify({ defaultDepository: 'env', secrets: { OPENAI_API_KEY: 'OpenAI key' }, bogus: true }),
     );
     expect(loadProjectManifest(tmpProject)).toEqual({ defaultDepository: 'env', secrets: { OPENAI_API_KEY: 'OpenAI key' } });
+  });
+
+  it('a corrupt .enigma.json throws EnigmaError E_CONFIG_CORRUPT naming the path, never a raw SyntaxError (Issue #18)', () => {
+    const CORRUPT_MARKER = 'totally-broken-bytes-should-never-appear-in-the-message';
+    writeFileSync(join(tmpProject, '.enigma.json'), `{ ${CORRUPT_MARKER}`);
+
+    try {
+      loadProjectManifest(tmpProject);
+      expect.unreachable('loadProjectManifest should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(EnigmaError);
+      const enigmaErr = err as EnigmaError;
+      expect(enigmaErr.code).toBe('E_CONFIG_CORRUPT');
+      expect(enigmaErr.message).toContain(join(tmpProject, '.enigma.json'));
+      expect(enigmaErr.message).not.toContain(CORRUPT_MARKER);
+    }
   });
 });

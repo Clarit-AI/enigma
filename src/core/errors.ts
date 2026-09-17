@@ -19,7 +19,9 @@ export type EnigmaErrorCode =
   | 'E_REMOTE_UNAVAILABLE'
   | 'E_VALUE_AMBIGUOUS'
   | 'E_CLAUDE_SETTINGS_INVALID'
-  | 'E_CLAUDE_SETTINGS_UNWRITABLE';
+  | 'E_CLAUDE_SETTINGS_UNWRITABLE'
+  | 'E_VAULT_CORRUPT'
+  | 'E_CONFIG_CORRUPT';
 
 export interface EnigmaErrorOptions {
   code: EnigmaErrorCode;

@@ -151,7 +151,6 @@ async function promptSecretValue(promptText, streams = {}) {
 }
 
 // src/core/config.ts
-import { existsSync, readFileSync } from "node:fs";
 import { join as join2 } from "node:path";
 
 // src/core/paths.ts
@@ -176,15 +175,49 @@ function secretsPath() {
   return join(enigmaHome(), "secrets.enc");
 }
 
+// src/core/secure-file.ts
+import { mkdirSync, appendFileSync, chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { randomBytes } from "node:crypto";
+var FILE_MODE = 384;
+var DIR_MODE = 448;
+function ensureParentDir(path) {
+  const dir = dirname(path);
+  mkdirSync(dir, { recursive: true, mode: DIR_MODE });
+  chmodSync(dir, DIR_MODE);
+}
+function readJsonFile(path, fallback, corruptErrorCode, corruptDepository) {
+  if (!existsSync(path)) return fallback;
+  const raw = readFileSync(path, "utf8");
+  try {
+    return JSON.parse(raw);
+  } catch (err) {
+    if (!corruptErrorCode) throw err;
+    throw new EnigmaError({
+      code: corruptErrorCode,
+      message: `${path} is not valid JSON. Fix or remove it by hand, then try again.`,
+      depository: corruptDepository
+    });
+  }
+}
+function writeJsonFileAtomic(path, data) {
+  ensureParentDir(path);
+  const tmpPath = `${path}.${randomBytes(6).toString("hex")}.tmp`;
+  writeFileSync(tmpPath, JSON.stringify(data, null, 2), { mode: FILE_MODE });
+  chmodSync(tmpPath, FILE_MODE);
+  renameSync(tmpPath, path);
+}
+function appendLineSecure(path, line) {
+  ensureParentDir(path);
+  appendFileSync(path, `${line}
+`, { mode: FILE_MODE });
+}
+
 // src/core/config.ts
 var DEFAULT_CONFIG = {};
 var DEFAULT_MANIFEST = { secrets: {} };
-function readJsonIfExists(path) {
-  if (!existsSync(path)) return void 0;
-  return JSON.parse(readFileSync(path, "utf8"));
-}
 function loadConfig() {
-  const raw = readJsonIfExists(configPath());
+  const raw = readJsonFile(configPath(), void 0, "E_CONFIG_CORRUPT");
   if (!raw) return { ...DEFAULT_CONFIG };
   const config = {};
   if (typeof raw.defaultDepository === "string") config.defaultDepository = raw.defaultDepository;
@@ -196,7 +229,7 @@ function loadConfig() {
   return config;
 }
 function loadProjectManifest(projectPath) {
-  const raw = readJsonIfExists(join2(projectPath, ".enigma.json"));
+  const raw = readJsonFile(join2(projectPath, ".enigma.json"), void 0, "E_CONFIG_CORRUPT");
   if (!raw) return { ...DEFAULT_MANIFEST, secrets: {} };
   const manifest = { secrets: {} };
   if (typeof raw.defaultDepository === "string") manifest.defaultDepository = raw.defaultDepository;
@@ -223,13 +256,13 @@ function validateName(name) {
 // src/core/project.ts
 import { createHash } from "node:crypto";
 import { existsSync as existsSync2 } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname as dirname2, resolve } from "node:path";
 var PROJECT_ID_LENGTH = 16;
 function findProjectPath(cwd) {
   let dir = resolve(cwd);
   for (; ; ) {
     if (existsSync2(`${dir}/.git`)) return dir;
-    const parent = dirname(dir);
+    const parent = dirname2(dir);
     if (parent === dir) return resolve(cwd);
     dir = parent;
   }
@@ -237,40 +270,6 @@ function findProjectPath(cwd) {
 function projectId(cwd) {
   const projectPath = findProjectPath(cwd);
   return createHash("sha256").update(projectPath).digest("hex").slice(0, PROJECT_ID_LENGTH);
-}
-
-// src/core/secure-file.ts
-import { mkdirSync, appendFileSync, chmodSync, existsSync as existsSync3, readFileSync as readFileSync2, renameSync, writeFileSync } from "node:fs";
-import { dirname as dirname2 } from "node:path";
-import { randomBytes } from "node:crypto";
-var FILE_MODE = 384;
-var DIR_MODE = 448;
-function ensureParentDir(path) {
-  const dir = dirname2(path);
-  mkdirSync(dir, { recursive: true, mode: DIR_MODE });
-  chmodSync(dir, DIR_MODE);
-}
-function readJsonFile(path, fallback, corruptErrorCode) {
-  if (!existsSync3(path)) return fallback;
-  const raw = readFileSync2(path, "utf8");
-  try {
-    return JSON.parse(raw);
-  } catch (err) {
-    if (!corruptErrorCode) throw err;
-    throw new EnigmaError({ code: corruptErrorCode, message: `failed to parse ${path}: not valid JSON` });
-  }
-}
-function writeJsonFileAtomic(path, data) {
-  ensureParentDir(path);
-  const tmpPath = `${path}.${randomBytes(6).toString("hex")}.tmp`;
-  writeFileSync(tmpPath, JSON.stringify(data, null, 2), { mode: FILE_MODE });
-  chmodSync(tmpPath, FILE_MODE);
-  renameSync(tmpPath, path);
-}
-function appendLineSecure(path, line) {
-  ensureParentDir(path);
-  appendFileSync(path, `${line}
-`, { mode: FILE_MODE });
 }
 
 // src/core/audit.ts
@@ -342,15 +341,15 @@ function listIndexEntries(index, opts = {}) {
 
 // src/storage/depositories/encrypted.ts
 import { createCipheriv, createDecipheriv, randomBytes as randomBytes2 } from "node:crypto";
-import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
 var ALGORITHM = "aes-256-gcm";
 var KEY_BYTES = 32;
 var IV_BYTES = 12;
 var FILE_MODE2 = 384;
 var EMPTY_SECRETS_FILE = { version: 1, entries: {} };
 function readKey() {
-  if (!existsSync4(keyPath())) return void 0;
-  const key = Buffer.from(readFileSync3(keyPath(), "utf8"), "base64");
+  if (!existsSync3(keyPath())) return void 0;
+  const key = Buffer.from(readFileSync2(keyPath(), "utf8"), "base64");
   if (key.length !== KEY_BYTES) readFailed();
   return key;
 }
@@ -362,7 +361,7 @@ function getOrCreateKey() {
   return key;
 }
 function readSecretsFile() {
-  return readJsonFile(secretsPath(), EMPTY_SECRETS_FILE);
+  return readJsonFile(secretsPath(), EMPTY_SECRETS_FILE, "E_VAULT_CORRUPT", "encrypted");
 }
 function writeSecretsFile(file) {
   writeJsonFileAtomic(secretsPath(), file);
@@ -432,7 +431,7 @@ var encryptedDepositoryModule = {
 };
 
 // src/storage/depositories/env.ts
-import { existsSync as existsSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { join as join3 } from "node:path";
 var BEGIN_MARKER = "# enigma:begin";
 var END_MARKER = "# enigma:end";
@@ -509,10 +508,10 @@ function removeManagedValue(content, name) {
 }
 function checkEnvGitignore(projectPath) {
   const gitignorePath = join3(projectPath, ".gitignore");
-  if (!existsSync5(gitignorePath)) {
+  if (!existsSync4(gitignorePath)) {
     return [".env is not gitignored: no .gitignore file found in this project"];
   }
-  const lines = readFileSync4(gitignorePath, "utf8").split(/\r?\n/);
+  const lines = readFileSync3(gitignorePath, "utf8").split(/\r?\n/);
   const covered = lines.some((raw) => {
     const line = raw.trim();
     if (!line || line.startsWith("#")) return false;
@@ -533,7 +532,7 @@ function requireProjectPath(ctx) {
 }
 function createEnvDepository(ctx) {
   const envFilePath = join3(requireProjectPath(ctx), ".env");
-  const readEnvFile = () => existsSync5(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
+  const readEnvFile = () => existsSync4(envFilePath) ? readFileSync3(envFilePath, "utf8") : "";
   return {
     id: "env",
     promptProfile: "none",
@@ -727,7 +726,7 @@ var linuxSecretServiceDepositoryModule = {
 
 // src/storage/depositories/macos-keychain.ts
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync6 } from "node:fs";
+import { existsSync as existsSync5 } from "node:fs";
 var SECURITY_BIN = "/usr/bin/security";
 var SERVICE2 = "enigma";
 var EXEC_TIMEOUT_MS2 = 1e4;
@@ -894,7 +893,7 @@ var macosKeychainDepositoryModule = {
     if (process.platform !== "darwin") {
       return { id: "keychain", promptProfile: "may-prompt", available: false, reason: "not running on macOS" };
     }
-    const available = existsSync6(SECURITY_BIN);
+    const available = existsSync5(SECURITY_BIN);
     return {
       id: "keychain",
       promptProfile: "may-prompt",
@@ -989,6 +988,16 @@ function vaultMissing() {
     message: `the "${VAULT}" vault does not exist in 1Password; pass createVault to create it`,
     depository: "1password"
   });
+}
+async function checkOnepasswordVaultMissing() {
+  try {
+    await runOp(["vault", "get", VAULT, "--format", "json"]);
+    return false;
+  } catch (err) {
+    const failure = err;
+    if (isTimeout(failure)) return false;
+    return VAULT_MISSING_PATTERN.test(failure.stderr ?? "");
+  }
 }
 function timedOut(op) {
   const message = `1password depository timed out waiting for the op CLI after ${EXEC_TIMEOUT_MS3}ms; run "op signin" or unlock 1Password and try again`;
@@ -1260,38 +1269,57 @@ async function resolveSecret(name, opts) {
     throw new EnigmaError({ code: "E_NOT_FOUND", message: `${name} not found`, secretName: name });
   }
   const op = opts.auditOp ?? "read";
+  const method = op === "reveal" ? opts.auditMethod : void 0;
   const depository = createDepository(entry.depository, { projectPath: projectPathFor(entry, opts.cwd) });
   try {
     const value = await depository.resolve(entry.ref);
-    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: true, error: null });
+    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: true, error: null, method });
     return value;
   } catch (err) {
-    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: false, error: auditErrorText(err), method });
     throw err;
   }
 }
 
 // src/cli/commands/add.ts
-var USAGE = "enigma add NAME [--depository ID] [--scope project|global] [--description TEXT] [--usage interactive|unattended]";
+var USAGE = "enigma add NAME [--depository ID] [--scope project|global] [--description TEXT] [--usage interactive|unattended] [--confirm-create-vault]";
 async function cmdAdd(argv, streams = {}) {
-  const { positionals, flags } = parseArgs(argv, { value: ["depository", "scope", "description", "usage"] });
+  const { positionals, flags } = parseArgs(argv, {
+    value: ["depository", "scope", "description", "usage"],
+    boolean: ["confirm-create-vault"]
+  });
   const [name] = positionals;
   if (!name) throw new UsageError(USAGE);
   const scope = parseScope(flags.scope) ?? "project";
   const depository = flags.depository ?? loadConfig().defaultDepository ?? "encrypted";
   const description = typeof flags.description === "string" ? flags.description : void 0;
   const usage = parseUsage(flags.usage);
+  const createVault2 = Boolean(flags["confirm-create-vault"]);
   const value = await promptSecretValue(`Enter value for ${name}: `, streams);
-  const result = await setSecret({
-    name,
-    value,
-    scope,
-    depository,
-    cwd: process.cwd(),
-    description,
-    usage,
-    actor: "cli"
-  });
+  let result;
+  try {
+    result = await setSecret({
+      name,
+      value,
+      scope,
+      depository,
+      cwd: process.cwd(),
+      description,
+      usage,
+      actor: "cli",
+      createVault: createVault2
+    });
+  } catch (err) {
+    if (err instanceof EnigmaError && err.code === "E_VAULT_MISSING" && !createVault2) {
+      throw new EnigmaError({
+        code: "E_VAULT_MISSING",
+        message: `${err.message} Pass --confirm-create-vault to enigma add to authorise creating it.`,
+        secretName: name,
+        depository: err.depository
+      });
+    }
+    throw err;
+  }
   process.stdout.write(`Stored ${name} in ${depository} (${scope})
 `);
   for (const warning of result.warnings) {
@@ -1303,7 +1331,7 @@ async function cmdAdd(argv, streams = {}) {
 
 // src/cli/commands/doctor.ts
 import { execFile as execFile4 } from "node:child_process";
-import { existsSync as existsSync7 } from "node:fs";
+import { existsSync as existsSync6 } from "node:fs";
 import { platform, release } from "node:os";
 import { promisify } from "node:util";
 
@@ -1348,8 +1376,8 @@ async function cmdDoctor(argv) {
     index = { ok: false, error: err instanceof EnigmaError ? err.code : "unknown error" };
   }
   const vault = {
-    keyPresent: existsSync7(keyPath()),
-    secretsFilePresent: existsSync7(secretsPath())
+    keyPresent: existsSync6(keyPath()),
+    secretsFilePresent: existsSync6(secretsPath())
   };
   const { gaps: manifestGaps } = computeManifestGaps(process.cwd());
   const report2 = {
@@ -1409,7 +1437,7 @@ async function cmdGet(argv) {
 }
 
 // src/cli/commands/import.ts
-import { existsSync as existsSync9, readFileSync as readFileSync6 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync5 } from "node:fs";
 import { isAbsolute, join as join4 } from "node:path";
 
 // src/mcp/result-text.ts
@@ -1753,7 +1781,7 @@ function removeDotEnvEntries(content, names, opts = {}) {
 
 // src/storage/import-commit.ts
 import { randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync8, readFileSync as readFileSync5, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync4, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 var FILE_MODE4 = 384;
 function writeFileAtomic(path, content, mode) {
   const tmpPath = `${path}.${randomBytes4(6).toString("hex")}.tmp`;
@@ -1764,7 +1792,7 @@ function writeFileAtomic(path, content, mode) {
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     try {
-      if (existsSync8(tmpPath)) unlinkSync(tmpPath);
+      if (existsSync7(tmpPath)) unlinkSync(tmpPath);
       return { ok: false, error };
     } catch {
       return { ok: false, error, leftoverPath: tmpPath };
@@ -1821,7 +1849,7 @@ async function commitImport(opts) {
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
-  const currentContent = existsSync8(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
+  const currentContent = existsSync7(opts.envFilePath) ? readFileSync4(opts.envFilePath, "utf8") : "";
   const valueByName = new Map(opts.entries.map((e) => [e.name, e.value]));
   const currentValueByName = new Map(parseDotEnv(currentContent).entries.map((e) => [e.name, e.value]));
   const toRemove = [];
@@ -2259,6 +2287,11 @@ function needsAvailabilityConfirmation(detections, id) {
   const match = detections.find((d) => d.id === id);
   return !match || !match.available;
 }
+async function needsCreateVaultConfirmation(detections, id) {
+  if (needsAvailabilityConfirmation(detections, id)) return true;
+  if (id === "1password") return checkOnepasswordVaultMissing();
+  return false;
+}
 
 // src/web/routes/import-form.ts
 async function renderForm(res, record, opts = {}) {
@@ -2334,7 +2367,7 @@ async function handleImportFormPost(req, res, id) {
     return;
   }
   const detections = await detectAll();
-  if (needsAvailabilityConfirmation(detections, chosenDepository) && !submission.confirmCreateVault) {
+  if (await needsCreateVaultConfirmation(detections, chosenDepository) && !submission.confirmCreateVault) {
     await renderForm(res, record, { confirmDepository: chosenDepository, selectedDepositoryId: chosenDepository });
     return;
   }
@@ -4194,7 +4227,7 @@ async function handleRequestFormPost(req, res, id) {
     return;
   }
   const detections = await detectAll();
-  if (needsAvailabilityConfirmation(detections, chosenDepository) && !submission.confirmCreateVault) {
+  if (await needsCreateVaultConfirmation(detections, chosenDepository) && !submission.confirmCreateVault) {
     await renderForm2(res, record, {
       confirmDepository: chosenDepository,
       selectedDepositoryId: chosenDepository,
@@ -4278,7 +4311,7 @@ async function handleRevealPost(res, id) {
     return;
   }
   try {
-    const value = await resolveSecret(name, { scope: marked.scope, cwd: process.cwd(), actor: "user", auditOp: "reveal" });
+    const value = await resolveSecret(name, { scope: marked.scope, cwd: process.cwd(), actor: "user", auditOp: "reveal", auditMethod: "page" });
     sendJson(res, 200, { name, value });
   } catch (err) {
     if (err instanceof EnigmaError && err.code === "E_NOT_FOUND") {
@@ -4534,10 +4567,10 @@ async function cmdImport(argv) {
   const cwd = process.cwd();
   const projectPath = findProjectPath(cwd);
   const absPath = isAbsolute(pathArg) ? pathArg : join4(cwd, pathArg);
-  if (!existsSync9(absPath)) {
+  if (!existsSync8(absPath)) {
     throw new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` });
   }
-  const content = readFileSync6(absPath, "utf8");
+  const content = readFileSync5(absPath, "utf8");
   const parsed = parseDotEnv(content);
   if (parsed.entries.length === 0) {
     return report(
@@ -4585,7 +4618,7 @@ async function cmdImport(argv) {
 }
 
 // src/cli/commands/install.ts
-import { existsSync as existsSync10, mkdirSync as mkdirSync2, readFileSync as readFileSync7, renameSync as renameSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync9, mkdirSync as mkdirSync2, readFileSync as readFileSync6, renameSync as renameSync3, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { dirname as dirname3, join as join5 } from "node:path";
 var MARKETPLACE_NAME = "clarit-enigma";
@@ -4605,10 +4638,10 @@ function detectStyle(raw) {
   };
 }
 function readSettings(path) {
-  if (!existsSync10(path)) return { settings: {}, style: DEFAULT_STYLE };
+  if (!existsSync9(path)) return { settings: {}, style: DEFAULT_STYLE };
   let raw;
   try {
-    raw = readFileSync7(path, "utf8");
+    raw = readFileSync6(path, "utf8");
   } catch (err) {
     throw new EnigmaError({
       code: "E_CLAUDE_SETTINGS_UNWRITABLE",

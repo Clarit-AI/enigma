@@ -53,7 +53,7 @@ vi.mock('node:child_process', () => ({
   },
 }));
 
-const { onepasswordDepositoryModule } = await import('../../../src/storage/depositories/onepassword.js');
+const { onepasswordDepositoryModule, checkOnepasswordVaultMissing } = await import('../../../src/storage/depositories/onepassword.js');
 
 function okResult(stdout = ''): RespondResult {
   return { stdout };
@@ -295,6 +295,39 @@ describe('onepassword depository', () => {
         expect.objectContaining({ code: 'E_REF_INVALID' }),
       );
       expect(calls).toHaveLength(0);
+    });
+  });
+
+  describe('checkOnepasswordVaultMissing (Issue #28)', () => {
+    it('returns false when the vault exists', async () => {
+      respond = (call) => {
+        if (call.args[0] === 'vault' && call.args[1] === 'get') return okResult(JSON.stringify({ id: 'vaultid', name: 'Enigma' }));
+        throw new Error(`unexpected call: ${call.args.join(' ')}`);
+      };
+
+      await expect(checkOnepasswordVaultMissing()).resolves.toBe(false);
+      expect(calls).toHaveLength(1);
+      // Read-only: never creates or writes anything while probing.
+      expect(calls.some((c) => c.args.includes('create'))).toBe(false);
+    });
+
+    it('returns true when the vault does not exist, without creating it', async () => {
+      respond = () => opError('"Enigma" isn\'t a vault in this account');
+
+      await expect(checkOnepasswordVaultMissing()).resolves.toBe(true);
+      expect(calls.some((c) => c.args.includes('create'))).toBe(false);
+    });
+
+    it('returns false (defers to the real attempt) for an unrelated op failure', async () => {
+      respond = () => opError('account is not signed in');
+
+      await expect(checkOnepasswordVaultMissing()).resolves.toBe(false);
+    });
+
+    it('returns false (defers to the real attempt) on timeout, never hanging past the bound', async () => {
+      respond = () => ({ timedOut: true });
+
+      await expect(checkOnepasswordVaultMissing()).resolves.toBe(false);
     });
   });
 
