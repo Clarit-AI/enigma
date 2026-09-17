@@ -43730,12 +43730,17 @@ function renderStoredLines(names, cwd) {
   return names.map((name) => renderStoredLine(name, cwd));
 }
 function renderOutcome(results, cwd) {
-  const failed = results.filter((r) => !r.ok);
+  const failed = results.filter((r) => !r.ok && r.errorCode !== "E_OUTCOME_UNKNOWN");
+  const unknown2 = results.filter((r) => !r.ok && r.errorCode === "E_OUTCOME_UNKNOWN");
   const succeeded = results.filter((r) => r.ok);
   const lines = [
     ...failed.map((r) => r.reason ? `${r.name}: failed (${r.errorCode ?? "E_UNKNOWN"}) \u2014 ${r.reason}` : `${r.name}: failed (${r.errorCode ?? "E_UNKNOWN"})`),
+    ...unknown2.map((r) => `${r.name}: outcome unknown (E_OUTCOME_UNKNOWN)`),
     ...renderStoredLines(succeeded.map((r) => r.name), cwd)
   ];
+  if (unknown2.length > 0) {
+    lines.push("Some secrets may already be stored \u2014 run `enigma list` or `enigma doctor` to check before retrying.");
+  }
   return { text: lines.join("\n"), isError: succeeded.length === 0 };
 }
 
