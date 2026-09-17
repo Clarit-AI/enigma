@@ -98,7 +98,42 @@
 // same shape but only in a way that also breaks the target CLI's own
 // argument parsing (also pinned, as a deliberate non-fix: the guard's parse
 // is accurate to what real bash hands that process, and PR #32's boundary is
-// that a command which doesn't work isn't a bypass worth chasing).
+// that a command which doesn't work isn't a bypass worth chasing). Verified
+// concretely for `enigma get`, not just asserted: `src/cli/index.ts`'s
+// `main()` destructures `argv` into `[command, ...rest]` and dispatches via
+// `COMMANDS[command]`, keyed on `argv[0]` alone — so `enigma ';' get NAME`
+// looks up `COMMANDS[';']`, finds nothing, and prints the "unknown command"
+// usage error (exit 2) without `cmdGet` ever running. The displaced head
+// breaks Enigma's own real dispatch the same way it breaks the guard's
+// parse of it, not just in theory.
+//
+// THE RULE TAXONOMY. Given correct segmentation, every rule above falls into
+// one of two structurally different buckets, and which bucket a rule is in
+// is what actually decided whether rounds 1-4 could reach it. A SCAN rule —
+// `segmentTargetsDotEnvByPath`'s `.env`-by-path check,
+// `segmentTargetsEnigmaConfigByPath`'s config-path check, and the regex scan
+// half of `segmentEchoesKnownSecret` that looks for a tracked name anywhere
+// in the segment — examines every remaining token in a segment regardless of
+// position, so over-splitting can only move a target INTO some fragment's
+// scanned set, never out of it: the safe direction. A HEAD rule —
+// `segmentIsBareEnvDump`, `segmentIsEnigmaGetOrEnv`, `segmentIsKeychainRead`,
+// `segmentIsOpRead`, and the `head === 'echo'` gate half of
+// `segmentEchoesKnownSecret` — keys on a fragment's first token (or first
+// two, for the exact-subcommand rules), while the dangerous reference lives
+// in separately-displaceable text elsewhere in the command; a bad split can
+// relocate that text to a fragment whose head no longer matches, and neither
+// resulting fragment then satisfies the rule. "Over-splitting tends toward
+// over-denial" is true of every scan rule here and false of every head rule
+// — that is the load-bearing distinction, not a detail. Round 4 is what
+// happens when it isn't made explicit: an independent reviewer reasoned
+// "more fragments, more scanning, more denial" from `splitSegments`, correct
+// for most of this file (the scan rules, and the two `.env`/`printenv` cases
+// pinned as NOT independently vulnerable), and `echo ';' $NAME` — half scan,
+// half head, on the `head === 'echo'` side — was the one case it didn't hold
+// for. Note that `segmentEchoesKnownSecret` is both at once: over-splitting
+// is safe for what its regex scans for, and unsafe for the `echo` gate that
+// decides whether the scan runs at all. A rule doesn't have to be purely one
+// kind to be exposed by the head half.
 //
 // Four rounds, one shape each time: correctness depending on incidental
 // syntax the guard hadn't actually normalized (a slash, a quote's position,
@@ -232,6 +267,28 @@ function normalizeShellEscapes(command: string): string {
  * drifted apart before (`tokenize` gained real quoting in Issue #46 round 3
  * while `splitSegments` stayed a blind regex split, which is what Issue #48
  * turned out to be).
+ *
+ * The two callers slice the result differently, and that's intentional, not
+ * a leftover inconsistency: `tokenize` takes `segment.slice(i + 1, spanEnd -
+ * 1)`, the content BETWEEN the quote characters, because it needs the
+ * dequoted word for matching. `splitSegments` takes `command.slice(i,
+ * spanEnd)`, the WHOLE span including both quote characters, because it
+ * never dequotes anything — it only needs to skip the span atomically so
+ * nothing inside it is mistaken for a separator; dequoting is still
+ * `tokenize`'s job, downstream, once a segment has already been chosen. Same
+ * pairing rule, two different uses of what it finds.
+ *
+ * THE SEGMENTATION INVARIANT this gives `splitSegments`: in its loop, the
+ * `matchQuoteSpan` check at each position runs BEFORE the separator check
+ * (`matchSeparatorAt`), so whenever a span here pairs successfully, every
+ * character inside it — separators included — is consumed by the quote
+ * branch in one step and `matchSeparatorAt` never sees any of them. A quote
+ * span that pairs can therefore never straddle a segment boundary. The only
+ * way a quote character ends up split across two segments is when it has no
+ * matching close anywhere ahead — `matchQuoteSpan` returns `undefined` for
+ * that, by design (see above) — and a real separator after it splits
+ * normally; that's the accepted "mis-parse toward allow" case, not a
+ * violation of this invariant.
  */
 function matchQuoteSpan(text: string, i: number): number | undefined {
   const c = text[i];

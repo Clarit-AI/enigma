@@ -114,6 +114,8 @@ This repository belongs to the `Clarit-AI` GitHub account. Every `gh` and `git` 
 
 Git credentials are themselves routed by remote URL path, so a push to `Clarit-AI/*` never uses the KHAEntertainment token — but only once the right `gh`/`GH_CONFIG_DIR` is actually in scope for that process. Author identity for this folder is `Clarit AI <info@clarit.ai>`.
 
+Exporting `GH_CONFIG_DIR` in a shell is not enough for `git push` specifically: the credential helper (`gh auth git-credential`) runs as a subprocess of `git`, not of the shell that ran the export, so a plain `git push` after a separate `export GH_CONFIG_DIR=...` fails with `fatal: could not read Password for '...': Device not configured`. Pass it inline on the push itself (and on any `gh` invocation that triggers a git write) — `GH_CONFIG_DIR=/Users/bbrenner/.config/gh-clarit git push ...` — rather than relying on a prior export to still be in scope.
+
 ---
 
 ## Verification lane storage sandboxing
