@@ -2346,9 +2346,8 @@ async function handleImportFormPost(req, res, id) {
       rotate: submission.rotate,
       createVault: submission.confirmCreateVault
     });
-  } catch (err) {
-    const errorCode = err instanceof EnigmaError ? err.code : "E_UNKNOWN";
-    const results2 = record.names.map((name) => ({ name, ok: false, errorCode }));
+  } catch {
+    const results2 = record.names.map((name) => ({ name, ok: false, errorCode: "E_OUTCOME_UNKNOWN" }));
     record.importOutcome = { fileRewritten: false, warnings: [], skippedMismatch: [], depository: chosenDepository };
     RequestStore.fulfill(id, results2);
     sendErrorPage(
