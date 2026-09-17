@@ -20,7 +20,9 @@ export type RequestKind = 'request' | 'reveal' | 'import';
  * value-carrying string gets introduced here by someone with good
  * intentions later. If you're tempted to set `reason` for a NEW error code,
  * stop and ask whether that code's message can ever embed a value; if it
- * can, it does not belong here.
+ * can, it does not belong here. (Every file that constructs a RequestNameResult is
+ * enumerated in test/unit/reason-field-surfaces.test.ts, with a golden snapshot of
+ * its `reason:` assignments — Issue #38. A new or changed assignment fails that test.)
  */
 export interface RequestNameResult {
   name: string;

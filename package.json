@@ -24,9 +24,11 @@
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
-    "lint": "eslint .",
-    "typecheck": "tsc --noEmit",
-    "test": "vitest run",
+    "check-toolchain": "node scripts/check-toolchain.mjs",
+    "lint": "npm run check-toolchain && eslint .",
+    "typecheck": "npm run check-toolchain && tsc --noEmit",
+    "test": "npm run check-toolchain && vitest run",
+    "test:file": "npm run check-toolchain && vitest run",
     "leak-fence": "node scripts/leak-fence.mjs"
   },
   "devDependencies": {

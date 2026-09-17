@@ -42,4 +42,9 @@ describe('.github/workflows/ci.yml (AC4)', () => {
   it('checks committed dist bundles for drift after building', () => {
     expect(workflow).toMatch(/git status --porcelain plugins\/enigma\/dist/);
   });
+
+  it('exercises the toolchain guard by running a gate command without npm ci first (Issue #29)', () => {
+    expect(workflow).toMatch(/toolchain-guard:/);
+    expect(workflow).toMatch(/Verify gate commands refuse to run without npm ci/);
+  });
 });

@@ -100,9 +100,11 @@ Commands exist after the scaffold Issue lands; until then the gate is `n/a`.
 
 - **Lint**: `npm run lint`
 - **Type check**: `npm run typecheck`
-- **Static analysis**: `npm run leak-fence` (static scan asserting no value-returning storage call is reachable from `src/mcp/**` or `src/web/**`, and no depository passes a value via argv)
+- **Static analysis**: `npm run leak-fence` (static scan asserting no value-returning storage call is reachable from `src/mcp/**` or `src/web/**`, and no depository passes a value via argv — it matches call shapes only, not field assignments; see that script's header comment and `test/unit/reason-field-surfaces.test.ts` for what covers the gap, Issue #38)
 - **Dependency scan**: `npm audit --audit-level=high`
-- **Tests**: `npm test`
+- **Tests**: `npm test`, or `npm run test:file -- <path>` for a single file or a repeat loop
+
+**Gate commands must be run through the npm scripts above, always preceded by `npm ci` in a fresh checkout or worktree — never via a bare `npx <tool>`.** `npx vitest run <file>`, the command anyone reaches for to run one file or a repeat loop, checks local `node_modules/.bin` first but silently falls back to a cached or global install when `node_modules` is empty or missing that package — so a lane that runs it before `npm ci` gets a result from whatever version happens to be cached, not the version this repo pins, with no indication anything is wrong. `npm run <script>` does not have this failure mode on its own (npm always resolves from `node_modules/.bin` and fails loudly if the binary is absent), which is why it stays the required form. This cost real time once: a lane ran `npx vitest run <file>` before `npm ci`, silently got a cached `vitest@4.1.11` instead of the pinned `^5.0.1`, and a test failure that only existed under the wrong runner was investigated as a genuine pre-existing bug on `main` (Issue #29). `npm run lint`/`npm run typecheck`/`npm test` (and `npm run test:file`) now each run `scripts/check-toolchain.mjs` first, which fails with an actionable message naming `npm ci` if `vitest`, `typescript`, or `eslint` in `node_modules` is missing or does not satisfy its pinned range in `package.json`; `vitest.config.ts`'s `globalSetup` runs the same check, so even a bare `npx vitest` — the one path that bypasses the npm scripts entirely — still fails loudly instead of silently, because it still loads this repo's vitest config. This does not cover a bare `npx eslint`/`npx tsc`: those have no equivalent repo-config hook to run the guard unconditionally, so they are simply not a blessed way to run this project's checks — use the npm scripts.
 
 ---
 
