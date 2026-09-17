@@ -239,6 +239,155 @@ describe('PreToolUse read-guard', () => {
     });
   });
 
+  describe('key=value argument tokens (Issue #46): dd if=, --file=, -o=, etc.', () => {
+    it.each<[string, PreToolUseInput]>([
+      ['dd if=.env bs=1 count=100', bash('dd if=.env bs=1 count=100')],
+      ['dd if=.env', bash('dd if=.env')],
+      ['dd if=.env.local', bash('dd if=.env.local')],
+      ['awk -f=.env', bash('awk -f=.env')],
+      ['python3 --file=.env', bash('python3 --file=.env')],
+      ['somecmd --input=.env', bash('somecmd --input=.env')],
+      ['somecmd -o=.env', bash('somecmd -o=.env')],
+      ['dd if=./.env (slash no longer the only reason this denies)', bash('dd if=./.env')],
+      ['dd if=/tmp/proj/.env', bash('dd if=/tmp/proj/.env')],
+    ])('%s -> denied', (_label, input) => {
+      expect(isDenied(input)).toBe(true);
+    });
+
+    it('still denies the already-working control cases from the issue report', () => {
+      expect(isDenied(bash('cat .env'))).toBe(true);
+      expect(isDenied(bash('base64 .env'))).toBe(true);
+    });
+
+    it('the value-side check also closes the equivalent gap for the Enigma config directory', () => {
+      const enigmaHomeDir = process.env.ENIGMA_HOME as string;
+      expect(isDenied(bash(`dd if=${join(enigmaHomeDir, 'index.json')}`))).toBe(true);
+    });
+
+    it(
+      'KNOWN AND ACCEPTED false positive: a plain key=value argument that merely assigns a .env-looking ' +
+        'string (not naming a file to read) also denies — make VAR=.env, FOO=.env some-command — because ' +
+        'there is no way to tell "this key means read a file" (dd\'s if=) from "this key is just a variable ' +
+        'name" (make\'s VAR=) from the token text alone, and this guard already denies the .env argument to ' +
+        'every non-allowlisted command regardless of whether that invocation would actually read the bytes ' +
+        '(cp, base64, tar, …). See tokenTargetsPath and the top-of-file comment.',
+      () => {
+        expect(isDenied(bash('make VAR=.env'))).toBe(true);
+        expect(isDenied(bash('cp src=.env dst'))).toBe(true);
+      },
+    );
+
+    it('does not deny an ordinary flag or key=value pair with no .env/config-path value', () => {
+      expect(isDenied(bash('grep -n=5 pattern file.ts'))).toBe(false);
+      expect(isDenied(bash('NODE_ENV=production npm start'))).toBe(false);
+      expect(isDenied(bash('make VAR=value'))).toBe(false);
+    });
+  });
+
+  describe('key=value argument tokens, round 2 (Issue #46): quoting and multiple "="', () => {
+    it.each<[string, PreToolUseInput]>([
+      ["dd if='.env' (single-quoted value)", bash("dd if='.env'")],
+      ['dd if=".env" (double-quoted value)', bash('dd if=".env"')],
+      ["dd 'if=.env' (whole token quoted — already worked, must keep working)", bash("dd 'if=.env'")],
+      ['a=b=.env (dotenv hidden behind a second =)', bash('dd a=b=.env')],
+      ["a=b='.env' (second = AND a quoted value, combined)", bash("dd a=b='.env'")],
+      [String.raw`dd if=$'\x2e\x65\x6e\x76' (ANSI-C-quoted value reaches the value-side check too)`, bash(String.raw`dd if=$'\x2e\x65\x6e\x76'`)],
+    ])('%s -> denied', (_label, input) => {
+      expect(isDenied(input)).toBe(true);
+    });
+
+    it('the multi-= check does not stop at a suffix that only coincidentally contains another key=value pair', () => {
+      expect(isDenied(bash('dd a=b=c'))).toBe(false);
+    });
+
+    it(
+      'KNOWN AND ACCEPTED gap: a bare backslash escape outside $\'...\' (if=\\.env) is not un-escaped and so ' +
+        'is not recognized — same boundary as the rest of this file (PR #32 ruling): nothing here un-escapes a ' +
+        'bare backslash generally (only $\'...\' bodies are decoded), and doing so would mean re-implementing ' +
+        'shell escaping. Not new to this fix, and not chased for the same reason normalizeShellEscapes declines ' +
+        'to track quote context.',
+      () => {
+        expect(isDenied(bash(String.raw`dd if=\.env`))).toBe(false);
+      },
+    );
+
+    it(
+      'decided outcome: a quoted value with interior whitespace that still reduces to a dotenv basename ' +
+        "denies (targetsDotEnv trims before matching, same as every other path check in this file) — the safe " +
+        'direction for an ambiguous case, consistent with the rest of the guard.',
+      () => {
+        expect(isDenied(bash("dd if=' .env'"))).toBe(true);
+      },
+    );
+  });
+
+  describe('quote-splicing, round 3 (Issue #46): tokenize itself resolves quotes throughout a token, not just at its edges', () => {
+    it.each<[string, PreToolUseInput]>([
+      ["dd if=''.env (empty single-quoted span spliced before .env)", bash("dd if=''.env")],
+      ['dd if=.e""nv (empty double-quoted span spliced mid-word)', bash('dd if=.e""nv')],
+      ["dd if=\"\".env (empty double-quoted span spliced before .env)", bash('dd if="".env')],
+      ["cat ''.env (bare path, no key=value involved at all)", bash("cat ''.env")],
+      ["cat .en''v (bare path, spliced mid-word)", bash("cat .en''v")],
+      ['cat .e""nv (bare path, double-quoted splice)', bash('cat .e""nv')],
+    ])('%s -> denied', (_label, input) => {
+      expect(isDenied(input)).toBe(true);
+    });
+
+    it(
+      "a filename that genuinely contains a quote character is still recognized correctly when it's expressed " +
+        'the way bash itself requires — by switching quote types, not by an unquoted literal quote mark. This is ' +
+        "not a new cost: tokenize now pairs quote spans properly rather than blindly deleting every quote " +
+        'character, so this case is actually more correct than before, not less.',
+      () => {
+        // 'it'"'"'s.env' is the standard bash idiom for embedding a literal apostrophe in an otherwise
+        // single-quoted string: 'it' + "'" + 's.env' concatenated with no gaps -> the literal filename
+        // it's.env, confirmed against real bash (not just this guard's own parsing) before pinning it here.
+        const embedsLiteralQuote = ["cat ", "'", 'it', "'", '"', "'", '"', "'", 's.env', "'"].join('');
+        expect(embedsLiteralQuote).toBe(`cat 'it'"'"'s.env'`);
+        expect(isDenied(bash(embedsLiteralQuote))).toBe(false);
+        expect(isDenied(bash(`${embedsLiteralQuote} README.md`))).toBe(false);
+      },
+    );
+
+    it(
+      'KNOWN AND ACCEPTED decision: an unmatched quote mark (no closing quote anywhere later in the token) is ' +
+        'treated as an ordinary literal character, not as an unterminated span that swallows the rest of the ' +
+        'segment — the "mis-parse toward allow" direction used everywhere else in this file. A malformed/unmatched ' +
+        'quote is not valid shell syntax to begin with (real bash would treat it as an incomplete command), so this ' +
+        "is judged narrow. The upside: a genuine .env reference elsewhere in the same segment isn't swallowed into " +
+        'one unmatched blob and missed.',
+      () => {
+        expect(isDenied(bash("cat unmatched'.env"))).toBe(false);
+        expect(isDenied(bash("cat unmatched' README.md .env"))).toBe(true);
+      },
+    );
+
+    it(
+      'behavior change from round 2, deliberate and correct: a non-reading verb spelled with a quote-splice ' +
+        '(r\'\'m, the same trick used to bypass the deny rules) is now correctly recognized as "rm" by the ' +
+        'NON_READING_BASH_VERBS allowlist too, so r\'\'m .env is allowed — same as rm .env, because it IS rm .env ' +
+        'once quoting is resolved. This is a correctness fix to the allow path, not a new gap: real bash resolves ' +
+        'the quoting identically before rm ever sees its argv.',
+      () => {
+        expect(isDenied(bash("r''m .env"))).toBe(false);
+      },
+    );
+
+    it('the same tokenize fix closes quote-splicing on a command NAME for every other Bash rule, not just the .env-path ones', () => {
+      expect(isDenied(bash("pr''intenv"))).toBe(true);
+      expect(isDenied(bash("en''igma get OPENAI_API_KEY"))).toBe(true);
+      expect(isDenied(bash("sec''urity find-generic-password -s enigma -a x -w"))).toBe(true);
+      expect(isDenied(bash("o''p read op://Enigma/x/credential"))).toBe(true);
+      expect(isDenied(bash("ec''ho $OPENAI_API_KEY"))).toBe(true);
+    });
+
+    it('quote-splicing that spells an ordinary, non-dotenv value is still allowed — this is not a blanket new denial', () => {
+      expect(isDenied(bash("echo ''hello"))).toBe(false);
+      expect(isDenied(bash('git status'))).toBe(false);
+      expect(isDenied(bash("cat '' README.md"))).toBe(false);
+    });
+  });
+
   describe('Grep directory-rooted searches get a .env exclusion instead of an outright deny (fix batch #1)', () => {
     let tmpProject: string;
 

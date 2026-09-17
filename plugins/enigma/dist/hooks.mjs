@@ -1074,8 +1074,36 @@ function normalizeShellEscapes(command) {
   });
 }
 function tokenize(segment) {
-  const raw = segment.match(/(?:[^\s"']+|"[^"]*"|'[^']*')+/g) ?? [];
-  return raw.map((t) => t.replace(/^["']|["']$/g, ""));
+  const tokens = [];
+  let current = "";
+  let inWord = false;
+  let i = 0;
+  while (i < segment.length) {
+    const c = segment[i];
+    if (c === " " || c === "	" || c === "\n" || c === "\r") {
+      if (inWord) {
+        tokens.push(current);
+        current = "";
+        inWord = false;
+      }
+      i++;
+      continue;
+    }
+    if (c === '"' || c === "'") {
+      const close = segment.indexOf(c, i + 1);
+      if (close !== -1) {
+        current += segment.slice(i + 1, close);
+        inWord = true;
+        i = close + 1;
+        continue;
+      }
+    }
+    current += c;
+    inWord = true;
+    i++;
+  }
+  if (inWord) tokens.push(current);
+  return tokens;
 }
 function splitSegments(command) {
   return command.split(/\|\||&&|[|;&]/).map((s) => s.trim()).filter((s) => s.length > 0);
@@ -1119,15 +1147,28 @@ function commandName(token) {
   const parts = token.split("/");
   return parts[parts.length - 1] ?? token;
 }
+function equalsSuffixes(token) {
+  const suffixes = [];
+  let idx = token.indexOf("=");
+  while (idx !== -1) {
+    suffixes.push(token.slice(idx + 1));
+    idx = token.indexOf("=", idx + 1);
+  }
+  return suffixes;
+}
+function tokenTargetsPath(token, isTarget) {
+  if (equalsSuffixes(token).some((suffix) => isTarget(suffix))) return true;
+  return !token.startsWith("-") && isTarget(token);
+}
 function segmentTargetsDotEnvByPath(segment) {
   const [head, ...rest] = tokenize(segment);
   if (head && NON_READING_BASH_VERBS.has(commandName(head))) return false;
-  return rest.some((t) => !t.startsWith("-") && targetsDotEnv(t));
+  return rest.some((t) => tokenTargetsPath(t, targetsDotEnv));
 }
 function segmentTargetsEnigmaConfigByPath(segment, cwd) {
   const [head, ...rest] = tokenize(segment);
   if (!head) return false;
-  return rest.some((t) => !t.startsWith("-") && targetsEnigmaConfig(t, cwd));
+  return rest.some((t) => tokenTargetsPath(t, (value) => targetsEnigmaConfig(value, cwd)));
 }
 function segmentIsBareEnvDump(segment) {
   const [head] = tokenize(segment);
