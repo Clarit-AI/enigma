@@ -98,4 +98,15 @@ describe('cmdAdd', () => {
       expect.objectContaining({ code: 'E_EXISTS' }),
     );
   });
+
+  it('PR #52 review: the E_EXISTS refusal above is audited as op:"set", never "rotated" — add has no --rotate flag and never overwrote anything', async () => {
+    await cmdAdd(['OPENAI_API_KEY', '--scope', 'global'], { stdin: fakeNonTtyStdin('first-value') });
+    await expect(cmdAdd(['OPENAI_API_KEY', '--scope', 'global'], { stdin: fakeNonTtyStdin(SENTINEL) })).rejects.toThrow(
+      expect.objectContaining({ code: 'E_EXISTS' }),
+    );
+
+    const lines = readFileSync(auditLogPath(), 'utf8').trim().split('\n').map((l) => JSON.parse(l) as { op: string; ok: boolean });
+    expect(lines.at(-1)).toMatchObject({ op: 'set', ok: false });
+    expect(lines.some((l) => l.op === 'rotated')).toBe(false);
+  });
 });

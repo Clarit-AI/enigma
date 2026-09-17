@@ -141,6 +141,11 @@ describe('storage manager', () => {
     expect(lines).toHaveLength(2);
     expect(lines[1]).toMatchObject({ name: 'OPENAI_API_KEY', ok: false });
     expect(lines[1]?.error).toContain('E_EXISTS');
+    // PR #52 review: this refusal never rotated anything — rotate is required to be falsy
+    // for E_EXISTS to fire at all — so it must never be recorded as 'rotated', the verb for
+    // having overwritten something. A naive "show me every rotation" filter on op:'rotated'
+    // must never turn up a refusal that changed nothing.
+    expect(lines[1]?.op).toBe('set');
     // Never the value, in either the successful or the refused line.
     expect(JSON.stringify(lines)).not.toContain(SENTINEL);
     expect(JSON.stringify(lines)).not.toContain('new-value');

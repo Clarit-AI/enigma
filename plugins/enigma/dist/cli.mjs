@@ -1196,16 +1196,16 @@ async function setSecret(opts) {
   const pid = opts.scope === "project" ? projectId(opts.cwd ?? process.cwd()) : void 0;
   const index = readIndex();
   const existing = findIndexEntry(index, opts.name, opts.scope, pid);
-  const op = opts.auditOp ?? (existing ? "rotated" : "set");
   if (existing && !opts.rotate) {
     const err = new EnigmaError({
       code: "E_EXISTS",
       message: `${opts.name} already exists in ${opts.scope} scope; pass rotate to overwrite`,
       secretName: opts.name
     });
-    auditRefusal(err, op);
+    auditRefusal(err, opts.auditOp ?? "set");
     throw err;
   }
+  const op = opts.auditOp ?? (existing ? "rotated" : "set");
   const providedRef = opts.depository === "env" ? opts.name : buildRef(opts.name, opts.scope, pid);
   const depository = createDepository(opts.depository, { projectPath, createVault: opts.createVault });
   let ref;
@@ -4785,23 +4785,25 @@ async function cmdMove(argv) {
 `);
     return 0;
   }
+  let value;
   try {
-    const value = await resolveSecret(name, { scope: entry.scope, cwd, actor: "cli" });
-    await setSecret({
-      name,
-      value,
-      scope: entry.scope,
-      depository: target,
-      cwd,
-      description: entry.description,
-      usage: entry.usage,
-      rotate: true,
-      actor: "cli"
-    });
+    value = await resolveSecret(name, { scope: entry.scope, cwd, actor: "cli" });
   } catch (err) {
     appendAuditEvent({ op: "move", name, scope: entry.scope, depository: target, actor: "cli", ok: false, error: auditErrorText(err) });
     throw err;
   }
+  await setSecret({
+    name,
+    value,
+    scope: entry.scope,
+    depository: target,
+    cwd,
+    description: entry.description,
+    usage: entry.usage,
+    rotate: true,
+    actor: "cli",
+    auditOp: "move"
+  });
   const oldModule = DEPOSITORY_MODULES.find((m) => m.id === entry.depository);
   if (oldModule) {
     const projectPath = entry.scope === "project" ? entry.projectPath : void 0;
@@ -4812,7 +4814,6 @@ async function cmdMove(argv) {
       );
     });
   }
-  appendAuditEvent({ op: "move", name, scope: entry.scope, depository: target, actor: "cli", ok: true, error: null });
   process.stdout.write(`Moved ${name} to ${target} (${entry.scope})
 `);
   return 0;

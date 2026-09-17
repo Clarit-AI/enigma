@@ -100,7 +100,6 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
 
   const index = readIndex();
   const existing = findIndexEntry(index, opts.name, opts.scope, pid);
-  const op = opts.auditOp ?? (existing ? 'rotated' : 'set');
 
   if (existing && !opts.rotate) {
     const err = new EnigmaError({
@@ -108,9 +107,16 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
       message: `${opts.name} already exists in ${opts.scope} scope; pass rotate to overwrite`,
       secretName: opts.name,
     });
-    auditRefusal(err, op);
+    // This refusal only ever fires when rotate was NOT requested (the condition above
+    // requires it), so the request that reached it was always a plain set — never
+    // 'rotated', the verb for having overwritten something, which never happened here
+    // (PR #52 review: an audit line claiming more than the code delivered, just in a log
+    // line instead of a comment).
+    auditRefusal(err, opts.auditOp ?? 'set');
     throw err;
   }
+
+  const op = opts.auditOp ?? (existing ? 'rotated' : 'set');
 
   // env's ref is the bare NAME — the .env file is already located via DepositoryContext.projectPath (D1.9).
   const providedRef = opts.depository === 'env' ? opts.name : buildRef(opts.name, opts.scope, pid);

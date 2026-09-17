@@ -43636,16 +43636,16 @@ async function setSecret(opts) {
   const pid = opts.scope === "project" ? projectId(opts.cwd ?? process.cwd()) : void 0;
   const index = readIndex();
   const existing = findIndexEntry(index, opts.name, opts.scope, pid);
-  const op = opts.auditOp ?? (existing ? "rotated" : "set");
   if (existing && !opts.rotate) {
     const err = new EnigmaError({
       code: "E_EXISTS",
       message: `${opts.name} already exists in ${opts.scope} scope; pass rotate to overwrite`,
       secretName: opts.name
     });
-    auditRefusal(err, op);
+    auditRefusal(err, opts.auditOp ?? "set");
     throw err;
   }
+  const op = opts.auditOp ?? (existing ? "rotated" : "set");
   const providedRef = opts.depository === "env" ? opts.name : buildRef(opts.name, opts.scope, pid);
   const depository = createDepository(opts.depository, { projectPath, createVault: opts.createVault });
   let ref;
