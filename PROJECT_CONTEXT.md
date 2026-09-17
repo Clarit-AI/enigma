@@ -108,4 +108,32 @@ Commands exist after the scaffold Issue lands; until then the gate is `n/a`.
 
 ## GitHub account isolation (this machine)
 
-This repository belongs to the `Clarit-AI` GitHub account. Every `gh` and `git` write in this project runs with `GH_CONFIG_DIR=/Users/bbrenner/.config/gh-clarit` (set via `.claude/settings.local.json`, and exported explicitly in every worker lane's assignment). Git credentials are routed by remote URL path, so a push to `Clarit-AI/*` never uses the KHAEntertainment token. Author identity for this folder is `Clarit AI <info@clarit.ai>`.
+This repository belongs to the `Clarit-AI` GitHub account. Every `gh` and `git` write in this project runs with `GH_CONFIG_DIR=/Users/bbrenner/.config/gh-clarit`.
+
+**Scope**: `.claude/settings.local.json` sets that variable for the lead session only — it does not reach child agents, so it protects the lead session and nothing else. Every **delegated lane** — worker, QA, reviewer, and prototype alike, not just worker lanes — must have `GH_CONFIG_DIR=/Users/bbrenner/.config/gh-clarit` exported explicitly in its own assignment. A lane dispatched without that export authenticates `gh` under whatever account is ambient on this machine instead; that has already happened once, when a QA or reviewer lane posted to GitHub under the wrong account because the standing brief only named worker lanes (Issue #33).
+
+Git credentials are themselves routed by remote URL path, so a push to `Clarit-AI/*` never uses the KHAEntertainment token — but only once the right `gh`/`GH_CONFIG_DIR` is actually in scope for that process. Author identity for this folder is `Clarit AI <info@clarit.ai>`.
+
+---
+
+## Verification lane storage sandboxing
+
+**Scope**: any lane — worker, QA, reviewer, or prototype — whose assignment runs the real `enigma` tool (not just its unit tests) against local state.
+
+Two real locations must be sandboxed, not one:
+- `ENIGMA_HOME` — Enigma's own config/secret-store directory (default `~/.config/enigma`): `index.json`, `audit.log`, `secrets.enc`, `enigma.key`.
+- `CLAUDE_CONFIG_DIR` — the editor-side config `enigma install`/`enigma doctor` read and write (default `~/.claude`): `settings.json`.
+
+Both variables must point at a lane-local temp directory before the tool runs. Sandboxing only one is not a lesser version of this rule, it is a different rule that doesn't hold: a brief that named only `CLAUDE_CONFIG_DIR` once let verification lanes run the real tool against the user's real `~/.config/enigma`, and five orphaned entries landed in the real index before anyone noticed (Issue #43). No secret *values* leaked in that incident — the index holds names and metadata only, which is ADR-001 holding even in a case nobody intended to test — but `set`/`import` also write to the OS keychain and, on some depository paths, to 1Password, and those writes outlive a temp-directory cleanup; they are not undone by deleting the worktree.
+
+Every lane report states the end state of **both** real locations — `~/.config/enigma` and `~/.claude/settings.json` — normally by checksum, so a lead can confirm nothing leaked into them even when the lane's own sandbox worked as intended.
+
+---
+
+## Verification lane worktree isolation
+
+**Scope**: any time two or more delegated lanes (typically a QA lane and a reviewer lane) are dispatched against the same change.
+
+Two lanes must never be pointed at the same worktree. The mechanism: `git branch verify/<n>-<lane> <head>` to cut one throwaway branch per lane from the commit under test, then a separate `git worktree add` per lane checking out its own branch — because git refuses to check the same branch out into two worktrees at once, this forces one directory per lane rather than relying on lane authors to remember it. Each lane then has its own directory and its own branch; neither can see the other's probe files or fixture edits.
+
+This isn't a formality: for several rounds, QA and review shared one worktree, wrote probe files into the same tree, found each other's leftovers, and one reviewer corrected a bug in the other lane's fixture without either lane knowing the other existed (Issue #36). Two lanes reading one directory are not two independent reads — they are one shared mutable directory with two writers.
