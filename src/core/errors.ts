@@ -17,7 +17,9 @@ export type EnigmaErrorCode =
   | 'E_REQUEST_CANCELLED'
   | 'E_VAULT_MISSING'
   | 'E_REMOTE_UNAVAILABLE'
-  | 'E_VALUE_AMBIGUOUS';
+  | 'E_VALUE_AMBIGUOUS'
+  | 'E_CLAUDE_SETTINGS_INVALID'
+  | 'E_CLAUDE_SETTINGS_UNWRITABLE';
 
 export interface EnigmaErrorOptions {
   code: EnigmaErrorCode;

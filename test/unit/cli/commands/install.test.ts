@@ -1,0 +1,284 @@
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { cmdInstall, claudeSettingsPath } from '../../../../src/cli/commands/install.js';
+import { EnigmaError } from '../../../../src/core/errors.js';
+
+const MARKETPLACE = 'clarit-enigma';
+const PLUGIN_ENTRY = 'enigma@clarit-enigma';
+
+describe('cmdInstall', () => {
+  let tmpConfigDir: string;
+  let originalConfigDir: string | undefined;
+  let settingsPath: string;
+  let stdoutSpy: ReturnType<typeof vi.spyOn>;
+
+  beforeEach(() => {
+    tmpConfigDir = mkdtempSync(join(tmpdir(), 'enigma-claude-config-'));
+    originalConfigDir = process.env.CLAUDE_CONFIG_DIR;
+    process.env.CLAUDE_CONFIG_DIR = tmpConfigDir;
+    settingsPath = claudeSettingsPath();
+    stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+  });
+
+  afterEach(() => {
+    if (originalConfigDir === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = originalConfigDir;
+    rmSync(tmpConfigDir, { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  function readSettingsFile(): Record<string, unknown> {
+    return JSON.parse(readFileSync(settingsPath, 'utf8')) as Record<string, unknown>;
+  }
+
+  it('resolves the settings path under CLAUDE_CONFIG_DIR', () => {
+    expect(settingsPath).toBe(join(tmpConfigDir, 'settings.json'));
+  });
+
+  it('creates settings.json when none exists, registering the marketplace and enabling the plugin', async () => {
+    expect(existsSync(settingsPath)).toBe(false);
+
+    const code = await cmdInstall([]);
+
+    expect(code).toBe(0);
+    const settings = readSettingsFile();
+    expect(settings.enabledPlugins).toEqual({ [PLUGIN_ENTRY]: true });
+    expect(settings.extraKnownMarketplaces).toEqual({
+      [MARKETPLACE]: { source: { source: 'github', repo: 'Clarit-AI/enigma' } },
+    });
+  });
+
+  it('preserves unrelated existing keys and existing plugins/marketplaces', async () => {
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        theme: 'dark',
+        enabledPlugins: { 'other-plugin@other-marketplace': true },
+        extraKnownMarketplaces: { 'other-marketplace': { source: { source: 'github', repo: 'someone/else' } } },
+      }),
+    );
+
+    const code = await cmdInstall([]);
+
+    expect(code).toBe(0);
+    const settings = readSettingsFile();
+    expect(settings.theme).toBe('dark');
+    expect(settings.enabledPlugins).toEqual({
+      'other-plugin@other-marketplace': true,
+      [PLUGIN_ENTRY]: true,
+    });
+    expect(settings.extraKnownMarketplaces).toEqual({
+      'other-marketplace': { source: { source: 'github', repo: 'someone/else' } },
+      [MARKETPLACE]: { source: { source: 'github', repo: 'Clarit-AI/enigma' } },
+    });
+  });
+
+  it('is idempotent: running install twice does not duplicate or change anything on the second run', async () => {
+    await cmdInstall([]);
+    const firstRun = readFileSync(settingsPath, 'utf8');
+
+    const code = await cmdInstall([]);
+
+    expect(code).toBe(0);
+    expect(readFileSync(settingsPath, 'utf8')).toBe(firstRun);
+    expect(stdoutSpy.mock.calls.at(-1)?.[0]).toContain('already registered');
+  });
+
+  it('--uninstall reverses install, restoring settings.json to its exact original bytes', async () => {
+    // Pretty-printed with a trailing newline, matching how the real Claude
+    // Code CLI itself writes settings.json (confirmed by inspection).
+    const original = `${JSON.stringify({ theme: 'dark' }, null, 2)}\n`;
+    writeFileSync(settingsPath, original);
+
+    await cmdInstall([]);
+    const code = await cmdInstall(['--uninstall']);
+
+    expect(code).toBe(0);
+    // Raw bytes, not parsed-JSON equality: toEqual on parsed JSON can't see
+    // formatting, so it would pass even if the file got reformatted.
+    expect(readFileSync(settingsPath, 'utf8')).toBe(original);
+  });
+
+  it('preserves the original indentation and lack of a trailing newline through install and --uninstall', async () => {
+    const original = '{\n    "theme": "dark",\n    "someArray": [\n        1,\n        2\n    ]\n}';
+    writeFileSync(settingsPath, original);
+
+    await cmdInstall([]);
+    const afterInstall = readFileSync(settingsPath, 'utf8');
+    // The install itself must reproduce the 4-space indent and the missing trailing newline —
+    // not just the eventual round trip — so a diff after `enigma install` only shows the two
+    // keys it actually added, not a whole-file reformat.
+    expect(afterInstall.startsWith('{\n    "theme": "dark"')).toBe(true);
+    expect(afterInstall.endsWith('\n')).toBe(false);
+
+    const code = await cmdInstall(['--uninstall']);
+
+    expect(code).toBe(0);
+    expect(readFileSync(settingsPath, 'utf8')).toBe(original);
+  });
+
+  it('preserves CRLF line endings through install and --uninstall', async () => {
+    const original = '{\r\n  "theme": "dark"\r\n}\r\n';
+    writeFileSync(settingsPath, original);
+
+    await cmdInstall([]);
+    const afterInstall = readFileSync(settingsPath, 'utf8');
+    // Every structural newline install() writes must be \r\n, not just the
+    // eventual round trip back to the original.
+    expect(afterInstall).not.toMatch(/(?<!\r)\n/);
+    expect(afterInstall.startsWith('{\r\n  "theme": "dark"')).toBe(true);
+
+    const code = await cmdInstall(['--uninstall']);
+
+    expect(code).toBe(0);
+    expect(readFileSync(settingsPath, 'utf8')).toBe(original);
+  });
+
+  it('--uninstall only removes the marketplace entry it owns, leaving other keys alone', async () => {
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({
+        enabledPlugins: { 'other-plugin@other-marketplace': true },
+        extraKnownMarketplaces: { 'other-marketplace': { source: { source: 'github', repo: 'someone/else' } } },
+      }),
+    );
+    await cmdInstall([]);
+
+    const code = await cmdInstall(['--uninstall']);
+
+    expect(code).toBe(0);
+    const settings = readSettingsFile();
+    expect(settings.enabledPlugins).toEqual({ 'other-plugin@other-marketplace': true });
+    expect(settings.extraKnownMarketplaces).toEqual({
+      'other-marketplace': { source: { source: 'github', repo: 'someone/else' } },
+    });
+  });
+
+  it('--uninstall is idempotent when nothing is installed', async () => {
+    const code = await cmdInstall(['--uninstall']);
+
+    expect(code).toBe(0);
+    expect(existsSync(settingsPath)).toBe(false);
+    expect(stdoutSpy.mock.calls.at(-1)?.[0]).toContain('not registered');
+  });
+
+  it('treats an existing empty settings.json the same as a missing one', async () => {
+    writeFileSync(settingsPath, '');
+
+    const code = await cmdInstall([]);
+
+    expect(code).toBe(0);
+    expect(readSettingsFile().enabledPlugins).toEqual({ [PLUGIN_ENTRY]: true });
+  });
+
+  it('rejects malformed JSON without rewriting the file', async () => {
+    writeFileSync(settingsPath, '{ not valid json');
+
+    await expect(cmdInstall([])).rejects.toThrow(EnigmaError);
+    expect(readFileSync(settingsPath, 'utf8')).toBe('{ not valid json');
+  });
+
+  it('rejects a settings.json that is a JSON array', async () => {
+    writeFileSync(settingsPath, '[]');
+
+    await expect(cmdInstall([])).rejects.toThrow(EnigmaError);
+  });
+
+  it('refuses to overwrite a same-named marketplace entry pointing at a different repo', async () => {
+    writeFileSync(
+      settingsPath,
+      JSON.stringify({ extraKnownMarketplaces: { [MARKETPLACE]: { source: { source: 'github', repo: 'someone/else' } } } }),
+    );
+
+    await expect(cmdInstall([])).rejects.toThrow(EnigmaError);
+    const settings = readSettingsFile();
+    expect(settings.extraKnownMarketplaces).toEqual({
+      [MARKETPLACE]: { source: { source: 'github', repo: 'someone/else' } },
+    });
+  });
+
+  it('re-enables the plugin if the user had manually disabled it', async () => {
+    await cmdInstall([]);
+    const settings = readSettingsFile();
+    settings.enabledPlugins = { [PLUGIN_ENTRY]: false };
+    writeFileSync(settingsPath, JSON.stringify(settings));
+
+    const code = await cmdInstall([]);
+
+    expect(code).toBe(0);
+    expect(readSettingsFile().enabledPlugins).toEqual({ [PLUGIN_ENTRY]: true });
+  });
+
+  it('creates the config directory when it does not exist yet', async () => {
+    rmSync(tmpConfigDir, { recursive: true, force: true });
+    mkdirSync(join(tmpConfigDir, '..'), { recursive: true });
+
+    const code = await cmdInstall([]);
+
+    expect(code).toBe(0);
+    expect(existsSync(settingsPath)).toBe(true);
+  });
+
+  it('fails with a friendly, path-naming error when the settings directory cannot be created — distinct from an unwritable file', async () => {
+    // Occupy the config directory's own path with a plain file, so
+    // mkdirSync(dir, {recursive:true}) fails deterministically (EEXIST) —
+    // portable and root-safe, unlike a chmod-based permission test.
+    rmSync(tmpConfigDir, { recursive: true, force: true });
+    writeFileSync(tmpConfigDir, 'not a directory');
+
+    let error: unknown;
+    try {
+      await cmdInstall([]);
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(EnigmaError);
+    expect((error as InstanceType<typeof EnigmaError>).code).toBe('E_CLAUDE_SETTINGS_UNWRITABLE');
+    expect((error as Error).message).toContain(tmpConfigDir);
+    expect((error as Error).message.toLowerCase()).toContain('directory');
+  });
+
+  it('fails with a friendly, path-naming error when the settings file itself cannot be written — distinct from an unwritable directory', async () => {
+    const original = JSON.stringify({ theme: 'dark' });
+    writeFileSync(settingsPath, original);
+    // Occupy the exact atomic-write temp path with a directory, so
+    // writeFileSync(tmpPath, ...) fails deterministically (EISDIR) without
+    // relying on chmod (which a root-run test process would bypass).
+    const tmpWritePath = `${settingsPath}.enigma-install-${process.pid}.tmp`;
+    mkdirSync(tmpWritePath);
+
+    let error: unknown;
+    try {
+      await cmdInstall([]);
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(EnigmaError);
+    expect((error as InstanceType<typeof EnigmaError>).code).toBe('E_CLAUDE_SETTINGS_UNWRITABLE');
+    expect((error as Error).message).toContain(settingsPath);
+    expect(readFileSync(settingsPath, 'utf8')).toBe(original);
+  });
+
+  it('fails with a friendly, path-naming error when an existing settings.json cannot be read', async () => {
+    rmSync(settingsPath, { force: true });
+    // A directory at the settings.json path exists but can't be read as a
+    // file (EISDIR) — portable and root-safe, unlike a chmod-based test.
+    mkdirSync(settingsPath);
+
+    let error: unknown;
+    try {
+      await cmdInstall([]);
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(EnigmaError);
+    expect((error as InstanceType<typeof EnigmaError>).code).toBe('E_CLAUDE_SETTINGS_UNWRITABLE');
+    expect((error as Error).message).toContain(settingsPath);
+    expect((error as Error).message.toLowerCase()).toContain('read');
+  });
+});
