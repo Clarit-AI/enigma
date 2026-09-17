@@ -284,6 +284,43 @@ describe('PreToolUse read-guard', () => {
     });
   });
 
+  describe('key=value argument tokens, round 2 (Issue #46): quoting and multiple "="', () => {
+    it.each<[string, PreToolUseInput]>([
+      ["dd if='.env' (single-quoted value)", bash("dd if='.env'")],
+      ['dd if=".env" (double-quoted value)', bash('dd if=".env"')],
+      ["dd 'if=.env' (whole token quoted — already worked, must keep working)", bash("dd 'if=.env'")],
+      ['a=b=.env (dotenv hidden behind a second =)', bash('dd a=b=.env')],
+      ["a=b='.env' (second = AND a quoted value, combined)", bash("dd a=b='.env'")],
+      [String.raw`dd if=$'\x2e\x65\x6e\x76' (ANSI-C-quoted value reaches the value-side check too)`, bash(String.raw`dd if=$'\x2e\x65\x6e\x76'`)],
+    ])('%s -> denied', (_label, input) => {
+      expect(isDenied(input)).toBe(true);
+    });
+
+    it('the multi-= check does not stop at a suffix that only coincidentally contains another key=value pair', () => {
+      expect(isDenied(bash('dd a=b=c'))).toBe(false);
+    });
+
+    it(
+      'KNOWN AND ACCEPTED gap: a bare backslash escape outside $\'...\' (if=\\.env) is not un-escaped and so ' +
+        'is not recognized — same boundary as the rest of this file (PR #32 ruling): nothing here un-escapes a ' +
+        'bare backslash generally (only $\'...\' bodies are decoded), and doing so would mean re-implementing ' +
+        'shell escaping. Not new to this fix, and not chased for the same reason normalizeShellEscapes declines ' +
+        'to track quote context.',
+      () => {
+        expect(isDenied(bash(String.raw`dd if=\.env`))).toBe(false);
+      },
+    );
+
+    it(
+      'decided outcome: a quoted value with interior whitespace that still reduces to a dotenv basename ' +
+        "denies (targetsDotEnv trims before matching, same as every other path check in this file) — the safe " +
+        'direction for an ambiguous case, consistent with the rest of the guard.',
+      () => {
+        expect(isDenied(bash("dd if=' .env'"))).toBe(true);
+      },
+    );
+  });
+
   describe('Grep directory-rooted searches get a .env exclusion instead of an outright deny (fix batch #1)', () => {
     let tmpProject: string;
 

@@ -1119,9 +1119,20 @@ function commandName(token) {
   const parts = token.split("/");
   return parts[parts.length - 1] ?? token;
 }
+function stripEdgeQuotes(value) {
+  return value.replace(/^["']|["']$/g, "");
+}
+function equalsSuffixes(token) {
+  const suffixes = [];
+  let idx = token.indexOf("=");
+  while (idx !== -1) {
+    suffixes.push(token.slice(idx + 1));
+    idx = token.indexOf("=", idx + 1);
+  }
+  return suffixes;
+}
 function tokenTargetsPath(token, isTarget) {
-  const eq = token.indexOf("=");
-  if (eq !== -1 && isTarget(token.slice(eq + 1))) return true;
+  if (equalsSuffixes(token).some((suffix) => isTarget(stripEdgeQuotes(suffix)))) return true;
   return !token.startsWith("-") && isTarget(token);
 }
 function segmentTargetsDotEnvByPath(segment) {

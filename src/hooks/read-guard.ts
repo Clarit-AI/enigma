@@ -49,6 +49,16 @@
 // specific invocation would actually read the bytes (see the `cp`/encode
 // paragraph above), so treating a `key=value` argument the same way is
 // consistent with the guard's existing stance, not a new one.
+//
+// Round 2 (Issue #46): the value half is checked against EVERY `=` in the
+// token, not just the first (`a=b=.env` hid `.env` behind a second `=`), and
+// with one layer of surrounding quotes stripped first (`if='.env'` — see
+// `stripEdgeQuotes`), so correctness no longer depends on where a quote mark
+// or an extra `=` happens to land. `$'...'`/`${IFS}` reach this same check
+// for free, since `normalizeShellEscapes` already runs on the whole command
+// before tokenization. What's still deliberately not chased, same as before:
+// a bare backslash escape outside of `$'...'` (`if=\.env`) — see
+// `tokenTargetsPath`'s comment for why, and the pinned test for the decision.
 import { basename, resolve, sep } from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { enigmaHome } from '../core/paths.js';
@@ -232,21 +242,63 @@ function commandName(token: string): string {
 }
 
 /**
- * True when `token` — or, split on its first `=`, the right-hand side of it —
- * is a path `isTarget` cares about (Issue #46). `dd if=.env`, `awk -f=.env`,
- * `python3 --file=.env`, and `somecmd -o=.env` all name a target file using
- * the same `key=value` shape a plain `VAR=.env` assignment-style argument
- * uses, and there is no way to tell "this key means read a file" from "this
- * key is just a variable name" from the token text alone — see the top-of-
- * file comment for why this checks the value uniformly rather than trying to
- * special-case dd/awk/etc.'s specific option names (that's the enumeration
- * this guard is deliberately table-driven to avoid). The whole-token form is
- * still skipped for anything starting with `-`, since a bare flag like `-f`
- * is never itself a path.
+ * Strips one layer of a leading and/or trailing quote character (`"`/`'`),
+ * the same single-layer rule `tokenize` applies at a whole token's edges.
+ * The value half of a `key=value` argument can be independently quoted while
+ * the key half isn't (`if='.env'`), and because `tokenize`'s word-matching
+ * treats a bare run and a `'...'`/`"..."` span glued together as one token,
+ * the quote marks land inside the split-out value rather than at the token's
+ * own edges — `tokenize`'s own edge-stripping never sees them (Issue #46
+ * round 2). Deliberately not escape-aware (a literal `\'` inside the value
+ * isn't un-escaped): that's the same level of sophistication `tokenize`
+ * itself has everywhere else in this file, not a new gap introduced here.
+ */
+function stripEdgeQuotes(value: string): string {
+  return value.replace(/^["']|["']$/g, '');
+}
+
+/**
+ * Every substring of `token` starting right after an `=`, one per `=` in the
+ * token — not just the first. `a=b=.env` must be checked as both `"b=.env"`
+ * and `".env"`, not only the first split, or a second `=` hides a dotenv
+ * value behind an arbitrary key of its own (Issue #46 round 2).
+ */
+function equalsSuffixes(token: string): string[] {
+  const suffixes: string[] = [];
+  let idx = token.indexOf('=');
+  while (idx !== -1) {
+    suffixes.push(token.slice(idx + 1));
+    idx = token.indexOf('=', idx + 1);
+  }
+  return suffixes;
+}
+
+/**
+ * True when `token` — or, split on any `=` it contains, the (quote-stripped)
+ * text following it — is a path `isTarget` cares about (Issue #46). `dd
+ * if=.env`, `awk -f=.env`, `python3 --file=.env`, and `somecmd -o=.env` all
+ * name a target file using the same `key=value` shape a plain `VAR=.env`
+ * assignment-style argument uses, and there is no way to tell "this key means
+ * read a file" from "this key is just a variable name" from the token text
+ * alone — see the top-of-file comment for why this checks the value
+ * uniformly rather than trying to special-case dd/awk/etc.'s specific option
+ * names (that's the enumeration this guard is deliberately table-driven to
+ * avoid). The whole-token form is still skipped for anything starting with
+ * `-`, since a bare flag like `-f` is never itself a path.
+ *
+ * What this deliberately does NOT chase, same boundary as the rest of this
+ * file (PR #32's ruling): a backslash used to escape a character outside of
+ * `$'...'` (`if=\.env` — bash would read this as `if=.env`, but nothing in
+ * this file un-escapes a bare backslash; only `$'...'` bodies are decoded,
+ * via `decodeAnsiCEscapes`/`normalizeShellEscapes`, which already runs on
+ * the whole command before this point, so a `$'...'`-quoted value still
+ * matches). Un-escaping bare backslashes generally would mean re-implementing
+ * shell escaping, the same trade already declined for `normalizeShellEscapes`
+ * — see its comment. Pinned as a known, accepted gap in
+ * `test/unit/hooks/read-guard.test.ts`, not silently missed.
  */
 function tokenTargetsPath(token: string, isTarget: (value: string) => boolean): boolean {
-  const eq = token.indexOf('=');
-  if (eq !== -1 && isTarget(token.slice(eq + 1))) return true;
+  if (equalsSuffixes(token).some((suffix) => isTarget(stripEdgeQuotes(suffix)))) return true;
   return !token.startsWith('-') && isTarget(token);
 }
 
