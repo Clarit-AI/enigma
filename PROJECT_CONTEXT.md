@@ -130,6 +130,35 @@ Both variables must point at a lane-local temp directory before the tool runs. S
 
 Every lane report states the end state of **both** real locations — `~/.config/enigma` and `~/.claude/settings.json` — normally by checksum, so a lead can confirm nothing leaked into them even when the lane's own sandbox worked as intended.
 
+**This sandbox has a hole: it does not reach the `keychain`, `secret-service`, or `1password` depositories, at all.** `ENIGMA_HOME` and `CLAUDE_CONFIG_DIR` relocate Enigma's *own* on-disk state — the two variables above. They cannot relocate the *destinations* a `keychain`-, `secret-service`-, or `1password`-scoped entry actually writes to: the macOS login keychain, the Linux D-Bus secret service, and a 1Password vault are all global OS or account resources, addressed by the OS/account itself, with no environment variable that redirects any of them. A fully sandboxed `ENIGMA_HOME` gives false confidence the instant a command exercises any of those three depositories — confirmed the hard way when a fully-sandboxed verification lane ran `enigma move API_KEY --to keychain` and it wrote a real item into the real login keychain (Issue #53). This is exactly the survival mode Issue #43 warned about — "those writes outlive a temp-directory cleanup" two paragraphs up — now confirmed to defeat the sandbox variables directly, not just a forgotten cleanup step.
+
+**The actual rule for these three depositories: don't exercise them against real credentials in verification work.** Use the `env` or `encrypted` depository in any lane assignment, fixture, or manual probe that needs a working depository end-to-end — neither touches a global resource, so both are fully covered by the `ENIGMA_HOME` sandbox above. If a lane substitutes a fake binary on `PATH` instead (e.g. to make a keychain write fail on purpose), that fake **must be verified to be the binary actually invoked** — see the next paragraph for why that verification step is not optional.
+
+**A fake `security` on `PATH` does not work — confirmed by reading the code, not assumed.** `src/storage/depositories/macos-keychain.ts` hardcodes `SECURITY_BIN = '/usr/bin/security'`, an absolute path, and calls it via `execFile(SECURITY_BIN, …)` with no shell. Node resolves an absolute path exactly the way `execve` does: never through `PATH`. Prepending a fake `security` to `PATH` therefore has zero effect on this depository, silently — the real binary runs every time, with no error to signal that the fake was skipped. This is precisely what happened in Issue #53: a "deliberately failing fake `security`" was on `PATH`, expecting the keychain write to refuse, and the real write went through instead. **`1password` and `secret-service` are both different, and the same technique is not safe to assume there either**: `src/storage/depositories/onepassword.ts` invokes `op` by bare name (`OP_BIN = 'op'`), and `src/storage/depositories/linux-secret-service.ts` invokes `secret-tool` the same way (`SECRET_TOOL_BIN = 'secret-tool'`) — a bare command name passed to `execFile` *does* get resolved through `PATH`, so a fake `op` or `secret-tool` shim placed earlier on `PATH` would in fact be picked up. Treat "put a fake binary on `PATH`" as depository-specific and unverified by default in either direction: for `keychain` it structurally cannot work (absolute path, no exceptions); for `1password` and `secret-service` it can work but nothing in the codebase confirms which binary a given shell session will actually resolve first. Either way, print `type security` / `type op` / `type secret-tool` (or equivalent) and assert on the fake's own sentinel output before trusting that the write refused for the reason you intended, rather than after the fact. This project is Mac-first but cross-platform by design — don't generalize "PATH shadowing doesn't work here" from the `keychain` case to the other two; it's the opposite of true for them.
+
+**The safe way to exercise any of these depositories' code paths without touching the real destination is a module-level mock, not a `PATH` trick.** `test/setup.ts` already does this for the automated suite: it mocks `node:child_process`'s `execFile` before any depository code runs, so no test — whether or not it knows a shell-based depository exists — can reach a real binary by accident. That mechanism only exists inside the vitest process; there is no equivalent for a manual CLI probe (`enigma move … --to keychain` typed or scripted outside the test runner), because outside the test suite the tool has no way to tell a verification lane's invocation apart from a real user's. That is also the reason a code-level opt-in guard on these three depositories was considered and rejected for now: unlike `test/setup.ts`'s guard, which only ever gates a context (vitest) that is never real usage, a guard inside `createKeychainDepository`/`createOnepasswordDepository`/`createSecretServiceDepository` would gate *every* real `enigma set`/`move --to keychain` invocation too — including the tool's actual primary use — forcing an opt-in flag into ordinary product operation. That flag would then get copy-pasted into every verification lane brief exactly as routinely as the `ENIGMA_HOME` export is today, protecting nothing while making the product itself more annoying to use for its intended purpose. The fix for "a lane runs the real tool while believing it is sandboxed" is this documentation, not a second mechanism with the same failure mode. Revisit this only if a concrete design surfaces that can tell verification from real use without penalizing real use.
+
+**Cleanup, because it will happen again.** List what a service name has under it — one item per call, not an enumeration:
+
+```
+security find-generic-password -s enigma
+```
+
+A single call only ever surfaces the first match; a project with several leaked entries needs the loop below, not one call. Delete a specific entry once you have its `-a` value (ref convention is `<scopeId>/<NAME>`, e.g. `4fbdba9dacb67fb5/API_KEY`):
+
+```
+security delete-generic-password -s enigma -a "<scopeId>/<NAME>"
+```
+
+To confirm nothing enigma-related remains, repeat find-then-delete until it reports not found — this is destructive by design (each call consumes the match it finds), which is also what makes it a reliable enumeration when you don't already know every ref:
+
+```
+while security find-generic-password -s enigma > /tmp/_enigma_kc_hit 2>&1; do
+  acct=$(sed -n 's/.*"acct"<blob>="\([^"]*\)".*/\1/p' /tmp/_enigma_kc_hit)
+  security delete-generic-password -s enigma -a "$acct"
+done
+```
+
 ---
 
 ## Verification lane worktree isolation
