@@ -1,6 +1,5 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { loadConfig } from '../../core/config.js';
-import { EnigmaError } from '../../core/errors.js';
 import { findProjectPath } from '../../core/project.js';
 import type { Scope } from '../../core/index-store.js';
 import { RequestStore } from '../../request/store.js';
@@ -151,13 +150,15 @@ export async function handleImportFormPost(req: IncomingMessage, res: ServerResp
       rotate: submission.rotate,
       createVault: submission.confirmCreateVault,
     });
-  } catch (err) {
+  } catch {
     // Unknown per-name outcome: commitImport crashed after its own internal setSecret loop
     // (which never throws — see its own try/catch), so every name that reached this point
-    // already has SOME chance of being genuinely stored. Never claim success or failure
-    // for a name we can't actually confirm.
-    const errorCode = err instanceof EnigmaError ? err.code : 'E_UNKNOWN';
-    const results: RequestNameResult[] = record.names.map((name) => ({ name, ok: false, errorCode }));
+    // already has SOME chance of being genuinely stored. `ok: false` here means "not
+    // confirmed stored", not "confirmed failed" — those are different claims. Using the
+    // thrown error's own code (e.g. an fs error code) would read to any caller
+    // (renderOutcome, the MCP result, --json) as "this is why the write failed", which we
+    // do not know. E_OUTCOME_UNKNOWN says exactly what we can actually confirm: nothing.
+    const results: RequestNameResult[] = record.names.map((name) => ({ name, ok: false, errorCode: 'E_OUTCOME_UNKNOWN' }));
     record.importOutcome = { fileRewritten: false, warnings: [], skippedMismatch: [], depository: chosenDepository };
     RequestStore.fulfill(id, results);
     sendErrorPage(

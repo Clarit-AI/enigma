@@ -17,7 +17,8 @@ export type EnigmaErrorCode =
   | 'E_REQUEST_CANCELLED'
   | 'E_VAULT_MISSING'
   | 'E_REMOTE_UNAVAILABLE'
-  | 'E_VALUE_AMBIGUOUS';
+  | 'E_VALUE_AMBIGUOUS'
+  | 'E_OUTCOME_UNKNOWN';
 
 export interface EnigmaErrorOptions {
   code: EnigmaErrorCode;

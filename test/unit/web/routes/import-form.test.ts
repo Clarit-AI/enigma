@@ -260,7 +260,10 @@ describe('GET/POST /i/:id', () => {
       expect(resp.status).toBe(500);
       // The waiter resolves — a CLI/MCP caller blocked here is never left hanging.
       await expect(waiter).resolves.toBe('fulfilled');
-      expect(RequestStore.get(record.id)?.results).toEqual([{ name: 'OPENAI_API_KEY', ok: false, errorCode: expect.any(String) }]);
+      // ok:false must mean "not confirmed stored", never a specific claim about WHY it
+      // failed (it may not have) — the underlying fs error code (EACCES-flavored) must
+      // never appear in its place.
+      expect(RequestStore.get(record.id)?.results).toEqual([{ name: 'OPENAI_API_KEY', ok: false, errorCode: 'E_OUTCOME_UNKNOWN' }]);
       expect(RequestStore.get(record.id)?.usedAt).toBeDefined();
 
       // The value WAS genuinely stored (setSecret ran before the crash) — the failure
@@ -270,6 +273,38 @@ describe('GET/POST /i/:id', () => {
     } finally {
       chmodSync(envPath(), 0o600);
     }
+  });
+
+  it('the real trigger QA found: a directory-shaped .gitignore makes checkEnvGitignore throw INSIDE commitImport, unconditionally on every import — still settles, never hangs (Issue #13 review, round 5 addendum)', async () => {
+    writeFileSync(envPath(), 'OPENAI_API_KEY=sk-abc\n');
+    // checkEnvGitignore does readFileSync(join(projectPath, '.gitignore')) with no
+    // existence-of-a-file check beyond existsSync — a directory at that path exists,
+    // so readFileSync throws EISDIR. It's called unconditionally in commitImport,
+    // before the failed/succeeded branch split, so this breaks EVERY import, not
+    // just an ambiguous one.
+    mkdirSync(join(tmpProject, '.gitignore'));
+    const record = RequestStore.create({
+      kind: 'import',
+      names: ['OPENAI_API_KEY'],
+      values: { OPENAI_API_KEY: 'sk-abc' },
+      envFilePath: envPath(),
+    });
+
+    const waiter = RequestStore.waitForFulfilled(record.id);
+
+    const resp = await fetch(`${origin}/i/${record.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+    });
+
+    expect(resp.status).toBe(500);
+    await expect(waiter).resolves.toBe('fulfilled');
+    // Same non-claim as the chmod scenario: not the underlying EISDIR-flavored code,
+    // just "unconfirmed" — no test in this file should ever see this position holding
+    // a code that reads as a determinate, specific reason for failure.
+    expect(RequestStore.get(record.id)?.results).toEqual([{ name: 'OPENAI_API_KEY', ok: false, errorCode: 'E_OUTCOME_UNKNOWN' }]);
+    expect(RequestStore.get(record.id)?.usedAt).toBeDefined();
   });
 
   it('replaying a used id returns 410 and performs no second write', async () => {
