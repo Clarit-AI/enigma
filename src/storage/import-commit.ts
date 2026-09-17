@@ -4,6 +4,7 @@
 // src/storage/** — an allowed location for in-flight values (style-guide).
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { appendAuditEvent, auditErrorText } from '../core/audit.js';
 import type { AuditActor } from '../core/audit.js';
 import { EnigmaError } from '../core/errors.js';
 import type { Scope } from '../core/index-store.js';
@@ -122,6 +123,34 @@ function ambiguousValueError(entry: ParsedDotEnvEntry, envFilePath: string): Eni
  * temp file is cleaned up — or, if that cleanup itself fails, named in a
  * second warning rather than left as a silent plaintext copy in the project
  * directory (round 3, item 2).
+ *
+ * Audit-worthiness (Issue #39), decided per outcome:
+ * - The ambiguous-value refusal IS audited, right here, because it's the one
+ *   outcome that leaves zero trace anywhere else — `setSecret` is never
+ *   called for that entry, so nothing else in the stack would ever record
+ *   that this name was attempted and refused.
+ * - A depository-level refusal reached via `setSecret` (E_EXISTS,
+ *   E_SCOPE_INVALID, a real depository failure) is now audited by
+ *   `setSecret` itself for every caller, not specially handled here — the
+ *   "loud abort" case above (a later entry existing already) is covered by
+ *   that fix, not by anything in this file.
+ * - `notAttempted` names are NOT audited: nothing was attempted against any
+ *   of them individually — no depository was chosen, no decision was made
+ *   about that one name — so there is no per-name event to record; the
+ *   batch-level abort is already visible via the one entry whose refusal
+ *   stopped it.
+ * - `skippedMismatch` names are NOT audited as a distinct event: the secret
+ *   itself was already stored successfully and that write is already
+ *   audited (via `setSecret`'s own `ok: true` line); leaving the stale
+ *   plaintext `.env` line in place is a decision about a plaintext file, not
+ *   a secret-lifecycle event, and it's already surfaced to the caller via
+ *   `warnings` every time it happens.
+ * - The `.gitignore` warning is NOT audited: it names no secret and no
+ *   depository (`AuditEvent` requires both), fires on every import
+ *   regardless of outcome, and is already shown to the user in the same
+ *   `warnings` array on every run — logging it per-import would just
+ *   duplicate that, not add a record of anything that could otherwise go
+ *   unseen.
  */
 export async function commitImport(opts: ImportCommitOptions): Promise<ImportCommitResult> {
   const succeeded: string[] = [];
@@ -129,7 +158,17 @@ export async function commitImport(opts: ImportCommitOptions): Promise<ImportCom
 
   for (const entry of opts.entries) {
     try {
-      if (entry.ambiguous) throw ambiguousValueError(entry, opts.envFilePath);
+      if (entry.ambiguous) {
+        const err = ambiguousValueError(entry, opts.envFilePath);
+        // setSecret is never reached for this entry, so nothing else will audit this
+        // refusal — it happened (the file was read, the value inspected, and the import
+        // stopped) and left the depository untouched, which is exactly the case Issue #39
+        // requires a durable record for. Names and the error code only, never the value:
+        // `ambiguousReason` (folded into auditErrorText via the error message) is always
+        // static, structural text from the parser, never an echo of the value itself.
+        appendAuditEvent({ op: 'import', name: entry.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+        throw err;
+      }
       await setSecret({
         name: entry.name,
         value: entry.value,
@@ -157,9 +196,18 @@ export async function commitImport(opts: ImportCommitOptions): Promise<ImportCom
   const warnings = checkEnvGitignore(opts.projectPath);
 
   if (failed.length > 0) {
-    if (opts.depository === 'env' && succeeded.length > 0) {
+    // Partial durability is NOT env-specific — setSecret commits per entry with no
+    // batch-level rollback, on every depository. env is merely where the duplication is
+    // visible, because the value lands in the same file being imported (Issue #42). A
+    // keychain/encrypted/1password import that fails partway durably stores everything
+    // that came before it just as much, so every depository must say so; only the wording
+    // about the plaintext copy is env-specific, since only env leaves one behind.
+    if (succeeded.length > 0) {
+      const names = succeeded.join(', ');
       warnings.push(
-        `${succeeded.length} secret(s) (${succeeded.join(', ')}) were already written into the .env managed block before the failure on ${failed[0]!.name}; the original plaintext line(s) were deliberately left in place. Fix the issue and rerun import, or remove them from .env manually.`,
+        opts.depository === 'env'
+          ? `${succeeded.length} secret(s) (${names}) were already written into the .env managed block before the failure on ${failed[0]!.name}; the original plaintext line(s) were deliberately left in place. Fix the issue and rerun import with rotate enabled to overwrite them, or remove them from .env manually.`
+          : `${succeeded.length} secret(s) (${names}) are already stored in ${opts.depository} before the failure on ${failed[0]!.name}; .env was left untouched. Fix the issue and rerun import with rotate enabled to overwrite them, or remove them from ${opts.depository} manually.`,
       );
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };

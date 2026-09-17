@@ -29,23 +29,32 @@ export async function cmdMove(argv: string[]): Promise<number> {
     return 0;
   }
 
+  let value: string;
   try {
-    const value = await resolveSecret(name, { scope: entry.scope, cwd, actor: 'cli' });
-    await setSecret({
-      name,
-      value,
-      scope: entry.scope,
-      depository: target,
-      cwd,
-      description: entry.description,
-      usage: entry.usage,
-      rotate: true,
-      actor: 'cli',
-    });
+    value = await resolveSecret(name, { scope: entry.scope, cwd, actor: 'cli' });
   } catch (err) {
+    // resolveSecret is not setSecret's concern — nothing else audits this step, so it's
+    // audited here, same as before.
     appendAuditEvent({ op: 'move', name, scope: entry.scope, depository: target, actor: 'cli', ok: false, error: auditErrorText(err) });
     throw err;
   }
+
+  // setSecret now audits every refusal/failure path it owns itself (Issue #39), for both
+  // ok:false and ok:true. Passing auditOp: 'move' makes that one line carry the right verb
+  // and covers this whole step end to end — wrapping it in another catch here (as before)
+  // would double-log the identical event under two labels (PR #52 review).
+  await setSecret({
+    name,
+    value,
+    scope: entry.scope,
+    depository: target,
+    cwd,
+    description: entry.description,
+    usage: entry.usage,
+    rotate: true,
+    actor: 'cli',
+    auditOp: 'move',
+  });
 
   // Best-effort cleanup of the old value; the index already points at the new depository.
   const oldModule = DEPOSITORY_MODULES.find((m) => m.id === entry.depository);
@@ -61,7 +70,6 @@ export async function cmdMove(argv: string[]): Promise<number> {
       });
   }
 
-  appendAuditEvent({ op: 'move', name, scope: entry.scope, depository: target, actor: 'cli', ok: true, error: null });
   process.stdout.write(`Moved ${name} to ${target} (${entry.scope})\n`);
   return 0;
 }

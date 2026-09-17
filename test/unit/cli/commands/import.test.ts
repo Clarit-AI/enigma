@@ -122,6 +122,44 @@ describe('cmdImport', () => {
     expect(readFileSync(envFilePath, 'utf8')).toBe('OPENAI_API_KEY=second\nGITHUB_TOKEN=ghp-xyz\n');
   });
 
+  it('Issue #42: a partial failure into a non-env depository warns which secrets are already stored, naming the depository (not env-only)', async () => {
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
+    await cmdImport(['.env', '--depository', 'encrypted']);
+    // GITHUB_TOKEN listed first so it succeeds before OPENAI_API_KEY (already stored above) aborts the batch.
+    writeFileSync(envFilePath, `GITHUB_TOKEN=ghp-xyz\nOPENAI_API_KEY=${SENTINEL}\n`);
+
+    stdoutSpy.mockClear();
+    const code = await cmdImport(['.env', '--depository', 'encrypted', '--json']);
+
+    expect(code).toBe(1);
+    const parsed = JSON.parse(stdoutText()) as { warnings: string[] };
+    const warning = parsed.warnings.find((w) => w.includes('already stored in encrypted'));
+    expect(warning).toBeDefined();
+    expect(warning).toContain('GITHUB_TOKEN');
+    expect(warning).not.toContain(SENTINEL);
+  });
+
+  it('Issue #42: --rotate lets a rerun after a partial failure actually succeed — the tool\'s own printed remediation now works', async () => {
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
+    await cmdImport(['.env', '--depository', 'encrypted']);
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\nGITHUB_TOKEN=ghp-xyz\n`);
+
+    stdoutSpy.mockClear();
+    const withoutRotate = await cmdImport(['.env', '--depository', 'encrypted', '--json']);
+    expect(withoutRotate).toBe(1);
+    expect(JSON.parse(stdoutText()).failed).toEqual([{ name: 'OPENAI_API_KEY', errorCode: 'E_EXISTS', message: expect.stringContaining('already exists') }]);
+
+    stdoutSpy.mockClear();
+    const withRotate = await cmdImport(['.env', '--depository', 'encrypted', '--rotate', '--json']);
+    expect(withRotate).toBe(0);
+    const parsed = JSON.parse(stdoutText()) as { imported: string[] };
+    expect(parsed.imported.sort()).toEqual(['GITHUB_TOKEN', 'OPENAI_API_KEY']);
+    expect(readFileSync(envFilePath, 'utf8')).not.toContain(SENTINEL);
+
+    const stored = listSecrets({ scope: 'all', cwd: tmpProject });
+    expect(stored.map((e) => e.name).sort()).toEqual(['GITHUB_TOKEN', 'OPENAI_API_KEY']);
+  });
+
   it('A2: an ambiguous unquoted value (space-hash) refuses through the loud-abort path, .env untouched, exit 1', async () => {
     writeFileSync(envFilePath, 'PORT=3000 # dev port\n');
 

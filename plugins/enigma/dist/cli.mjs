@@ -1173,13 +1173,23 @@ function projectPathFor(entry, cwd) {
   return cwd ? findProjectPath(cwd) : void 0;
 }
 async function setSecret(opts) {
-  validateName(opts.name);
+  const auditRefusal = (err, op2) => {
+    appendAuditEvent({ op: op2, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+  };
+  try {
+    validateName(opts.name);
+  } catch (err) {
+    auditRefusal(err, opts.auditOp ?? "set");
+    throw err;
+  }
   if (opts.depository === "env" && opts.scope === "global") {
-    throw new EnigmaError({
+    const err = new EnigmaError({
       code: "E_SCOPE_INVALID",
       message: "env depository does not support global scope; a project .env file has no global location",
       secretName: opts.name
     });
+    auditRefusal(err, opts.auditOp ?? "set");
+    throw err;
   }
   const needsProjectPath = opts.scope === "project" || opts.depository === "env";
   const projectPath = needsProjectPath ? findProjectPath(opts.cwd ?? process.cwd()) : void 0;
@@ -1187,20 +1197,22 @@ async function setSecret(opts) {
   const index = readIndex();
   const existing = findIndexEntry(index, opts.name, opts.scope, pid);
   if (existing && !opts.rotate) {
-    throw new EnigmaError({
+    const err = new EnigmaError({
       code: "E_EXISTS",
       message: `${opts.name} already exists in ${opts.scope} scope; pass rotate to overwrite`,
       secretName: opts.name
     });
+    auditRefusal(err, opts.auditOp ?? "set");
+    throw err;
   }
+  const op = opts.auditOp ?? (existing ? "rotated" : "set");
   const providedRef = opts.depository === "env" ? opts.name : buildRef(opts.name, opts.scope, pid);
   const depository = createDepository(opts.depository, { projectPath, createVault: opts.createVault });
-  const op = opts.auditOp ?? (existing ? "rotated" : "set");
   let ref;
   try {
     ref = await depository.set(providedRef, opts.value);
   } catch (err) {
-    appendAuditEvent({ op, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+    auditRefusal(err, op);
     throw err;
   }
   const now = (/* @__PURE__ */ new Date()).toISOString();
@@ -1771,7 +1783,11 @@ async function commitImport(opts) {
   const failed = [];
   for (const entry of opts.entries) {
     try {
-      if (entry.ambiguous) throw ambiguousValueError(entry, opts.envFilePath);
+      if (entry.ambiguous) {
+        const err = ambiguousValueError(entry, opts.envFilePath);
+        appendAuditEvent({ op: "import", name: entry.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+        throw err;
+      }
       await setSecret({
         name: entry.name,
         value: entry.value,
@@ -1797,9 +1813,10 @@ async function commitImport(opts) {
   const notAttempted = opts.entries.map((e) => e.name).filter((name) => !attempted.has(name));
   const warnings = checkEnvGitignore(opts.projectPath);
   if (failed.length > 0) {
-    if (opts.depository === "env" && succeeded.length > 0) {
+    if (succeeded.length > 0) {
+      const names = succeeded.join(", ");
       warnings.push(
-        `${succeeded.length} secret(s) (${succeeded.join(", ")}) were already written into the .env managed block before the failure on ${failed[0].name}; the original plaintext line(s) were deliberately left in place. Fix the issue and rerun import, or remove them from .env manually.`
+        opts.depository === "env" ? `${succeeded.length} secret(s) (${names}) were already written into the .env managed block before the failure on ${failed[0].name}; the original plaintext line(s) were deliberately left in place. Fix the issue and rerun import with rotate enabled to overwrite them, or remove them from .env manually.` : `${succeeded.length} secret(s) (${names}) are already stored in ${opts.depository} before the failure on ${failed[0].name}; .env was left untouched. Fix the issue and rerun import with rotate enabled to overwrite them, or remove them from ${opts.depository} manually.`
       );
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
@@ -4425,7 +4442,7 @@ function stopServer() {
 }
 
 // src/cli/commands/import.ts
-var USAGE3 = "enigma import [PATH] [--depository ID] [--json]";
+var USAGE3 = "enigma import [PATH] [--depository ID] [--rotate] [--json]";
 function report(data, json, cwd, note) {
   if (json) {
     process.stdout.write(`${JSON.stringify(data)}
@@ -4508,10 +4525,11 @@ async function runBrowserFlow(entries, opts) {
   );
 }
 async function cmdImport(argv) {
-  const { positionals, flags } = parseArgs(argv, { value: ["depository"], boolean: ["json"] });
+  const { positionals, flags } = parseArgs(argv, { value: ["depository"], boolean: ["json", "rotate"] });
   const pathArg = positionals[0] ?? ".env";
   const depository = flags.depository;
   const json = Boolean(flags.json);
+  const rotate = Boolean(flags.rotate);
   if (positionals.length > 1) throw new UsageError(USAGE3);
   const cwd = process.cwd();
   const projectPath = findProjectPath(cwd);
@@ -4547,7 +4565,8 @@ async function cmdImport(argv) {
     cwd,
     projectPath,
     envFilePath: absPath,
-    actor: "cli"
+    actor: "cli",
+    rotate
   });
   return report(
     {
@@ -4766,23 +4785,25 @@ async function cmdMove(argv) {
 `);
     return 0;
   }
+  let value;
   try {
-    const value = await resolveSecret(name, { scope: entry.scope, cwd, actor: "cli" });
-    await setSecret({
-      name,
-      value,
-      scope: entry.scope,
-      depository: target,
-      cwd,
-      description: entry.description,
-      usage: entry.usage,
-      rotate: true,
-      actor: "cli"
-    });
+    value = await resolveSecret(name, { scope: entry.scope, cwd, actor: "cli" });
   } catch (err) {
     appendAuditEvent({ op: "move", name, scope: entry.scope, depository: target, actor: "cli", ok: false, error: auditErrorText(err) });
     throw err;
   }
+  await setSecret({
+    name,
+    value,
+    scope: entry.scope,
+    depository: target,
+    cwd,
+    description: entry.description,
+    usage: entry.usage,
+    rotate: true,
+    actor: "cli",
+    auditOp: "move"
+  });
   const oldModule = DEPOSITORY_MODULES.find((m) => m.id === entry.depository);
   if (oldModule) {
     const projectPath = entry.scope === "project" ? entry.projectPath : void 0;
@@ -4793,7 +4814,6 @@ async function cmdMove(argv) {
       );
     });
   }
-  appendAuditEvent({ op: "move", name, scope: entry.scope, depository: target, actor: "cli", ok: true, error: null });
   process.stdout.write(`Moved ${name} to ${target} (${entry.scope})
 `);
   return 0;
@@ -4892,7 +4912,7 @@ Commands:
   move NAME --to ID [--scope project|global]
   run [--only A,B] [--scope project|global] -- <command> [args...]
   get NAME [--scope project|global]
-  import [PATH] [--depository ID] [--json]
+  import [PATH] [--depository ID] [--rotate] [--json]
   doctor [--json]
   install [--uninstall]
 

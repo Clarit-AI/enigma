@@ -38,10 +38,11 @@ export function registerImportTool(server: McpServer): void {
     {
       title: 'Import secrets from a .env file',
       description:
-        'Imports NAME=value pairs from a .env file into a depository — either the one given, or a browser picker when none is given — removing them from plaintext (or moving them into the managed block for the env depository). Returns names, counts, and depository ids only, never a value (ADR-001).',
+        'Imports NAME=value pairs from a .env file into a depository — either the one given, or a browser picker when none is given — removing them from plaintext (or moving them into the managed block for the env depository). Pass rotate to overwrite names that already exist, matching the browser picker; without it, a name that already exists fails with E_EXISTS. Returns names, counts, and depository ids only, never a value (ADR-001).',
       inputSchema: {
         path: z.string().optional(),
         depository: DEPOSITORY_ID_SCHEMA.optional(),
+        rotate: z.boolean().optional(),
       },
     },
     async (args) => {
@@ -74,6 +75,7 @@ export function registerImportTool(server: McpServer): void {
           projectPath,
           envFilePath: absPath,
           actor: 'agent',
+          rotate: args.rotate,
         });
         const summary = renderImportSummary(result, parsed.invalidNames, cwd);
         return textResult(summary.text, summary.isError);

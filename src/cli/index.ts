@@ -20,7 +20,7 @@ Commands:
   move NAME --to ID [--scope project|global]
   run [--only A,B] [--scope project|global] -- <command> [args...]
   get NAME [--scope project|global]
-  import [PATH] [--depository ID] [--json]
+  import [PATH] [--depository ID] [--rotate] [--json]
   doctor [--json]
   install [--uninstall]
 
