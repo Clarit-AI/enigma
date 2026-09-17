@@ -4,7 +4,7 @@ Decision ids reference [PRD.md](../PRD.md).
 
 ## ADR-001 — The invariant: no code path returns a secret value to the model
 - Decision time: 2026-09-15 (plan approval)
-- The MCP server exposes no `get`. `resolve()` is internal to the storage layer and is called only by `run`, reveal, and the tripwire hook. The static leak fence (`npm run leak-fence`) fails CI if `src/mcp/**` or `src/web/**` references `resolve(`.
+- The MCP server exposes no `get`. The only function that ever reads a plaintext value out of a depository is `Depository.resolve()`. `resolveSecret()` (`src/storage/manager.ts`) wraps it with naming validation, index lookup, and audit logging, and is called from five sites: `enigma run`, `enigma get`, `enigma move` (all CLI), the reveal web route (`POST /v/:id/reveal`), and the clipboard-reveal native path. The tripwire hook calls `Depository.resolve()` directly instead, deliberately bypassing `resolveSecret()`'s audit logging (it scans every tracked secret against every matching tool call, and going through the audited path would flood the audit log with a `read` line per candidate per call); only an actual leak hit is audited there, with op `leak`. The static leak fence (`npm run leak-fence`) fails CI if `src/mcp/**` or `src/web/**` references `resolve(`.
 - Error messages, audit lines, logs, and tool results carry names and depository ids, never values.
 
 ## ADR-002 — Secret entry via MCP URL-mode elicitation (D2.1–D2.4, D3.2)
