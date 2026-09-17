@@ -24,7 +24,8 @@ Commands:
   doctor [--json]
   install [--uninstall]
 
-Not yet implemented: request, reveal
+Not available at the CLI: request, reveal
+  (use the enigma_request/enigma_reveal MCP tools, or /enigma:request and /enigma:reveal)
 `;
 
 const COMMANDS: Record<string, (argv: string[]) => Promise<number>> = {

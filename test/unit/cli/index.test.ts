@@ -36,10 +36,13 @@ describe('cli main dispatch', () => {
     expect(stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toContain("unknown command 'bogus'");
   });
 
-  it.each(['request', 'reveal'])('exits 2 for the out-of-scope command %s', async (command) => {
+  it.each(['request', 'reveal'])('exits 2 for the out-of-scope command %s, naming the working alternative', async (command) => {
     const code = await main([command]);
     expect(code).toBe(2);
-    expect(stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toContain(`enigma ${command}: not yet implemented`);
+    const stderr = stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    expect(stderr).toContain(`enigma ${command} is not available at the CLI.`);
+    expect(stderr).toContain(`enigma_${command}`);
+    expect(stderr).toContain(`/enigma:${command}`);
   });
 
   it('maps a UsageError to exit code 2', async () => {

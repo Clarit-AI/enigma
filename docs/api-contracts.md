@@ -49,7 +49,7 @@ enigma doctor [--json]
 enigma install [--uninstall]       # register marketplace + enable plugin
 ```
 
-`enigma request` and `enigma reveal` are **not implemented at the CLI**: `src/cli/index.ts` routes both names to a stub that prints `enigma <command>: not yet implemented` and exits 2. That flow exists today only as the `enigma_request`/`enigma_reveal` MCP tools (§1) and the `/enigma:*` slash commands (Issue #14) — the stub's own header comment states this is a deliberate scope boundary, not a gap waiting to be filled, so this document does not carry them as CLI commands until a future decision reverses that.
+`enigma request` and `enigma reveal` are **not available at the CLI, by design**: `src/cli/index.ts` routes both names to a stub (`src/cli/commands/not-implemented.ts`) that prints `enigma <command> is not available at the CLI. Use \`enigma_<command>\` (MCP tool) or \`/enigma:<command>\` (slash command) instead.` and exits 2. That flow exists today only as the `enigma_request`/`enigma_reveal` MCP tools (§1) and the `/enigma:*` slash commands (Issue #14) — the stub's own header comment confirms this is a deliberate scope boundary, not a gap waiting to be filled, so this document does not carry them as CLI commands until a future decision reverses that.
 
 Exit codes: 0 ok, 1 Enigma error (code printed), 2 usage (also returned by the `request`/`reveal` stub). `run` exits with the child's code.
 
