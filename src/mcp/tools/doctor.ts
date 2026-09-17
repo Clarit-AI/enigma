@@ -3,13 +3,11 @@ import { existsSync } from 'node:fs';
 import { platform, release } from 'node:os';
 import { promisify } from 'node:util';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import { loadProjectManifest } from '../../core/config.js';
 import { EnigmaError } from '../../core/errors.js';
 import { readIndex } from '../../core/index-store.js';
+import { computeManifestGaps } from '../../core/manifest-gaps.js';
 import { auditLogPath, configPath, enigmaHome, indexPath, keyPath, secretsPath } from '../../core/paths.js';
-import { findProjectPath } from '../../core/project.js';
 import { detectAll } from '../../storage/detect.js';
-import { listSecrets } from '../../storage/manager.js';
 import { supportsFormElicitation, supportsUrlElicitation } from '../elicit.js';
 import { textResult } from '../result-text.js';
 
@@ -54,9 +52,7 @@ export function registerDoctorTool(server: McpServer): void {
         indexStatus = `ERROR: ${err instanceof EnigmaError ? err.code : 'unknown error'}`;
       }
 
-      const manifest = loadProjectManifest(findProjectPath(cwd));
-      const registeredNames = new Set(listSecrets({ scope: 'all', cwd }).map((e) => e.name));
-      const manifestGaps = Object.keys(manifest.secrets).filter((name) => !registeredNames.has(name));
+      const { gaps: manifestGaps } = computeManifestGaps(cwd);
 
       const lines = [
         `Platform: ${platform()} ${release()}`,

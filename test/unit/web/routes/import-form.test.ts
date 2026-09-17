@@ -1,0 +1,326 @@
+import { EventEmitter } from 'node:events';
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+
+/** Mirrors request-form.test.ts: keeps `1password` availability deterministic regardless of the host machine. */
+vi.mock('node:child_process', () => ({
+  execFile: (_file: string, _args: string[], _options: unknown, callback: (...cbArgs: unknown[]) => void) => {
+    const stdin = new EventEmitter() as EventEmitter & { write: (d: string) => boolean; end: () => void };
+    stdin.write = () => true;
+    stdin.end = () => {};
+    const error = Object.assign(new Error('spawn op ENOENT'), { code: 'ENOENT' });
+    queueMicrotask(() => callback(error, '', ''));
+    const child = new EventEmitter() as EventEmitter & { stdin: typeof stdin; kill: () => void };
+    child.stdin = stdin;
+    child.kill = () => {};
+    return child;
+  },
+}));
+
+const { startServer, stopServer } = await import('../../../../src/web/server.js');
+const { RequestStore } = await import('../../../../src/request/store.js');
+const { listSecrets } = await import('../../../../src/storage/manager.js');
+const { parseDotEnv } = await import('../../../../src/storage/dotenv-file.js');
+
+const SENTINEL = 'sk-sentinel-value-should-never-appear';
+
+describe('GET/POST /i/:id', () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+  let tmpProject: string;
+  let originalCwd: string;
+  let origin: string;
+
+  beforeEach(async () => {
+    tmpHome = mkdtempSync(join(tmpdir(), 'enigma-home-'));
+    originalHome = process.env.ENIGMA_HOME;
+    process.env.ENIGMA_HOME = tmpHome;
+    tmpProject = realpathSync(mkdtempSync(join(tmpdir(), 'enigma-project-')));
+    mkdirSync(join(tmpProject, '.git'));
+    originalCwd = process.cwd();
+    process.chdir(tmpProject);
+    RequestStore.__resetForTests();
+    origin = (await startServer()).origin;
+  });
+
+  afterEach(async () => {
+    await stopServer();
+    RequestStore.__resetForTests();
+    process.chdir(originalCwd);
+    if (originalHome === undefined) delete process.env.ENIGMA_HOME;
+    else process.env.ENIGMA_HOME = originalHome;
+    rmSync(tmpHome, { recursive: true, force: true });
+    rmSync(tmpProject, { recursive: true, force: true });
+  });
+
+  function envPath(): string {
+    return join(tmpProject, '.env');
+  }
+
+  it('GET returns 404 for an unknown id', async () => {
+    const resp = await fetch(`${origin}/i/${'a'.repeat(32)}`);
+    expect(resp.status).toBe(404);
+  });
+
+  it('GET returns 404 for a request-kind id (route/kind mismatch)', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    const resp = await fetch(`${origin}/i/${record.id}`);
+    expect(resp.status).toBe(404);
+  });
+
+  it('GET returns 410 once the id has been used', async () => {
+    const record = RequestStore.create({ kind: 'import', names: ['OPENAI_API_KEY'], values: { OPENAI_API_KEY: 'x' } });
+    RequestStore.tryMarkUsed(record.id);
+    const resp = await fetch(`${origin}/i/${record.id}`);
+    expect(resp.status).toBe(410);
+  });
+
+  it('GET renders the picker with the parsed names, no value input, and never leaks the value', async () => {
+    writeFileSync(envPath(), `OPENAI_API_KEY=${SENTINEL}\n`);
+    const record = RequestStore.create({
+      kind: 'import',
+      names: ['OPENAI_API_KEY'],
+      values: { OPENAI_API_KEY: SENTINEL },
+      envFilePath: envPath(),
+    });
+
+    const resp = await fetch(`${origin}/i/${record.id}`);
+    const html = await resp.text();
+
+    expect(resp.status).toBe(200);
+    expect(html).toContain('OPENAI_API_KEY');
+    expect(html).toContain('encrypted (no prompt)');
+    expect(html).not.toContain('type="password"');
+    expect(html).not.toContain(SENTINEL);
+  });
+
+  it('GET shows a gitignore warning when .env is not covered', async () => {
+    writeFileSync(envPath(), 'OPENAI_API_KEY=x\n');
+    const record = RequestStore.create({ kind: 'import', names: ['OPENAI_API_KEY'], values: { OPENAI_API_KEY: 'x' }, envFilePath: envPath() });
+
+    const resp = await fetch(`${origin}/i/${record.id}`);
+    expect(await resp.text()).toContain('.env is not gitignored');
+  });
+
+  it('POST without a chosen depository re-renders with an error, id stays usable', async () => {
+    const record = RequestStore.create({ kind: 'import', names: ['OPENAI_API_KEY'], values: { OPENAI_API_KEY: 'x' }, envFilePath: envPath() });
+    const resp = await fetch(`${origin}/i/${record.id}`, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body: '' });
+
+    expect(resp.status).toBe(200);
+    expect(await resp.text()).toContain('Choose a depository');
+    expect(RequestStore.get(record.id)?.usedAt).toBeUndefined();
+  });
+
+  it('POST with an unavailable depository re-renders the confirmation without consuming the id', async () => {
+    const record = RequestStore.create({ kind: 'import', names: ['OPENAI_API_KEY'], values: { OPENAI_API_KEY: 'x' }, envFilePath: envPath() });
+    const resp = await fetch(`${origin}/i/${record.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ depository: '1password' }).toString(),
+    });
+
+    expect(resp.status).toBe(200);
+    const html = await resp.text();
+    expect(html).toContain('1password');
+    expect(html).toContain("isn't set up yet");
+    expect(RequestStore.get(record.id)?.usedAt).toBeUndefined();
+  });
+
+  it('POST with a valid depository commits the import, rewrites .env, never leaks the value, and consumes the id', async () => {
+    writeFileSync(envPath(), `KEEP=me\nOPENAI_API_KEY=${SENTINEL}\n`);
+    const record = RequestStore.create({
+      kind: 'import',
+      names: ['OPENAI_API_KEY'],
+      values: { OPENAI_API_KEY: SENTINEL },
+      envFilePath: envPath(),
+    });
+
+    const resp = await fetch(`${origin}/i/${record.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+    });
+    const html = await resp.text();
+
+    expect(resp.status).toBe(200);
+    expect(html).not.toContain(SENTINEL);
+    expect(html).toContain('stored');
+    expect(RequestStore.get(record.id)?.usedAt).toBeDefined();
+    expect(RequestStore.get(record.id)?.importOutcome).toEqual({
+      fileRewritten: true,
+      warnings: expect.any(Array),
+      skippedMismatch: [],
+      depository: 'encrypted',
+    });
+
+    const rewritten = readFileSync(envPath(), 'utf8');
+    expect(rewritten).not.toContain(SENTINEL);
+    expect(rewritten).toContain('KEEP=me');
+
+    const stored = listSecrets({ scope: 'all', cwd: tmpProject });
+    expect(stored.map((e) => e.name)).toEqual(['OPENAI_API_KEY']);
+  });
+
+  it('POST refuses an ambiguous value carried in via the picker, WITH THE SAME REASON TEXT the direct --depository path surfaces (Issue #13 review, round 4, finding 2 — a test whose title claims parity must assert it)', async () => {
+    const source = 'PORT=3000 # dev port\n';
+    writeFileSync(envPath(), source);
+    const parsedReason = parseDotEnv(source).entries.find((e) => e.name === 'PORT')?.ambiguousReason;
+    expect(parsedReason).toBeDefined();
+
+    const record = RequestStore.create({
+      kind: 'import',
+      names: ['PORT'],
+      values: { PORT: '3000 # dev port' },
+      ambiguousNames: ['PORT'],
+      ambiguousReasons: { PORT: parsedReason! },
+      envFilePath: envPath(),
+    });
+
+    const resp = await fetch(`${origin}/i/${record.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+    });
+    const html = await resp.text();
+
+    expect(resp.status).toBe(200);
+    expect(html).toContain('failed');
+    expect(html).toContain('quote the value');
+    const results = RequestStore.get(record.id)?.results;
+    expect(results).toEqual([
+      { name: 'PORT', ok: false, errorCode: 'E_VALUE_AMBIGUOUS', reason: expect.stringContaining('quote the value') },
+    ]);
+    // The reason is static, structural text — never the parsed value itself.
+    expect(results?.[0]?.reason).not.toContain('3000 # dev port');
+    expect(readFileSync(envPath(), 'utf8')).toBe(source);
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+  });
+
+  it('POST refuses a duplicated key carried in via the picker, WITH THE SAME REASON TEXT the direct --depository path surfaces (Issue #13 review, round 4)', async () => {
+    const original = 'API_KEY=real-production-key\nAPI_KEY=placeholder\n';
+    writeFileSync(envPath(), original);
+    const parsedReason = parseDotEnv(original).entries.find((e) => e.name === 'API_KEY')?.ambiguousReason;
+    expect(parsedReason).toBeDefined();
+
+    const record = RequestStore.create({
+      kind: 'import',
+      names: ['API_KEY'],
+      values: { API_KEY: 'placeholder' },
+      ambiguousNames: ['API_KEY'],
+      ambiguousReasons: { API_KEY: parsedReason! },
+      envFilePath: envPath(),
+    });
+
+    const resp = await fetch(`${origin}/i/${record.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+    });
+    const html = await resp.text();
+
+    expect(resp.status).toBe(200);
+    expect(html).toContain('failed');
+    expect(html).toContain('assigned more than once');
+    const results = RequestStore.get(record.id)?.results;
+    expect(results).toEqual([
+      { name: 'API_KEY', ok: false, errorCode: 'E_VALUE_AMBIGUOUS', reason: expect.stringContaining('assigned more than once') },
+    ]);
+    // The reason names the key and the file, never either value ("real-production-key" or "placeholder").
+    expect(results?.[0]?.reason).not.toContain('real-production-key');
+    expect(results?.[0]?.reason).not.toContain('placeholder');
+    expect(readFileSync(envPath(), 'utf8')).toBe(original);
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+  });
+
+  it('an exception between tryMarkUsed and fulfill always settles the waiter — never hangs forever (Issue #13 review, round 5)', async () => {
+    writeFileSync(envPath(), 'OPENAI_API_KEY=sk-abc\n');
+    const record = RequestStore.create({
+      kind: 'import',
+      names: ['OPENAI_API_KEY'],
+      values: { OPENAI_API_KEY: 'sk-abc' },
+      envFilePath: envPath(),
+    });
+
+    // Simulates the file becoming unreadable between the form render and this submit —
+    // commitImport's re-parse (on its full-success path, after setSecret already stored
+    // the value) throws straight out of readFileSync rather than commitImport's own
+    // internal try/catch, which only covers the setSecret loop.
+    chmodSync(envPath(), 0o000);
+    try {
+      const waiter = RequestStore.waitForFulfilled(record.id);
+
+      const resp = await fetch(`${origin}/i/${record.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+      });
+
+      expect(resp.status).toBe(500);
+      // The waiter resolves — a CLI/MCP caller blocked here is never left hanging.
+      await expect(waiter).resolves.toBe('fulfilled');
+      // ok:false must mean "not confirmed stored", never a specific claim about WHY it
+      // failed (it may not have) — the underlying fs error code (EACCES-flavored) must
+      // never appear in its place.
+      expect(RequestStore.get(record.id)?.results).toEqual([{ name: 'OPENAI_API_KEY', ok: false, errorCode: 'E_OUTCOME_UNKNOWN' }]);
+      expect(RequestStore.get(record.id)?.usedAt).toBeDefined();
+
+      // The value WAS genuinely stored (setSecret ran before the crash) — the failure
+      // report doesn't falsely claim otherwise, but the depository has it regardless.
+      const stored = listSecrets({ scope: 'all', cwd: tmpProject });
+      expect(stored.map((e) => e.name)).toEqual(['OPENAI_API_KEY']);
+    } finally {
+      chmodSync(envPath(), 0o600);
+    }
+  });
+
+  it('the real trigger QA found: a directory-shaped .gitignore makes checkEnvGitignore throw INSIDE commitImport, unconditionally on every import — still settles, never hangs (Issue #13 review, round 5 addendum)', async () => {
+    writeFileSync(envPath(), 'OPENAI_API_KEY=sk-abc\n');
+    // checkEnvGitignore does readFileSync(join(projectPath, '.gitignore')) with no
+    // existence-of-a-file check beyond existsSync — a directory at that path exists,
+    // so readFileSync throws EISDIR. It's called unconditionally in commitImport,
+    // before the failed/succeeded branch split, so this breaks EVERY import, not
+    // just an ambiguous one.
+    mkdirSync(join(tmpProject, '.gitignore'));
+    const record = RequestStore.create({
+      kind: 'import',
+      names: ['OPENAI_API_KEY'],
+      values: { OPENAI_API_KEY: 'sk-abc' },
+      envFilePath: envPath(),
+    });
+
+    const waiter = RequestStore.waitForFulfilled(record.id);
+
+    const resp = await fetch(`${origin}/i/${record.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+    });
+
+    expect(resp.status).toBe(500);
+    await expect(waiter).resolves.toBe('fulfilled');
+    // Same non-claim as the chmod scenario: not the underlying EISDIR-flavored code,
+    // just "unconfirmed" — no test in this file should ever see this position holding
+    // a code that reads as a determinate, specific reason for failure.
+    expect(RequestStore.get(record.id)?.results).toEqual([{ name: 'OPENAI_API_KEY', ok: false, errorCode: 'E_OUTCOME_UNKNOWN' }]);
+    expect(RequestStore.get(record.id)?.usedAt).toBeDefined();
+  });
+
+  it('replaying a used id returns 410 and performs no second write', async () => {
+    writeFileSync(envPath(), 'OPENAI_API_KEY=x\n');
+    const record = RequestStore.create({ kind: 'import', names: ['OPENAI_API_KEY'], values: { OPENAI_API_KEY: 'x' }, envFilePath: envPath() });
+    await fetch(`${origin}/i/${record.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+    });
+
+    const replay = await fetch(`${origin}/i/${record.id}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+      body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+    });
+    expect(replay.status).toBe(410);
+  });
+});

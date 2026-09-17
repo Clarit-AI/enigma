@@ -59,6 +59,8 @@ export interface SetSecretOptions {
   actor: AuditActor;
   /** Explicit, one-time user confirmation to create a depository's backing collection when missing (consumed only by `1password`; never a default). */
   createVault?: boolean;
+  /** Overrides the default audit op ('set'/'rotated'); mirrors resolveSecret's auditOp (Issue #7). `enigma import` passes 'import'. */
+  auditOp?: AuditEvent['op'];
 }
 
 export interface SetSecretResult {
@@ -94,7 +96,7 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
   // env's ref is the bare NAME — the .env file is already located via DepositoryContext.projectPath (D1.9).
   const providedRef = opts.depository === 'env' ? opts.name : buildRef(opts.name, opts.scope, pid);
   const depository = createDepository(opts.depository, { projectPath, createVault: opts.createVault });
-  const op = existing ? 'rotated' : 'set';
+  const op = opts.auditOp ?? (existing ? 'rotated' : 'set');
 
   let ref: string;
   try {

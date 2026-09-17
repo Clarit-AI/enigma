@@ -28,6 +28,30 @@ describe('RequestStore', () => {
     ).toThrow();
   });
 
+  it('an import may cover more than 10 names (Issue #13: no typing-cost limit applies since values are already known)', () => {
+    const names = Array.from({ length: 15 }, (_, i) => `NAME_${i}`);
+    const record = RequestStore.create({ kind: 'import', names });
+    expect(record.names).toEqual(names);
+  });
+
+  it('rejects an import with zero or more than 200 names', () => {
+    expect(() => RequestStore.create({ kind: 'import', names: [] })).toThrow();
+    expect(() =>
+      RequestStore.create({ kind: 'import', names: Array.from({ length: 201 }, (_, i) => `NAME_${i}`) }),
+    ).toThrow();
+  });
+
+  it('carries values and envFilePath in flight for kind import, readable back via get', () => {
+    const record = RequestStore.create({
+      kind: 'import',
+      names: ['OPENAI_API_KEY'],
+      values: { OPENAI_API_KEY: 'sk-abc' },
+      envFilePath: '/tmp/project/.env',
+    });
+    expect(RequestStore.get(record.id)?.values).toEqual({ OPENAI_API_KEY: 'sk-abc' });
+    expect(RequestStore.get(record.id)?.envFilePath).toBe('/tmp/project/.env');
+  });
+
   it('get returns undefined for an unknown id', () => {
     expect(RequestStore.get('deadbeefdeadbeefdeadbeefdeadbeef')).toBeUndefined();
   });

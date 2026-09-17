@@ -21,39 +21,9 @@ function readStdinJson() {
   });
 }
 
-// src/core/errors.ts
-var EnigmaError = class _EnigmaError extends Error {
-  code;
-  secretName;
-  depository;
-  constructor(options) {
-    super(options.message);
-    this.name = "EnigmaError";
-    this.code = options.code;
-    this.secretName = options.secretName;
-    this.depository = options.depository;
-    Object.setPrototypeOf(this, _EnigmaError.prototype);
-  }
-};
-
-// src/core/project.ts
-import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
-var PROJECT_ID_LENGTH = 16;
-function findProjectPath(cwd) {
-  let dir = resolve(cwd);
-  for (; ; ) {
-    if (existsSync(`${dir}/.git`)) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) return resolve(cwd);
-    dir = parent;
-  }
-}
-function projectId(cwd) {
-  const projectPath = findProjectPath(cwd);
-  return createHash("sha256").update(projectPath).digest("hex").slice(0, PROJECT_ID_LENGTH);
-}
+// src/core/config.ts
+import { existsSync, readFileSync } from "node:fs";
+import { join as join2 } from "node:path";
 
 // src/core/paths.ts
 import { homedir } from "node:os";
@@ -77,8 +47,74 @@ function secretsPath() {
   return join(enigmaHome(), "secrets.enc");
 }
 
+// src/core/config.ts
+var DEFAULT_CONFIG = {};
+var DEFAULT_MANIFEST = { secrets: {} };
+function readJsonIfExists(path) {
+  if (!existsSync(path)) return void 0;
+  return JSON.parse(readFileSync(path, "utf8"));
+}
+function loadConfig() {
+  const raw = readJsonIfExists(configPath());
+  if (!raw) return { ...DEFAULT_CONFIG };
+  const config = {};
+  if (typeof raw.defaultDepository === "string") config.defaultDepository = raw.defaultDepository;
+  if (raw.remote === "cloudflared" || raw.remote === "tailscale") config.remote = raw.remote;
+  if (raw.tripwire && typeof raw.tripwire === "object" && Array.isArray(raw.tripwire.depositories)) {
+    config.tripwire = { depositories: raw.tripwire.depositories };
+  }
+  if (raw.ui === "web" || raw.ui === "native") config.ui = raw.ui;
+  return config;
+}
+function loadProjectManifest(projectPath) {
+  const raw = readJsonIfExists(join2(projectPath, ".enigma.json"));
+  if (!raw) return { ...DEFAULT_MANIFEST, secrets: {} };
+  const manifest = { secrets: {} };
+  if (typeof raw.defaultDepository === "string") manifest.defaultDepository = raw.defaultDepository;
+  if (raw.secrets && typeof raw.secrets === "object") {
+    for (const [name, description] of Object.entries(raw.secrets)) {
+      if (typeof description === "string") manifest.secrets[name] = description;
+    }
+  }
+  return manifest;
+}
+
+// src/core/project.ts
+import { createHash } from "node:crypto";
+import { existsSync as existsSync2 } from "node:fs";
+import { dirname, resolve } from "node:path";
+var PROJECT_ID_LENGTH = 16;
+function findProjectPath(cwd) {
+  let dir = resolve(cwd);
+  for (; ; ) {
+    if (existsSync2(`${dir}/.git`)) return dir;
+    const parent = dirname(dir);
+    if (parent === dir) return resolve(cwd);
+    dir = parent;
+  }
+}
+function projectId(cwd) {
+  const projectPath = findProjectPath(cwd);
+  return createHash("sha256").update(projectPath).digest("hex").slice(0, PROJECT_ID_LENGTH);
+}
+
+// src/core/errors.ts
+var EnigmaError = class _EnigmaError extends Error {
+  code;
+  secretName;
+  depository;
+  constructor(options) {
+    super(options.message);
+    this.name = "EnigmaError";
+    this.code = options.code;
+    this.secretName = options.secretName;
+    this.depository = options.depository;
+    Object.setPrototypeOf(this, _EnigmaError.prototype);
+  }
+};
+
 // src/core/secure-file.ts
-import { mkdirSync, appendFileSync, chmodSync, existsSync as existsSync2, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { mkdirSync, appendFileSync, chmodSync, existsSync as existsSync3, readFileSync as readFileSync2, renameSync, writeFileSync } from "node:fs";
 import { dirname as dirname2 } from "node:path";
 import { randomBytes } from "node:crypto";
 var FILE_MODE = 384;
@@ -89,8 +125,8 @@ function ensureParentDir(path) {
   chmodSync(dir, DIR_MODE);
 }
 function readJsonFile(path, fallback, corruptErrorCode) {
-  if (!existsSync2(path)) return fallback;
-  const raw = readFileSync(path, "utf8");
+  if (!existsSync3(path)) return fallback;
+  const raw = readFileSync2(path, "utf8");
   try {
     return JSON.parse(raw);
   } catch (err) {
@@ -141,15 +177,15 @@ function listIndexEntries(index, opts = {}) {
 
 // src/storage/depositories/encrypted.ts
 import { createCipheriv, createDecipheriv, randomBytes as randomBytes2 } from "node:crypto";
-import { existsSync as existsSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
 var ALGORITHM = "aes-256-gcm";
 var KEY_BYTES = 32;
 var IV_BYTES = 12;
 var FILE_MODE2 = 384;
 var EMPTY_SECRETS_FILE = { version: 1, entries: {} };
 function readKey() {
-  if (!existsSync3(keyPath())) return void 0;
-  const key = Buffer.from(readFileSync2(keyPath(), "utf8"), "base64");
+  if (!existsSync4(keyPath())) return void 0;
+  const key = Buffer.from(readFileSync3(keyPath(), "utf8"), "base64");
   if (key.length !== KEY_BYTES) readFailed();
   return key;
 }
@@ -231,8 +267,8 @@ var encryptedDepositoryModule = {
 };
 
 // src/storage/depositories/env.ts
-import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import { join as join2 } from "node:path";
+import { existsSync as existsSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join3 } from "node:path";
 var BEGIN_MARKER = "# enigma:begin";
 var END_MARKER = "# enigma:end";
 var FILE_MODE3 = 384;
@@ -316,8 +352,8 @@ function requireProjectPath(ctx) {
   return ctx.projectPath;
 }
 function createEnvDepository(ctx) {
-  const envFilePath = join2(requireProjectPath(ctx), ".env");
-  const readEnvFile = () => existsSync4(envFilePath) ? readFileSync3(envFilePath, "utf8") : "";
+  const envFilePath = join3(requireProjectPath(ctx), ".env");
+  const readEnvFile = () => existsSync5(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
   return {
     id: "env",
     promptProfile: "none",
@@ -511,7 +547,7 @@ var linuxSecretServiceDepositoryModule = {
 
 // src/storage/depositories/macos-keychain.ts
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync5 } from "node:fs";
+import { existsSync as existsSync6 } from "node:fs";
 var SECURITY_BIN = "/usr/bin/security";
 var SERVICE2 = "enigma";
 var EXEC_TIMEOUT_MS2 = 1e4;
@@ -678,7 +714,7 @@ var macosKeychainDepositoryModule = {
     if (process.platform !== "darwin") {
       return { id: "keychain", promptProfile: "may-prompt", available: false, reason: "not running on macOS" };
     }
-    const available = existsSync5(SECURITY_BIN);
+    const available = existsSync6(SECURITY_BIN);
     return {
       id: "keychain",
       promptProfile: "may-prompt",
@@ -941,60 +977,28 @@ function listSecrets(opts = {}) {
   return listIndexEntries(index, { scope: opts.scope, currentProjectId });
 }
 
-// src/core/config.ts
-import { existsSync as existsSync6, readFileSync as readFileSync4 } from "node:fs";
-import { join as join3 } from "node:path";
-var DEFAULT_CONFIG = {};
-var DEFAULT_MANIFEST = { secrets: {} };
-function readJsonIfExists(path) {
-  if (!existsSync6(path)) return void 0;
-  return JSON.parse(readFileSync4(path, "utf8"));
-}
-function loadConfig() {
-  const raw = readJsonIfExists(configPath());
-  if (!raw) return { ...DEFAULT_CONFIG };
-  const config = {};
-  if (typeof raw.defaultDepository === "string") config.defaultDepository = raw.defaultDepository;
-  if (raw.remote === "cloudflared" || raw.remote === "tailscale") config.remote = raw.remote;
-  if (raw.tripwire && typeof raw.tripwire === "object" && Array.isArray(raw.tripwire.depositories)) {
-    config.tripwire = { depositories: raw.tripwire.depositories };
-  }
-  if (raw.ui === "web" || raw.ui === "native") config.ui = raw.ui;
-  return config;
-}
-function loadProjectManifest(projectPath) {
-  const raw = readJsonIfExists(join3(projectPath, ".enigma.json"));
-  if (!raw) return { ...DEFAULT_MANIFEST, secrets: {} };
-  const manifest = { secrets: {} };
-  if (typeof raw.defaultDepository === "string") manifest.defaultDepository = raw.defaultDepository;
-  if (raw.secrets && typeof raw.secrets === "object") {
-    for (const [name, description] of Object.entries(raw.secrets)) {
-      if (typeof description === "string") manifest.secrets[name] = description;
-    }
-  }
-  return manifest;
-}
-
-// src/hooks/session-start.ts
-function relevantNames(cwd) {
+// src/core/manifest-gaps.ts
+function computeManifestGaps(cwd) {
   const projectPath = findProjectPath(cwd);
   const pid = projectId(cwd);
   const entries = listSecrets({ scope: "all", cwd: projectPath }).filter(
     (e) => e.scope === "global" || e.projectId === pid
   );
-  const names = [...new Set(entries.map((e) => e.name))].sort();
+  const registeredNames = [...new Set(entries.map((e) => e.name))].sort();
   const manifest = loadProjectManifest(projectPath);
-  return { names, declaredSecrets: manifest.secrets };
+  const known = new Set(registeredNames);
+  const gaps = Object.keys(manifest.secrets).filter((name) => !known.has(name)).sort();
+  return { registeredNames, gaps };
 }
+
+// src/hooks/session-start.ts
 function runSessionStart(input) {
   const cwd = input.cwd ?? process.cwd();
   const projectPath = findProjectPath(cwd);
-  const { names, declaredSecrets } = relevantNames(cwd);
+  const { registeredNames: names, gaps } = computeManifestGaps(cwd);
   const config = loadConfig();
   const manifest = loadProjectManifest(projectPath);
   const stickyDefault = manifest.defaultDepository ?? config.defaultDepository;
-  const known = new Set(names);
-  const gaps = Object.keys(declaredSecrets).filter((name) => !known.has(name)).sort();
   const lines = [
     names.length > 0 ? `Enigma: secrets available for this project (and global): ${names.join(", ")}` : "Enigma: no secrets registered for this project or globally."
   ];

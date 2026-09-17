@@ -1,12 +1,14 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { applySecurityHeaders } from './headers.js';
 import { sendJson, sendStaticJs, sendErrorPage } from './responses.js';
+import { handleImportFormGet, handleImportFormPost } from './routes/import-form.js';
 import { handleRequestFormGet, handleRequestFormPost } from './routes/request-form.js';
 import { handleRevealGet, handleRevealPost } from './routes/reveal.js';
 import { REVEAL_CLIENT_JS } from './static/reveal-script.js';
 
 const ID = '[0-9a-f]{32}';
 const REQUEST_PATH = new RegExp(`^/r/(${ID})$`);
+const IMPORT_PATH = new RegExp(`^/i/(${ID})$`);
 const REVEAL_SHELL_PATH = new RegExp(`^/v/(${ID})$`);
 const REVEAL_ACTION_PATH = new RegExp(`^/v/(${ID})/reveal$`);
 
@@ -37,6 +39,13 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse): 
       const id = requestMatch[1]!;
       if (method === 'GET') return await handleRequestFormGet(res, id);
       if (method === 'POST') return await handleRequestFormPost(req, res, id);
+    }
+
+    const importMatch = pathname.match(IMPORT_PATH);
+    if (importMatch) {
+      const id = importMatch[1]!;
+      if (method === 'GET') return await handleImportFormGet(res, id);
+      if (method === 'POST') return await handleImportFormPost(req, res, id);
     }
 
     const revealShellMatch = pathname.match(REVEAL_SHELL_PATH);

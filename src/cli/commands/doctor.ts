@@ -5,6 +5,7 @@ import { promisify } from 'node:util';
 import { parseArgs } from '../args.js';
 import { detectAll } from '../../storage/detect.js';
 import { readIndex } from '../../core/index-store.js';
+import { computeManifestGaps } from '../../core/manifest-gaps.js';
 import { auditLogPath, configPath, enigmaHome, indexPath, keyPath, secretsPath } from '../../core/paths.js';
 import { EnigmaError } from '../../core/errors.js';
 
@@ -44,6 +45,8 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
     secretsFilePresent: existsSync(secretsPath()),
   };
 
+  const { gaps: manifestGaps } = computeManifestGaps(process.cwd());
+
   const report = {
     platform: `${platform()} ${release()}`,
     depositories,
@@ -58,6 +61,7 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
     },
     index,
     vault,
+    manifestGaps,
   };
 
   if (json) {
@@ -76,6 +80,7 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
     `Index: ${index.ok ? `ok (${index.entries} entries)` : `ERROR: ${index.error}`}`,
     `Vault key: ${vault.keyPresent ? 'present' : 'missing'}`,
     `Vault file: ${vault.secretsFilePresent ? 'present' : 'missing'}`,
+    `Manifest gaps: ${manifestGaps.length === 0 ? 'none' : manifestGaps.join(', ')}`,
   ];
   process.stdout.write(`${lines.join('\n')}\n`);
   return 0;

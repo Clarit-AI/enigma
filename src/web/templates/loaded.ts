@@ -6,5 +6,6 @@ import requestFormHtml from './request-form.html?raw';
 import requestDoneHtml from './request-done.html?raw';
 import revealShellHtml from './reveal-shell.html?raw';
 import errorHtml from './error.html?raw';
+import importFormHtml from './import-form.html?raw';
 
-export { requestFormHtml, requestDoneHtml, revealShellHtml, errorHtml };
+export { requestFormHtml, requestDoneHtml, revealShellHtml, errorHtml, importFormHtml };

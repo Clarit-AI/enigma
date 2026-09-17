@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import { errorHtml, requestDoneHtml, requestFormHtml, revealShellHtml } from '../../../src/web/templates/loaded.js';
+import { errorHtml, importFormHtml, requestDoneHtml, requestFormHtml, revealShellHtml } from '../../../src/web/templates/loaded.js';
 
-const TEMPLATES = { errorHtml, requestDoneHtml, requestFormHtml, revealShellHtml };
+const TEMPLATES = { errorHtml, importFormHtml, requestDoneHtml, requestFormHtml, revealShellHtml };
 
 describe('templates', () => {
   it.each(Object.entries(TEMPLATES))('%s is real markup loaded as text, not an empty or literal specifier', (_name, html) => {
