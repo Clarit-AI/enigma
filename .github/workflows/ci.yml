@@ -31,3 +31,30 @@ jobs:
             exit 1
           fi
       - run: npm audit --audit-level=high
+
+  toolchain-guard:
+    # Issue #29: proves the stale/absent-node_modules guard actually fires,
+    # rather than trusting it by inspection. Deliberately skips `npm ci` and
+    # asserts a gate command fails loudly, naming `npm ci`, instead of
+    # silently resolving some other toolchain.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+      - name: Verify gate commands refuse to run without npm ci
+        run: |
+          set +e
+          output="$(npm test 2>&1)"
+          status=$?
+          set -e
+          echo "$output"
+          if [ "$status" -eq 0 ]; then
+            echo "::error::npm test succeeded without npm ci — the toolchain guard did not fire."
+            exit 1
+          fi
+          if ! echo "$output" | grep -q "npm ci"; then
+            echo "::error::npm test failed as expected, but the error did not name 'npm ci'."
+            exit 1
+          fi

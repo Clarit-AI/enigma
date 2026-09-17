@@ -4,6 +4,21 @@
 // call) or a depository-style `.resolve(` method call, excluding `Promise.resolve(`.
 // This is a backstop, not a guarantee — it catches obvious textual patterns, not every
 // way a secret value could leak. Review and the runtime boundary are the real defenses.
+//
+// Stated plainly (Issue #38): this fence matches CALL shapes. It has no idea what a
+// FIELD ASSIGNMENT is — it cannot see `someResult.reason = someValue` or a `reason:`
+// key in an object literal, however value-carrying the right-hand side is. That
+// specific field (`RequestNameResult.reason`, src/request/store.ts) is deliberately
+// narrow today — populated only from static, value-free structural text — but nothing
+// here would notice if a future change widened it to carry a real value. Teaching
+// this scanner to reason about field provenance was considered and rejected as
+// brittle: `reason` alone is an extremely common field name in this codebase for
+// purposes unrelated to this concern, so a rule that matched the token would either
+// misfire constantly across the repo or need the same "is this RHS safe" judgement
+// call this file avoids for the call-shape case. Instead, every RequestNameResult
+// call site is enumerated with a golden snapshot of its `reason:` assignments in
+// test/unit/reason-field-surfaces.test.ts, which fails on a new or changed site —
+// see that file's header comment for what it does and does not catch.
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
