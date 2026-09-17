@@ -26,29 +26,52 @@ export function claudeSettingsPath(): string {
   return join(configDir, 'settings.json');
 }
 
-/** The on-disk formatting of an existing settings.json, reproduced on write so `--uninstall`
+/**
+ * The on-disk formatting of an existing settings.json, reproduced on write so `--uninstall`
  * restores the original bytes instead of just JSON-equivalent content (a hand-formatted or
- * version-controlled settings.json shouldn't get its whole file reformatted by this command). */
+ * version-controlled settings.json shouldn't get its whole file reformatted by this command).
+ *
+ * **Preserved**: the indent unit (tabs vs spaces, and how many), whether the file ends in a
+ * newline, and the line ending (LF vs CRLF).
+ *
+ * **Not preserved**: a minified (single-line) file — it has no indentation to detect, so it falls
+ * back to the default below rather than staying minified; and internally inconsistent indentation
+ * (e.g. 2 spaces at one depth, 4 at another) — normalized to whichever indent is seen first,
+ * because `JSON.stringify`'s indent argument is one fixed string applied at every depth, so no
+ * amount of detection here can reproduce a file that mixes indent widths.
+ */
 interface SettingsStyle {
   indent: string;
   trailingNewline: boolean;
+  eol: '\n' | '\r\n';
 }
 
 /** Used only when creating a settings.json that didn't exist before — there is no prior style to preserve. */
-const DEFAULT_STYLE: SettingsStyle = { indent: '  ', trailingNewline: true };
+const DEFAULT_STYLE: SettingsStyle = { indent: '  ', trailingNewline: true, eol: '\n' };
 
-/** Detects indent width/character from the first indented line, and whether the file ended in a
- * newline. Not a general formatter: a single-line (compact) file has no indentation to detect and
- * falls back to the default, which is an accepted, narrow simplification — the fixtures this guards
- * against (hand-edited or version-controlled settings.json) are pretty-printed in practice. */
+/** Detects indent width/character from the first indented line, whether the file ended in a
+ * newline, and its line ending. See `SettingsStyle` for exactly what is and isn't preserved. */
 function detectStyle(raw: string): SettingsStyle {
   const indentMatch = raw.match(/\n([ \t]+)\S/);
-  return { indent: indentMatch?.[1] ?? DEFAULT_STYLE.indent, trailingNewline: raw.endsWith('\n') };
+  return {
+    indent: indentMatch?.[1] ?? DEFAULT_STYLE.indent,
+    trailingNewline: raw.endsWith('\n'),
+    eol: raw.includes('\r\n') ? '\r\n' : '\n',
+  };
 }
 
 function readSettings(path: string): { settings: ClaudeSettings; style: SettingsStyle } {
   if (!existsSync(path)) return { settings: {}, style: DEFAULT_STYLE };
-  const raw = readFileSync(path, 'utf8');
+
+  let raw: string;
+  try {
+    raw = readFileSync(path, 'utf8');
+  } catch (err) {
+    throw new EnigmaError({
+      code: 'E_CLAUDE_SETTINGS_UNWRITABLE',
+      message: `Could not read ${path}: ${errorReason(err)}. Fix its permissions, then run enigma install again.`,
+    });
+  }
   if (raw.trim() === '') return { settings: {}, style: DEFAULT_STYLE };
 
   let parsed: unknown;
@@ -107,9 +130,13 @@ function writeSettingsAtomic(path: string, settings: ClaudeSettings, style: Sett
   }
 
   const tmpPath = `${path}.enigma-install-${process.pid}.tmp`;
-  const body = JSON.stringify(settings, null, style.indent);
+  // JSON.stringify only ever emits bare `\n` between elements — never inside a string value,
+  // where a literal newline is always the two-character escape `\n` — so this replace can't
+  // accidentally touch data, only the structural newlines this function itself is producing.
+  const lfBody = JSON.stringify(settings, null, style.indent);
+  const body = style.eol === '\r\n' ? lfBody.replace(/\n/g, '\r\n') : lfBody;
   try {
-    writeFileSync(tmpPath, style.trailingNewline ? `${body}\n` : body, 'utf8');
+    writeFileSync(tmpPath, style.trailingNewline ? `${body}${style.eol}` : body, 'utf8');
     renameSync(tmpPath, path);
   } catch (err) {
     throw new EnigmaError({

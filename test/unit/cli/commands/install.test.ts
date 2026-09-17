@@ -119,6 +119,23 @@ describe('cmdInstall', () => {
     expect(readFileSync(settingsPath, 'utf8')).toBe(original);
   });
 
+  it('preserves CRLF line endings through install and --uninstall', async () => {
+    const original = '{\r\n  "theme": "dark"\r\n}\r\n';
+    writeFileSync(settingsPath, original);
+
+    await cmdInstall([]);
+    const afterInstall = readFileSync(settingsPath, 'utf8');
+    // Every structural newline install() writes must be \r\n, not just the
+    // eventual round trip back to the original.
+    expect(afterInstall).not.toMatch(/(?<!\r)\n/);
+    expect(afterInstall.startsWith('{\r\n  "theme": "dark"')).toBe(true);
+
+    const code = await cmdInstall(['--uninstall']);
+
+    expect(code).toBe(0);
+    expect(readFileSync(settingsPath, 'utf8')).toBe(original);
+  });
+
   it('--uninstall only removes the marketplace entry it owns, leaving other keys alone', async () => {
     writeFileSync(
       settingsPath,
@@ -244,5 +261,24 @@ describe('cmdInstall', () => {
     expect((error as InstanceType<typeof EnigmaError>).code).toBe('E_CLAUDE_SETTINGS_UNWRITABLE');
     expect((error as Error).message).toContain(settingsPath);
     expect(readFileSync(settingsPath, 'utf8')).toBe(original);
+  });
+
+  it('fails with a friendly, path-naming error when an existing settings.json cannot be read', async () => {
+    rmSync(settingsPath, { force: true });
+    // A directory at the settings.json path exists but can't be read as a
+    // file (EISDIR) — portable and root-safe, unlike a chmod-based test.
+    mkdirSync(settingsPath);
+
+    let error: unknown;
+    try {
+      await cmdInstall([]);
+    } catch (err) {
+      error = err;
+    }
+
+    expect(error).toBeInstanceOf(EnigmaError);
+    expect((error as InstanceType<typeof EnigmaError>).code).toBe('E_CLAUDE_SETTINGS_UNWRITABLE');
+    expect((error as Error).message).toContain(settingsPath);
+    expect((error as Error).message.toLowerCase()).toContain('read');
   });
 });
