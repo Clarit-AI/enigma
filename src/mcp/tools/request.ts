@@ -12,7 +12,7 @@ import type { RemoteAttempt } from '../../remote/index.js';
 import { hasSecret } from '../../storage/manager.js';
 import type { DepositoryId } from '../../storage/interfaces.js';
 import { startServer } from '../../web/server.js';
-import { elicitUrl, sendElicitationComplete, supportsUrlElicitation } from '../elicit.js';
+import { elicitUrl, sendElicitationComplete, supportsFormElicitation, supportsUrlElicitation } from '../elicit.js';
 import { resolveRequestOutcome } from '../request-outcome.js';
 import { errorResult, renderOutcome, textResult } from '../result-text.js';
 import { DEPOSITORY_ID_SCHEMA, SCOPE_SCHEMA } from '../schemas.js';
@@ -27,6 +27,8 @@ interface RequestArgs {
   ui?: 'web' | 'native';
   /** `true` → remote or an honest refusal; `"prefer"` → best-effort with a local fallback; absent → local only (Issue #12). */
   remote?: boolean | 'prefer';
+  /** Explicit, one-time user confirmation to create a depository's backing collection when missing (Issue #28); consumed only by the `ui:"native"` path — the URL-mode path's actual write happens on the human's web form, which asks this itself. Never a default. */
+  confirmCreateVault?: boolean;
 }
 
 /** D1.3: overwrite requires rotate; without it the tool fails fast, before ever creating a request or bothering the user. */
@@ -45,41 +47,90 @@ async function checkNotExisting(args: RequestArgs, cwd: string): Promise<EnigmaE
 }
 
 /**
+ * Asks the human to confirm creating a depository's backing collection, via
+ * form-mode elicitation — a yes/no confirmation is not a credential, so form
+ * mode is permitted here (MCP spec 2025-11-25), the same reasoning
+ * enigma_remove's `confirm` already relies on (Issue #28).
+ */
+async function confirmCreateVault(server: McpServer, reason: string): Promise<boolean> {
+  if (!supportsFormElicitation(server.server)) return false;
+  const result = await server.server.elicitInput({
+    mode: 'form',
+    message: `${reason} Create it now?`,
+    requestedSchema: {
+      type: 'object',
+      properties: { confirm: { type: 'boolean', title: 'Create the vault' } },
+      required: ['confirm'],
+    },
+  });
+  return result.action === 'accept' && result.content?.confirm === true;
+}
+
+/**
  * ui:"native" bypasses the request store and the HTTP server entirely — the
  * osascript dialog IS the interaction (D2.5). `nativeRequest` stops at the
  * first cancelled/failed name and throws rather than reporting partial
  * results, so the names strictly before `err.secretName` in `args.names`
  * are the ones that were actually stored (native/request.ts: one dialog per
  * name, in order, storing each before moving to the next).
+ *
+ * An `E_VAULT_MISSING` failure is handled specially (Issue #28): unlike
+ * every other failure, it doesn't end the request — it's asked about (via
+ * `confirmCreateVault`, unless `args.confirmCreateVault` already answered
+ * it), and on a yes the remaining names are retried with `createVault: true`.
+ * Since every name in one call shares the same depository, this can only
+ * ever trigger once per call — the vault either gets created or the
+ * remaining names fail some other way.
  */
-async function runNative(args: RequestArgs, cwd: string): Promise<CallToolResult> {
-  try {
-    const result = await nativeRequest({
-      names: args.names,
-      reason: args.reason,
-      scope: args.scope,
-      depository: args.depository,
-      cwd,
-      usage: args.usage,
-      rotate: args.rotate,
-    });
-    const outcome = renderOutcome(
-      result.stored.map((name): RequestNameResult => ({ name, ok: true })),
-      cwd,
-    );
-    return textResult(outcome.text, outcome.isError);
-  } catch (err) {
-    if (err instanceof EnigmaError && err.secretName) {
-      const failIndex = args.names.indexOf(err.secretName);
-      const succeeded = failIndex >= 0 ? args.names.slice(0, failIndex) : [];
-      const results: RequestNameResult[] = [
-        ...succeeded.map((name): RequestNameResult => ({ name, ok: true })),
-        { name: err.secretName, ok: false, errorCode: err.code },
-      ];
-      const outcome = renderOutcome(results, cwd);
+async function runNative(args: RequestArgs, cwd: string, server: McpServer): Promise<CallToolResult> {
+  let createVault = args.confirmCreateVault ?? false;
+  let pendingNames = args.names;
+  const settled: RequestNameResult[] = [];
+
+  for (;;) {
+    try {
+      const result = await nativeRequest({
+        names: pendingNames,
+        reason: args.reason,
+        scope: args.scope,
+        depository: args.depository,
+        cwd,
+        usage: args.usage,
+        rotate: args.rotate,
+        createVault,
+      });
+      settled.push(...result.stored.map((name): RequestNameResult => ({ name, ok: true })));
+      const outcome = renderOutcome(settled, cwd);
       return textResult(outcome.text, outcome.isError);
+    } catch (err) {
+      if (!(err instanceof EnigmaError)) return errorResult(err);
+
+      const failIndex = err.secretName ? pendingNames.indexOf(err.secretName) : -1;
+      const succeededBeforeFailure = failIndex > 0 ? pendingNames.slice(0, failIndex) : [];
+      settled.push(...succeededBeforeFailure.map((name): RequestNameResult => ({ name, ok: true })));
+
+      if (err.code === 'E_VAULT_MISSING' && !createVault) {
+        if (!supportsFormElicitation(server.server)) {
+          return textResult(`${err.code}: ${err.message} Pass confirmCreateVault:true to enigma_request, or ask the user to confirm and retry.`, true);
+        }
+        const confirmed = await confirmCreateVault(server, err.message);
+        if (confirmed) {
+          createVault = true;
+          pendingNames = failIndex >= 0 ? pendingNames.slice(failIndex) : pendingNames;
+          continue;
+        }
+        settled.push({ name: err.secretName ?? pendingNames[0]!, ok: false, errorCode: err.code });
+        const outcome = renderOutcome(settled, cwd);
+        return textResult(outcome.text, outcome.isError);
+      }
+
+      if (err.secretName) {
+        settled.push({ name: err.secretName, ok: false, errorCode: err.code });
+        const outcome = renderOutcome(settled, cwd);
+        return textResult(outcome.text, outcome.isError);
+      }
+      return errorResult(err);
     }
-    return errorResult(err);
   }
 }
 
@@ -99,6 +150,7 @@ export function registerRequestTool(server: McpServer): void {
         rotate: z.boolean().optional(),
         ui: z.enum(['web', 'native']).optional(),
         remote: z.union([z.boolean(), z.literal('prefer')]).optional(),
+        confirmCreateVault: z.boolean().optional(),
       },
     },
     async (args) => {
@@ -108,7 +160,7 @@ export function registerRequestTool(server: McpServer): void {
       if (existsErr) return errorResult(existsErr);
 
       if (args.ui === 'native' && process.platform === 'darwin') {
-        return runNative(args, cwd);
+        return runNative(args, cwd, server);
       }
 
       const preference = resolveRemotePreference(args.remote);

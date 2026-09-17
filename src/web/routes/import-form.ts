@@ -9,7 +9,7 @@ import { commitImport } from '../../storage/import-commit.js';
 import { detectAll } from '../../storage/detect.js';
 import type { DepositoryId } from '../../storage/interfaces.js';
 import { readBody, parseSubmission, PayloadTooLargeError } from '../body.js';
-import { buildDepositoryOptions, needsAvailabilityConfirmation } from '../depository-picker.js';
+import { buildDepositoryOptions, needsCreateVaultConfirmation } from '../depository-picker.js';
 import { sendErrorPage, sendHtml } from '../responses.js';
 import { importFormHtml, requestDoneHtml } from '../templates/loaded.js';
 import { renderRepeatingBlock, renderTemplate } from '../templates/render.js';
@@ -105,7 +105,7 @@ export async function handleImportFormPost(req: IncomingMessage, res: ServerResp
   }
 
   const detections = await detectAll();
-  if (needsAvailabilityConfirmation(detections, chosenDepository) && !submission.confirmCreateVault) {
+  if ((await needsCreateVaultConfirmation(detections, chosenDepository)) && !submission.confirmCreateVault) {
     // Pre-flight only: nothing has been written and the id is not yet consumed.
     await renderForm(res, record, { confirmDepository: chosenDepository, selectedDepositoryId: chosenDepository });
     return;

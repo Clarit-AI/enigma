@@ -42690,14 +42690,18 @@ function ensureParentDir(path) {
   mkdirSync(dir, { recursive: true, mode: DIR_MODE });
   chmodSync(dir, DIR_MODE);
 }
-function readJsonFile(path, fallback, corruptErrorCode) {
+function readJsonFile(path, fallback, corruptErrorCode, corruptDepository) {
   if (!existsSync2(path)) return fallback;
   const raw = readFileSync(path, "utf8");
   try {
     return JSON.parse(raw);
   } catch (err) {
     if (!corruptErrorCode) throw err;
-    throw new EnigmaError({ code: corruptErrorCode, message: `failed to parse ${path}: not valid JSON` });
+    throw new EnigmaError({
+      code: corruptErrorCode,
+      message: `${path} is not valid JSON. Fix or remove it by hand, then try again.`,
+      depository: corruptDepository
+    });
   }
 }
 function writeJsonFileAtomic(path, data) {
@@ -42802,7 +42806,7 @@ function getOrCreateKey() {
   return key;
 }
 function readSecretsFile() {
-  return readJsonFile(secretsPath(), EMPTY_SECRETS_FILE);
+  return readJsonFile(secretsPath(), EMPTY_SECRETS_FILE, "E_VAULT_CORRUPT", "encrypted");
 }
 function writeSecretsFile(file2) {
   writeJsonFileAtomic(secretsPath(), file2);
@@ -43430,6 +43434,16 @@ function vaultMissing() {
     depository: "1password"
   });
 }
+async function checkOnepasswordVaultMissing() {
+  try {
+    await runOp(["vault", "get", VAULT, "--format", "json"]);
+    return false;
+  } catch (err) {
+    const failure2 = err;
+    if (isTimeout(failure2)) return false;
+    return VAULT_MISSING_PATTERN.test(failure2.stderr ?? "");
+  }
+}
 function timedOut(op) {
   const message = `1password depository timed out waiting for the op CLI after ${EXEC_TIMEOUT_MS3}ms; run "op signin" or unlock 1Password and try again`;
   if (op === "read") readFailed4(message);
@@ -43708,13 +43722,14 @@ async function resolveSecret(name, opts) {
     throw new EnigmaError({ code: "E_NOT_FOUND", message: `${name} not found`, secretName: name });
   }
   const op = opts.auditOp ?? "read";
+  const method = op === "reveal" ? opts.auditMethod : void 0;
   const depository = createDepository(entry.depository, { projectPath: projectPathFor(entry, opts.cwd) });
   try {
     const value = await depository.resolve(entry.ref);
-    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: true, error: null });
+    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: true, error: null, method });
     return value;
   } catch (err) {
-    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: false, error: auditErrorText(err), method });
     throw err;
   }
 }
@@ -43798,21 +43813,16 @@ ${remoteNote}` : outcome.text;
 
 // src/mcp/tools/doctor.ts
 import { execFile as execFile6 } from "node:child_process";
-import { existsSync as existsSync7 } from "node:fs";
+import { existsSync as existsSync6 } from "node:fs";
 import { platform, release } from "node:os";
 import { promisify } from "node:util";
 
 // src/core/config.ts
-import { existsSync as existsSync6, readFileSync as readFileSync4 } from "node:fs";
 import { join as join3 } from "node:path";
 var DEFAULT_CONFIG = {};
 var DEFAULT_MANIFEST = { secrets: {} };
-function readJsonIfExists(path) {
-  if (!existsSync6(path)) return void 0;
-  return JSON.parse(readFileSync4(path, "utf8"));
-}
 function loadConfig() {
-  const raw = readJsonIfExists(configPath());
+  const raw = readJsonFile(configPath(), void 0, "E_CONFIG_CORRUPT");
   if (!raw) return { ...DEFAULT_CONFIG };
   const config2 = {};
   if (typeof raw.defaultDepository === "string") config2.defaultDepository = raw.defaultDepository;
@@ -43824,7 +43834,7 @@ function loadConfig() {
   return config2;
 }
 function loadProjectManifest(projectPath) {
-  const raw = readJsonIfExists(join3(projectPath, ".enigma.json"));
+  const raw = readJsonFile(join3(projectPath, ".enigma.json"), void 0, "E_CONFIG_CORRUPT");
   if (!raw) return { ...DEFAULT_MANIFEST, secrets: {} };
   const manifest = { secrets: {} };
   if (typeof raw.defaultDepository === "string") manifest.defaultDepository = raw.defaultDepository;
@@ -43922,8 +43932,8 @@ function registerDoctorTool(server) {
         `Client elicitation support: url=${supportsUrlElicitation(server.server)} form=${supportsFormElicitation(server.server)}`,
         `Config home: ${enigmaHome()}`,
         `Index: ${indexStatus}`,
-        `Vault key: ${existsSync7(keyPath()) ? "present" : "missing"}`,
-        `Vault file: ${existsSync7(secretsPath()) ? "present" : "missing"}`,
+        `Vault key: ${existsSync6(keyPath()) ? "present" : "missing"}`,
+        `Vault file: ${existsSync6(secretsPath()) ? "present" : "missing"}`,
         `Manifest gaps: ${manifestGaps.length === 0 ? "none" : manifestGaps.join(", ")}`,
         `Paths: index=${indexPath()} audit=${auditLogPath()} config=${configPath()}`
       ];
@@ -43933,7 +43943,7 @@ function registerDoctorTool(server) {
 }
 
 // src/mcp/tools/import.ts
-import { existsSync as existsSync9, readFileSync as readFileSync6 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync5 } from "node:fs";
 import { isAbsolute, join as join4 } from "node:path";
 
 // src/storage/dotenv-file.ts
@@ -44095,7 +44105,7 @@ function removeDotEnvEntries(content, names, opts = {}) {
 
 // src/storage/import-commit.ts
 import { randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync8, readFileSync as readFileSync5, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync4, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 var FILE_MODE4 = 384;
 function writeFileAtomic(path, content, mode) {
   const tmpPath = `${path}.${randomBytes4(6).toString("hex")}.tmp`;
@@ -44106,7 +44116,7 @@ function writeFileAtomic(path, content, mode) {
   } catch (err) {
     const error62 = err instanceof Error ? err.message : String(err);
     try {
-      if (existsSync8(tmpPath)) unlinkSync(tmpPath);
+      if (existsSync7(tmpPath)) unlinkSync(tmpPath);
       return { ok: false, error: error62 };
     } catch {
       return { ok: false, error: error62, leftoverPath: tmpPath };
@@ -44163,7 +44173,7 @@ async function commitImport(opts) {
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
-  const currentContent = existsSync8(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
+  const currentContent = existsSync7(opts.envFilePath) ? readFileSync4(opts.envFilePath, "utf8") : "";
   const valueByName = new Map(opts.entries.map((e) => [e.name, e.value]));
   const currentValueByName = new Map(parseDotEnv(currentContent).entries.map((e) => [e.name, e.value]));
   const toRemove = [];
@@ -44601,6 +44611,11 @@ function needsAvailabilityConfirmation(detections, id) {
   const match = detections.find((d) => d.id === id);
   return !match || !match.available;
 }
+async function needsCreateVaultConfirmation(detections, id) {
+  if (needsAvailabilityConfirmation(detections, id)) return true;
+  if (id === "1password") return checkOnepasswordVaultMissing();
+  return false;
+}
 
 // src/web/routes/import-form.ts
 async function renderForm(res, record2, opts = {}) {
@@ -44676,7 +44691,7 @@ async function handleImportFormPost(req, res, id) {
     return;
   }
   const detections = await detectAll();
-  if (needsAvailabilityConfirmation(detections, chosenDepository) && !submission.confirmCreateVault) {
+  if (await needsCreateVaultConfirmation(detections, chosenDepository) && !submission.confirmCreateVault) {
     await renderForm(res, record2, { confirmDepository: chosenDepository, selectedDepositoryId: chosenDepository });
     return;
   }
@@ -46503,7 +46518,7 @@ async function handleRequestFormPost(req, res, id) {
     return;
   }
   const detections = await detectAll();
-  if (needsAvailabilityConfirmation(detections, chosenDepository) && !submission.confirmCreateVault) {
+  if (await needsCreateVaultConfirmation(detections, chosenDepository) && !submission.confirmCreateVault) {
     await renderForm2(res, record2, {
       confirmDepository: chosenDepository,
       selectedDepositoryId: chosenDepository,
@@ -46587,7 +46602,7 @@ async function handleRevealPost(res, id) {
     return;
   }
   try {
-    const value = await resolveSecret(name, { scope: marked.scope, cwd: process.cwd(), actor: "user", auditOp: "reveal" });
+    const value = await resolveSecret(name, { scope: marked.scope, cwd: process.cwd(), actor: "user", auditOp: "reveal", auditMethod: "page" });
     sendJson(res, 200, { name, value });
   } catch (err) {
     if (err instanceof EnigmaError && err.code === "E_NOT_FOUND") {
@@ -46788,10 +46803,10 @@ function registerImportTool(server) {
       const projectPath = findProjectPath(cwd);
       const pathArg = args.path ?? ".env";
       const absPath = isAbsolute(pathArg) ? pathArg : join4(cwd, pathArg);
-      if (!existsSync9(absPath)) {
+      if (!existsSync8(absPath)) {
         return errorResult(new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` }));
       }
-      const content = readFileSync6(absPath, "utf8");
+      const content = readFileSync5(absPath, "utf8");
       const parsed = parseDotEnv(content);
       if (parsed.entries.length === 0) {
         return textResult(
@@ -47038,7 +47053,8 @@ async function nativeRequest(opts) {
       description: opts.description,
       usage: opts.usage,
       rotate: opts.rotate,
-      actor
+      actor,
+      createVault: opts.createVault
     });
     stored.push(name);
   }
@@ -47059,34 +47075,64 @@ async function checkNotExisting(args, cwd) {
   }
   return void 0;
 }
-async function runNative(args, cwd) {
-  try {
-    const result = await nativeRequest({
-      names: args.names,
-      reason: args.reason,
-      scope: args.scope,
-      depository: args.depository,
-      cwd,
-      usage: args.usage,
-      rotate: args.rotate
-    });
-    const outcome = renderOutcome(
-      result.stored.map((name) => ({ name, ok: true })),
-      cwd
-    );
-    return textResult(outcome.text, outcome.isError);
-  } catch (err) {
-    if (err instanceof EnigmaError && err.secretName) {
-      const failIndex = args.names.indexOf(err.secretName);
-      const succeeded = failIndex >= 0 ? args.names.slice(0, failIndex) : [];
-      const results = [
-        ...succeeded.map((name) => ({ name, ok: true })),
-        { name: err.secretName, ok: false, errorCode: err.code }
-      ];
-      const outcome = renderOutcome(results, cwd);
-      return textResult(outcome.text, outcome.isError);
+async function confirmCreateVault(server, reason) {
+  if (!supportsFormElicitation(server.server)) return false;
+  const result = await server.server.elicitInput({
+    mode: "form",
+    message: `${reason} Create it now?`,
+    requestedSchema: {
+      type: "object",
+      properties: { confirm: { type: "boolean", title: "Create the vault" } },
+      required: ["confirm"]
     }
-    return errorResult(err);
+  });
+  return result.action === "accept" && result.content?.confirm === true;
+}
+async function runNative(args, cwd, server) {
+  let createVault2 = args.confirmCreateVault ?? false;
+  let pendingNames = args.names;
+  const settled2 = [];
+  for (; ; ) {
+    try {
+      const result = await nativeRequest({
+        names: pendingNames,
+        reason: args.reason,
+        scope: args.scope,
+        depository: args.depository,
+        cwd,
+        usage: args.usage,
+        rotate: args.rotate,
+        createVault: createVault2
+      });
+      settled2.push(...result.stored.map((name) => ({ name, ok: true })));
+      const outcome = renderOutcome(settled2, cwd);
+      return textResult(outcome.text, outcome.isError);
+    } catch (err) {
+      if (!(err instanceof EnigmaError)) return errorResult(err);
+      const failIndex = err.secretName ? pendingNames.indexOf(err.secretName) : -1;
+      const succeededBeforeFailure = failIndex > 0 ? pendingNames.slice(0, failIndex) : [];
+      settled2.push(...succeededBeforeFailure.map((name) => ({ name, ok: true })));
+      if (err.code === "E_VAULT_MISSING" && !createVault2) {
+        if (!supportsFormElicitation(server.server)) {
+          return textResult(`${err.code}: ${err.message} Pass confirmCreateVault:true to enigma_request, or ask the user to confirm and retry.`, true);
+        }
+        const confirmed = await confirmCreateVault(server, err.message);
+        if (confirmed) {
+          createVault2 = true;
+          pendingNames = failIndex >= 0 ? pendingNames.slice(failIndex) : pendingNames;
+          continue;
+        }
+        settled2.push({ name: err.secretName ?? pendingNames[0], ok: false, errorCode: err.code });
+        const outcome = renderOutcome(settled2, cwd);
+        return textResult(outcome.text, outcome.isError);
+      }
+      if (err.secretName) {
+        settled2.push({ name: err.secretName, ok: false, errorCode: err.code });
+        const outcome = renderOutcome(settled2, cwd);
+        return textResult(outcome.text, outcome.isError);
+      }
+      return errorResult(err);
+    }
   }
 }
 function registerRequestTool(server) {
@@ -47103,7 +47149,8 @@ function registerRequestTool(server) {
         scope: SCOPE_SCHEMA.optional(),
         rotate: external_exports.boolean().optional(),
         ui: external_exports.enum(["web", "native"]).optional(),
-        remote: external_exports.union([external_exports.boolean(), external_exports.literal("prefer")]).optional()
+        remote: external_exports.union([external_exports.boolean(), external_exports.literal("prefer")]).optional(),
+        confirmCreateVault: external_exports.boolean().optional()
       }
     },
     async (args) => {
@@ -47111,7 +47158,7 @@ function registerRequestTool(server) {
       const existsErr = await checkNotExisting(args, cwd);
       if (existsErr) return errorResult(existsErr);
       if (args.ui === "native" && process.platform === "darwin") {
-        return runNative(args, cwd);
+        return runNative(args, cwd, server);
       }
       const preference = resolveRemotePreference(args.remote);
       const clientSupportsUrl = supportsUrlElicitation(server.server);
@@ -47210,7 +47257,7 @@ async function clipboardReveal(name, opts = {}) {
   if (!entry) {
     throw new EnigmaError({ code: "E_NOT_FOUND", message: `${name} not found`, secretName: name });
   }
-  const value = await resolveSecret(name, { scope: entry.scope, cwd, actor, auditOp: "reveal" });
+  const value = await resolveSecret(name, { scope: entry.scope, cwd, actor, auditOp: "reveal", auditMethod: "clipboard" });
   try {
     await writeClipboard(value);
   } catch (err) {
@@ -47221,7 +47268,8 @@ async function clipboardReveal(name, opts = {}) {
       depository: entry.depository,
       actor,
       ok: false,
-      error: auditErrorText(err)
+      error: auditErrorText(err),
+      method: "clipboard"
     });
     throw err;
   }

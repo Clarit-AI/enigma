@@ -15,16 +15,25 @@ function ensureParentDir(path: string): void {
 /**
  * Reads and parses a JSON file, returning `fallback` when it doesn't exist.
  * When `corruptErrorCode` is given, an unparsable file throws an
- * `EnigmaError` with that code instead of a raw `SyntaxError`.
+ * `EnigmaError` with that code instead of a raw `SyntaxError` — the single
+ * place every on-disk JSON file's corruption is turned into the same shape
+ * of answer (which file, what is wrong, what to do), matching the precedent
+ * `E_CLAUDE_SETTINGS_INVALID` already set for `settings.json` (Issue #18).
+ * `corruptDepository` names the depository the file belongs to (e.g.
+ * `encrypted` for `secrets.enc`), when the file has one.
  */
-export function readJsonFile<T>(path: string, fallback: T, corruptErrorCode?: EnigmaErrorCode): T {
+export function readJsonFile<T>(path: string, fallback: T, corruptErrorCode?: EnigmaErrorCode, corruptDepository?: string): T {
   if (!existsSync(path)) return fallback;
   const raw = readFileSync(path, 'utf8');
   try {
     return JSON.parse(raw) as T;
   } catch (err) {
     if (!corruptErrorCode) throw err;
-    throw new EnigmaError({ code: corruptErrorCode, message: `failed to parse ${path}: not valid JSON` });
+    throw new EnigmaError({
+      code: corruptErrorCode,
+      message: `${path} is not valid JSON. Fix or remove it by hand, then try again.`,
+      depository: corruptDepository,
+    });
   }
 }
 

@@ -22,7 +22,6 @@ function readStdinJson() {
 }
 
 // src/core/config.ts
-import { existsSync, readFileSync } from "node:fs";
 import { join as join2 } from "node:path";
 
 // src/core/paths.ts
@@ -47,56 +46,10 @@ function secretsPath() {
   return join(enigmaHome(), "secrets.enc");
 }
 
-// src/core/config.ts
-var DEFAULT_CONFIG = {};
-var DEFAULT_MANIFEST = { secrets: {} };
-function readJsonIfExists(path) {
-  if (!existsSync(path)) return void 0;
-  return JSON.parse(readFileSync(path, "utf8"));
-}
-function loadConfig() {
-  const raw = readJsonIfExists(configPath());
-  if (!raw) return { ...DEFAULT_CONFIG };
-  const config = {};
-  if (typeof raw.defaultDepository === "string") config.defaultDepository = raw.defaultDepository;
-  if (raw.remote === "cloudflared" || raw.remote === "tailscale") config.remote = raw.remote;
-  if (raw.tripwire && typeof raw.tripwire === "object" && Array.isArray(raw.tripwire.depositories)) {
-    config.tripwire = { depositories: raw.tripwire.depositories };
-  }
-  if (raw.ui === "web" || raw.ui === "native") config.ui = raw.ui;
-  return config;
-}
-function loadProjectManifest(projectPath) {
-  const raw = readJsonIfExists(join2(projectPath, ".enigma.json"));
-  if (!raw) return { ...DEFAULT_MANIFEST, secrets: {} };
-  const manifest = { secrets: {} };
-  if (typeof raw.defaultDepository === "string") manifest.defaultDepository = raw.defaultDepository;
-  if (raw.secrets && typeof raw.secrets === "object") {
-    for (const [name, description] of Object.entries(raw.secrets)) {
-      if (typeof description === "string") manifest.secrets[name] = description;
-    }
-  }
-  return manifest;
-}
-
-// src/core/project.ts
-import { createHash } from "node:crypto";
-import { existsSync as existsSync2 } from "node:fs";
-import { dirname, resolve } from "node:path";
-var PROJECT_ID_LENGTH = 16;
-function findProjectPath(cwd) {
-  let dir = resolve(cwd);
-  for (; ; ) {
-    if (existsSync2(`${dir}/.git`)) return dir;
-    const parent = dirname(dir);
-    if (parent === dir) return resolve(cwd);
-    dir = parent;
-  }
-}
-function projectId(cwd) {
-  const projectPath = findProjectPath(cwd);
-  return createHash("sha256").update(projectPath).digest("hex").slice(0, PROJECT_ID_LENGTH);
-}
+// src/core/secure-file.ts
+import { mkdirSync, appendFileSync, chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
+import { randomBytes } from "node:crypto";
 
 // src/core/errors.ts
 var EnigmaError = class _EnigmaError extends Error {
@@ -114,24 +67,25 @@ var EnigmaError = class _EnigmaError extends Error {
 };
 
 // src/core/secure-file.ts
-import { mkdirSync, appendFileSync, chmodSync, existsSync as existsSync3, readFileSync as readFileSync2, renameSync, writeFileSync } from "node:fs";
-import { dirname as dirname2 } from "node:path";
-import { randomBytes } from "node:crypto";
 var FILE_MODE = 384;
 var DIR_MODE = 448;
 function ensureParentDir(path) {
-  const dir = dirname2(path);
+  const dir = dirname(path);
   mkdirSync(dir, { recursive: true, mode: DIR_MODE });
   chmodSync(dir, DIR_MODE);
 }
-function readJsonFile(path, fallback, corruptErrorCode) {
-  if (!existsSync3(path)) return fallback;
-  const raw = readFileSync2(path, "utf8");
+function readJsonFile(path, fallback, corruptErrorCode, corruptDepository) {
+  if (!existsSync(path)) return fallback;
+  const raw = readFileSync(path, "utf8");
   try {
     return JSON.parse(raw);
   } catch (err) {
     if (!corruptErrorCode) throw err;
-    throw new EnigmaError({ code: corruptErrorCode, message: `failed to parse ${path}: not valid JSON` });
+    throw new EnigmaError({
+      code: corruptErrorCode,
+      message: `${path} is not valid JSON. Fix or remove it by hand, then try again.`,
+      depository: corruptDepository
+    });
   }
 }
 function writeJsonFileAtomic(path, data) {
@@ -145,6 +99,53 @@ function appendLineSecure(path, line) {
   ensureParentDir(path);
   appendFileSync(path, `${line}
 `, { mode: FILE_MODE });
+}
+
+// src/core/config.ts
+var DEFAULT_CONFIG = {};
+var DEFAULT_MANIFEST = { secrets: {} };
+function loadConfig() {
+  const raw = readJsonFile(configPath(), void 0, "E_CONFIG_CORRUPT");
+  if (!raw) return { ...DEFAULT_CONFIG };
+  const config = {};
+  if (typeof raw.defaultDepository === "string") config.defaultDepository = raw.defaultDepository;
+  if (raw.remote === "cloudflared" || raw.remote === "tailscale") config.remote = raw.remote;
+  if (raw.tripwire && typeof raw.tripwire === "object" && Array.isArray(raw.tripwire.depositories)) {
+    config.tripwire = { depositories: raw.tripwire.depositories };
+  }
+  if (raw.ui === "web" || raw.ui === "native") config.ui = raw.ui;
+  return config;
+}
+function loadProjectManifest(projectPath) {
+  const raw = readJsonFile(join2(projectPath, ".enigma.json"), void 0, "E_CONFIG_CORRUPT");
+  if (!raw) return { ...DEFAULT_MANIFEST, secrets: {} };
+  const manifest = { secrets: {} };
+  if (typeof raw.defaultDepository === "string") manifest.defaultDepository = raw.defaultDepository;
+  if (raw.secrets && typeof raw.secrets === "object") {
+    for (const [name, description] of Object.entries(raw.secrets)) {
+      if (typeof description === "string") manifest.secrets[name] = description;
+    }
+  }
+  return manifest;
+}
+
+// src/core/project.ts
+import { createHash } from "node:crypto";
+import { existsSync as existsSync2 } from "node:fs";
+import { dirname as dirname2, resolve } from "node:path";
+var PROJECT_ID_LENGTH = 16;
+function findProjectPath(cwd) {
+  let dir = resolve(cwd);
+  for (; ; ) {
+    if (existsSync2(`${dir}/.git`)) return dir;
+    const parent = dirname2(dir);
+    if (parent === dir) return resolve(cwd);
+    dir = parent;
+  }
+}
+function projectId(cwd) {
+  const projectPath = findProjectPath(cwd);
+  return createHash("sha256").update(projectPath).digest("hex").slice(0, PROJECT_ID_LENGTH);
 }
 
 // src/core/audit.ts
@@ -177,15 +178,15 @@ function listIndexEntries(index, opts = {}) {
 
 // src/storage/depositories/encrypted.ts
 import { createCipheriv, createDecipheriv, randomBytes as randomBytes2 } from "node:crypto";
-import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
 var ALGORITHM = "aes-256-gcm";
 var KEY_BYTES = 32;
 var IV_BYTES = 12;
 var FILE_MODE2 = 384;
 var EMPTY_SECRETS_FILE = { version: 1, entries: {} };
 function readKey() {
-  if (!existsSync4(keyPath())) return void 0;
-  const key = Buffer.from(readFileSync3(keyPath(), "utf8"), "base64");
+  if (!existsSync3(keyPath())) return void 0;
+  const key = Buffer.from(readFileSync2(keyPath(), "utf8"), "base64");
   if (key.length !== KEY_BYTES) readFailed();
   return key;
 }
@@ -197,7 +198,7 @@ function getOrCreateKey() {
   return key;
 }
 function readSecretsFile() {
-  return readJsonFile(secretsPath(), EMPTY_SECRETS_FILE);
+  return readJsonFile(secretsPath(), EMPTY_SECRETS_FILE, "E_VAULT_CORRUPT", "encrypted");
 }
 function writeSecretsFile(file) {
   writeJsonFileAtomic(secretsPath(), file);
@@ -267,7 +268,7 @@ var encryptedDepositoryModule = {
 };
 
 // src/storage/depositories/env.ts
-import { existsSync as existsSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
 import { join as join3 } from "node:path";
 var BEGIN_MARKER = "# enigma:begin";
 var END_MARKER = "# enigma:end";
@@ -353,7 +354,7 @@ function requireProjectPath(ctx) {
 }
 function createEnvDepository(ctx) {
   const envFilePath = join3(requireProjectPath(ctx), ".env");
-  const readEnvFile = () => existsSync5(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
+  const readEnvFile = () => existsSync4(envFilePath) ? readFileSync3(envFilePath, "utf8") : "";
   return {
     id: "env",
     promptProfile: "none",
@@ -547,7 +548,7 @@ var linuxSecretServiceDepositoryModule = {
 
 // src/storage/depositories/macos-keychain.ts
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync6 } from "node:fs";
+import { existsSync as existsSync5 } from "node:fs";
 var SECURITY_BIN = "/usr/bin/security";
 var SERVICE2 = "enigma";
 var EXEC_TIMEOUT_MS2 = 1e4;
@@ -714,7 +715,7 @@ var macosKeychainDepositoryModule = {
     if (process.platform !== "darwin") {
       return { id: "keychain", promptProfile: "may-prompt", available: false, reason: "not running on macOS" };
     }
-    const available = existsSync6(SECURITY_BIN);
+    const available = existsSync5(SECURITY_BIN);
     return {
       id: "keychain",
       promptProfile: "may-prompt",
@@ -1018,7 +1019,7 @@ function runSessionStart(input) {
 
 // src/hooks/read-guard.ts
 import { basename as basename2, resolve as resolve2, sep } from "node:path";
-import { existsSync as existsSync7, statSync } from "node:fs";
+import { existsSync as existsSync6, statSync } from "node:fs";
 var DOTENV_EXEMPT = /* @__PURE__ */ new Set([".env.example"]);
 var BARE_ENV_DUMP_COMMANDS = /* @__PURE__ */ new Set(["env", "printenv"]);
 var NON_READING_BASH_VERBS = /* @__PURE__ */ new Set(["rm", "mv", "touch", "chmod", "stat", "ls", "find", "test"]);
@@ -1239,7 +1240,7 @@ function isKnownNonDirectoryPath(pathLike, cwd) {
   if (!pathLike) return false;
   try {
     const resolved = resolve2(cwd, pathLike.trim());
-    return existsSync7(resolved) && !statSync(resolved).isDirectory();
+    return existsSync6(resolved) && !statSync(resolved).isDirectory();
   } catch {
     return false;
   }

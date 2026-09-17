@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { configPath } from './paths.js';
+import { readJsonFile } from './secure-file.js';
 import type { DepositoryId } from '../storage/interfaces.js';
 
 export interface EnigmaConfig {
@@ -18,14 +18,9 @@ export interface ProjectManifest {
 const DEFAULT_CONFIG: EnigmaConfig = {};
 const DEFAULT_MANIFEST: ProjectManifest = { secrets: {} };
 
-function readJsonIfExists(path: string): Record<string, unknown> | undefined {
-  if (!existsSync(path)) return undefined;
-  return JSON.parse(readFileSync(path, 'utf8')) as Record<string, unknown>;
-}
-
-/** Loads `~/.config/enigma/config.json`; unknown keys are ignored; a missing file yields defaults. */
+/** Loads `~/.config/enigma/config.json`; unknown keys are ignored; a missing file yields defaults. Corrupt JSON raises `E_CONFIG_CORRUPT` (Issue #18) rather than a raw `SyntaxError`. */
 export function loadConfig(): EnigmaConfig {
-  const raw = readJsonIfExists(configPath());
+  const raw = readJsonFile<Record<string, unknown> | undefined>(configPath(), undefined, 'E_CONFIG_CORRUPT');
   if (!raw) return { ...DEFAULT_CONFIG };
   const config: EnigmaConfig = {};
   if (typeof raw.defaultDepository === 'string') config.defaultDepository = raw.defaultDepository as DepositoryId;
@@ -37,9 +32,9 @@ export function loadConfig(): EnigmaConfig {
   return config;
 }
 
-/** Loads the committed project manifest `.enigma.json`; unknown keys ignored; missing file yields defaults. */
+/** Loads the committed project manifest `.enigma.json`; unknown keys ignored; missing file yields defaults. Corrupt JSON raises `E_CONFIG_CORRUPT` (Issue #18) rather than a raw `SyntaxError`. */
 export function loadProjectManifest(projectPath: string): ProjectManifest {
-  const raw = readJsonIfExists(join(projectPath, '.enigma.json'));
+  const raw = readJsonFile<Record<string, unknown> | undefined>(join(projectPath, '.enigma.json'), undefined, 'E_CONFIG_CORRUPT');
   if (!raw) return { ...DEFAULT_MANIFEST, secrets: {} };
   const manifest: ProjectManifest = { secrets: {} };
   if (typeof raw.defaultDepository === 'string') manifest.defaultDepository = raw.defaultDepository as DepositoryId;

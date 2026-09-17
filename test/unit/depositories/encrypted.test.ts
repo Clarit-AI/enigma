@@ -119,6 +119,25 @@ describe('encrypted depository', () => {
     await expect(depo.has('global/OPENAI_API_KEY')).resolves.toBe(false);
   });
 
+  it('a corrupt secrets.enc throws EnigmaError E_VAULT_CORRUPT naming "encrypted", never a raw SyntaxError (Issue #18)', async () => {
+    const depo = encryptedDepositoryModule.create({});
+    await depo.set('global/OPENAI_API_KEY', SENTINEL);
+    const CORRUPT_MARKER = 'totally-broken-bytes-should-never-appear-in-the-message';
+    writeFileSync(secretsPath(), `{ ${CORRUPT_MARKER}`);
+
+    try {
+      await depo.resolve('global/OPENAI_API_KEY');
+      expect.unreachable('resolve should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(EnigmaError);
+      const enigmaErr = err as EnigmaError;
+      expect(enigmaErr.code).toBe('E_VAULT_CORRUPT');
+      expect(enigmaErr.depository).toBe('encrypted');
+      expect(enigmaErr.message).toContain(secretsPath());
+      expect(enigmaErr.message).not.toContain(CORRUPT_MARKER);
+    }
+  });
+
   it('resolve after the key file is deleted fails fast naming "encrypted", with no value in the message (S1.2)', async () => {
     const depo = encryptedDepositoryModule.create({});
     await depo.set('global/OPENAI_API_KEY', SENTINEL);

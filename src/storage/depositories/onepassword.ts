@@ -143,6 +143,33 @@ function vaultMissing(): never {
   });
 }
 
+/**
+ * Read-only pre-flight probe (Issue #28): unlike `set`'s own vault-missing
+ * detection, this never creates anything, so it's safe to call before a user
+ * has confirmed anything. It exists specifically for the web request/import
+ * forms, which must know whether creating the vault needs confirming
+ * *before* consuming their one-time request id (S2.1 forbids a write before
+ * that id is consumed) — `enigma add` and `enigma_request` don't need this,
+ * since they can act directly on the `E_VAULT_MISSING` a real `set` attempt
+ * raises. `detect()` deliberately never makes a vault-touching call (see its
+ * own comment) because it runs on every `detectAll()`; this runs at most
+ * once per submission, only for a depository the user actually picked, so
+ * the same cost is justified here where it wasn't there. Ambiguous outcomes
+ * (a timeout, or any `op` failure that isn't recognizably "no such vault")
+ * report "not missing" — deferring to the real `set` attempt, which is
+ * better positioned to surface the concrete error.
+ */
+export async function checkOnepasswordVaultMissing(): Promise<boolean> {
+  try {
+    await runOp(['vault', 'get', VAULT, '--format', 'json']);
+    return false;
+  } catch (err) {
+    const failure = err as ExecFailure;
+    if (isTimeout(failure)) return false;
+    return VAULT_MISSING_PATTERN.test(failure.stderr ?? '');
+  }
+}
+
 function timedOut(op: 'read' | 'write'): never {
   const message = `1password depository timed out waiting for the op CLI after ${EXEC_TIMEOUT_MS}ms; run "op signin" or unlock 1Password and try again`;
   if (op === 'read') readFailed(message);

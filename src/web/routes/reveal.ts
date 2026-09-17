@@ -50,7 +50,7 @@ export async function handleRevealPost(res: ServerResponse, id: string): Promise
   }
 
   try {
-    const value = await resolveSecret(name, { scope: marked.scope, cwd: process.cwd(), actor: 'user', auditOp: 'reveal' });
+    const value = await resolveSecret(name, { scope: marked.scope, cwd: process.cwd(), actor: 'user', auditOp: 'reveal', auditMethod: 'page' });
     sendJson(res, 200, { name, value });
   } catch (err) {
     if (err instanceof EnigmaError && err.code === 'E_NOT_FOUND') {

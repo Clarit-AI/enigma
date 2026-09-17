@@ -68,7 +68,7 @@ export async function clipboardReveal(name: string, opts: ClipboardRevealOptions
     throw new EnigmaError({ code: 'E_NOT_FOUND', message: `${name} not found`, secretName: name });
   }
 
-  const value = await resolveSecret(name, { scope: entry.scope, cwd, actor, auditOp: 'reveal' });
+  const value = await resolveSecret(name, { scope: entry.scope, cwd, actor, auditOp: 'reveal', auditMethod: 'clipboard' });
 
   try {
     await writeClipboard(value);
@@ -83,6 +83,7 @@ export async function clipboardReveal(name: string, opts: ClipboardRevealOptions
       actor,
       ok: false,
       error: auditErrorText(err),
+      method: 'clipboard',
     });
     throw err;
   }

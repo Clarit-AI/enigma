@@ -1,3 +1,4 @@
+import { checkOnepasswordVaultMissing } from '../storage/depositories/onepassword.js';
 import type { DepositoryId, DetectionResult, PromptProfile } from '../storage/interfaces.js';
 
 const PROMPT_PROFILE_LABEL: Record<PromptProfile, string> = {
@@ -55,4 +56,20 @@ export function needsAvailabilityConfirmation(detections: DetectionResult[], id:
   if (!id) return false;
   const match = detections.find((d) => d.id === id);
   return !match || !match.available;
+}
+
+/**
+ * True when the user must confirm before `id` can accept a write: either
+ * it's not a known-available depository (`needsAvailabilityConfirmation`
+ * above), or — specifically for `1password` — it's available (signed in)
+ * but its `Enigma` vault doesn't exist yet (Issue #28). `detect()`
+ * deliberately never checks vault existence (see its own comment), so
+ * `needsAvailabilityConfirmation` alone stops catching this case the moment
+ * `op whoami` succeeds; this closes that gap for the one depository that has
+ * a vault to create, without paying the extra `op` call for the rest.
+ */
+export async function needsCreateVaultConfirmation(detections: DetectionResult[], id: string | undefined): Promise<boolean> {
+  if (needsAvailabilityConfirmation(detections, id)) return true;
+  if (id === '1password') return checkOnepasswordVaultMissing();
+  return false;
 }
