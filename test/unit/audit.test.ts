@@ -68,7 +68,7 @@ describe('appendAuditEvent', () => {
     // The union only ever names a disclosure surface — assert the exact members allowed,
     // so a future edit widening it to a free string (and thus able to smuggle a value or
     // ref) fails this test rather than failing silently.
-    expect(['clipboard', 'page', 'native-dialog']).toContain(parsed.method);
+    expect(['clipboard', 'page']).toContain(parsed.method);
     expect(JSON.stringify(parsed)).not.toContain(SENTINEL);
   });
 

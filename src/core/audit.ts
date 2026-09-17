@@ -9,12 +9,14 @@ export type AuditActor = 'agent' | 'user' | 'cli' | 'hook';
 
 /**
  * How a secret was disclosed to a human — distinct disclosure surfaces with
- * different exposure (Issue #26): `clipboard` never leaves this machine,
+ * different exposure (Issue #26): `clipboard` never leaves this machine;
  * `page` renders in a browser that may be reachable over a remote tunnel
- * (PRD D2.6), `native-dialog` is an on-machine OS dialog. A union, not a free
- * string, so a typo can't silently create a new, unaudited category.
+ * (PRD D2.6). A union, not a free string, so a typo can't silently create a
+ * new, unaudited category — which also means a member is only ever added
+ * alongside the reveal path that actually produces it (there is no third
+ * reveal surface today: `enigma_reveal`'s own method is `page | clipboard`).
  */
-export type AuditRevealMethod = 'clipboard' | 'page' | 'native-dialog';
+export type AuditRevealMethod = 'clipboard' | 'page';
 
 /**
  * One audit line (D1.8). Deliberately has no `value` field: passing one in an
