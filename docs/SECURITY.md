@@ -1,0 +1,38 @@
+# Security
+
+This document is Enigma's threat model. It states what Enigma protects against, what it does not, and how to report a problem. It is written to be accurate to the code as it exists right now, not to the product's intentions. A control that overstates itself is worse than one that states its limits, because people stop compensating for what it misses.
+
+## The invariant
+
+Enigma exists to keep one thing true: **no secret value ever enters the model's context window.** Everything else in this document is a consequence of that one line, or a boundary around it.
+
+The MCP server exposes no tool that returns a value. `resolve()`, the only function that ever reads a plaintext secret, is internal to the storage layer and is called from exactly three places: `enigma run`, `enigma_reveal`'s server-side handler, and the tripwire hook. `npm run leak-fence` statically fails the build if `src/mcp/**` or `src/web/**` references `resolve(`. Error messages, audit lines, logs, and every MCP tool result carry names and depository ids, never values (see [`docs/architecture.md`](architecture.md) ADR-001, and the tool table in [`docs/api-contracts.md`](api-contracts.md) §1).
+
+## What Enigma protects against
+
+**The agent reading a secret by accident.** The `PreToolUse` read-guard (`src/hooks/read-guard.ts`) denies the shapes of a request that put a value into the current session without anyone intending it: `Read`/`Grep`/`Glob` targeting a `.env` file or Enigma's config directory, a `Bash` command that does the same, `env`/`printenv`, `enigma get`/`enigma env`, `security find-generic-password`, `op read`, and `echo $NAME` for a name Enigma actually tracks. It normalizes the two cheapest evasions, `${IFS}` word-splitting and `$'...'` ANSI-C quoting, before matching.
+
+**A tracked secret's value surfacing in tool output.** The `PostToolUse` tripwire (`src/hooks/tripwire.ts`) scans a tool's output for the plaintext value of every secret Enigma holds in a depository it is allowed to scan, and warns with a `systemMessage` naming which secret leaked. Claude Code has no output-rewrite hook, so this is a warning, not a redaction.
+
+**A value leaving the plugin's own process boundary.** Values are never placed in `argv`, a URL, an env var of the plugin's own process, or a temp file (`docs/style-guide.md`, secret-handling conventions). Every OS integration (`security -i`, `secret-tool store`, `op item create`, `osascript`) receives the value on stdin, never as a command-line argument a process listing could show.
+
+**The elicitation link leaking a value by construction.** The MCP URL-mode elicitation link used for `enigma_request` and `enigma_reveal` contains only a random, single-use, TTL-bound id, never a value or PII (ADR-002). A `GET` on a request or reveal page renders a form or a reveal shell, never a value; the value is transmitted exactly once, on the one route built to carry it (`POST /v/:id/reveal`), and that route is never logged.
+
+## What Enigma does not protect against
+
+**Deliberate evasion by the agent itself.** The read-guard and the tripwire are heuristic, table-driven guards, not a sandbox. Neither stops an agent that is actually trying to get past them: variable indirection, an assembled `eval`, writing a script to disk and running it, reading through an interpreter (Python, Node, Perl), or an encode/decode round-trip are not chased, and cannot be without turning the read-guard into a full shell parser. The `${IFS}` normalization in particular has no quote tracking, so it can deny a single-quoted literal that merely looks like a `.env` reference once collapsed, an accepted false positive in the safe direction, never a bypass. See the guard's own header comment for the full accounting.
+
+**A `source`/`.`-style load of a secret into the current shell.** This is denied outright by the read-guard, and deliberately so: once such a load succeeds, the value never appears anywhere in tool output for the tripwire to scan. It surfaces in **neither** layer. The read-guard's deny is the only thing standing between that command and the shell.
+
+**Same-user malware.** Enigma runs as the same OS user as everything else in the session: the coding agent, its other tool calls, and any other process the user runs. It assumes that user-level process boundary is trustworthy. A malicious process running as that same user can, in principle, do anything that user's OS-level permissions allow: read the same Keychain items Enigma's own `security` calls can read (subject to the OS's own per-item access control, which Enigma does not add to), ptrace a running process, or read the `encrypted` depository's key file directly from disk if the user's own account is already compromised. This is out of scope entirely. Enigma is a control on what an LLM-driven agent does inside a legitimate coding session, not a sandbox against a compromised machine.
+
+**Tunnel link interception.** Remote access (ADR-005) is opt-in per `enigma_request` call, via a `cloudflared` quick tunnel or `tailscale serve`. The tunnel's lifetime is tied to the request's lifetime, and the request itself is single-use and TTL-bound, so the exposure window is short by construction. Within that window:
+- A `cloudflared` quick tunnel terminates TLS at Cloudflare's edge, so the link is HTTPS, but the tunnel hostname is a randomly generated `*.trycloudflare.com` subdomain with no additional secret in the path beyond the request id itself. Anyone who obtains that URL before it is consumed or expires can complete the request once. There is no PIN on the link in v1 (an explicit V2 candidate, per ADR-005). The id itself is the only bearer.
+- A `tailscale serve` mapping is reachable only from hosts already on the same Tailscale network, so interception requires network membership, not just URL possession. Enigma refuses to serve non-localhost plain HTTP unless the host is inside the Tailscale range.
+- In both cases, whoever shares the link (pasting it into an insecure channel, a screenshot, a QR code photographed by a bystander) is the actual point of interception risk Enigma cannot close. The QR code on the local page exists to make the link easy to move to a phone, not to authenticate who scans it.
+
+**Anything once a value has left Enigma's boundary.** Once `enigma run` injects a value into a child process's environment, or a `POST /v/:id/reveal` response has delivered a value to the human's browser, that value is the receiving process's or the human's responsibility. Enigma does not track it further.
+
+## Reporting a vulnerability
+
+Do not open a public GitHub issue for a security problem. Instead, use GitHub's private security advisory flow on this repository (`Clarit-AI/enigma` → Security → Report a vulnerability), or email **info@clarit.ai** with a description of the issue and, if possible, steps to reproduce it. We will acknowledge the report and follow up with next steps; coordinated disclosure is preferred over an immediate public write-up while a fix is in progress.
