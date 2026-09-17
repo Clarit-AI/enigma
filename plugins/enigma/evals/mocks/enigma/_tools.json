@@ -1,0 +1,37 @@
+{
+  "tools": [
+    {
+      "name": "enigma_request",
+      "title": "Request secrets",
+      "description": "Asks the user to enter one or more secret values out of band. Uses MCP URL-mode elicitation. Never returns a value (ADR-001).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "names": { "type": "array", "items": { "type": "string" }, "minItems": 1, "maxItems": 10 },
+          "reason": { "type": "string" },
+          "usage": { "type": "string", "enum": ["interactive", "unattended"] },
+          "depository": { "type": "string", "enum": ["env", "encrypted", "keychain", "secret-service", "1password"] },
+          "scope": { "type": "string", "enum": ["project", "global"] },
+          "rotate": { "type": "boolean" },
+          "ui": { "type": "string", "enum": ["web", "native"] },
+          "remote": {}
+        },
+        "required": ["names", "reason", "usage"]
+      }
+    },
+    {
+      "name": "enigma_reveal",
+      "title": "Reveal a secret to the user",
+      "description": "Opens a one-time, out-of-band disclosure of a secret value to the human via MCP URL-mode elicitation, or copies it to the clipboard on macOS. Never returns the value (ADR-001).",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "scope": { "type": "string", "enum": ["project", "global"] },
+          "method": { "type": "string", "enum": ["page", "clipboard"] }
+        },
+        "required": ["name"]
+      }
+    }
+  ]
+}
