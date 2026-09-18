@@ -22,16 +22,28 @@ function parseArgs(argv, spec = {}) {
         continue;
       }
       const next = argv[i + 1];
-      if (next === void 0) throw new UsageError(`--${rawName} requires a value`);
+      if (next === void 0 || next.startsWith("--")) {
+        throw new UsageError(`--${rawName} requires a value`);
+      }
       flags[rawName] = next;
       i++;
     } else if (booleanFlags.has(rawName)) {
-      flags[rawName] = true;
+      if (eqIdx !== -1) {
+        flags[rawName] = parseBooleanLiteral(arg.slice(eqIdx + 1), rawName);
+      } else {
+        flags[rawName] = true;
+      }
     } else {
       throw new UsageError(`unknown option: --${rawName}`);
     }
   }
   return { positionals, flags };
+}
+function parseBooleanLiteral(raw, flagName) {
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === "true" || normalized === "yes" || normalized === "1") return true;
+  if (normalized === "false" || normalized === "no" || normalized === "0") return false;
+  throw new UsageError(`invalid --${flagName}: ${raw} (expected true or false)`);
 }
 function parseScope(raw) {
   if (raw === void 0) return void 0;
@@ -57,12 +69,14 @@ var EnigmaError = class _EnigmaError extends Error {
   code;
   secretName;
   depository;
+  exitCode;
   constructor(options) {
     super(options.message);
     this.name = "EnigmaError";
     this.code = options.code;
     this.secretName = options.secretName;
     this.depository = options.depository;
+    this.exitCode = options.exitCode;
     Object.setPrototypeOf(this, _EnigmaError.prototype);
   }
 };
@@ -4800,6 +4814,14 @@ async function cmdList(argv) {
 
 // src/cli/commands/move.ts
 var USAGE4 = "enigma move NAME --to ID [--scope project|global]";
+function classifyCleanupError(err) {
+  const code = err?.code;
+  if (code === "ENOENT") return "ref-not-found";
+  if (code === "EACCES" || code === "EPERM") return "permission-denied";
+  if (code === "ENOTDIR" || code === "EISDIR") return "path-invalid";
+  if (code === "EBUSY") return "resource-busy";
+  return auditErrorText(err);
+}
 async function cmdMove(argv) {
   const { positionals, flags } = parseArgs(argv, { value: ["to", "scope"] });
   const [name] = positionals;
@@ -4842,7 +4864,7 @@ async function cmdMove(argv) {
     const projectPath = entry.scope === "project" ? entry.projectPath : void 0;
     await oldModule.create({ projectPath }).delete(entry.ref).catch((err) => {
       process.stderr.write(
-        `Warning: failed to delete old copy from ${entry.depository} (ref ${entry.ref}): ${auditErrorText(err)}
+        `Warning: orphaned ref ${entry.ref} in ${entry.depository} (best-effort cleanup failed: ${classifyCleanupError(err)})
 `
       );
     });
@@ -4870,6 +4892,7 @@ import { spawn } from "node:child_process";
 import { constants as osConstants } from "node:os";
 var USAGE6 = "enigma run [--only A,B] [--scope project|global] -- <command> [args...]";
 var FORWARDED_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
+var EXIT_BINARY_MISSING = 127;
 function entriesToInject(entries, only) {
   const visible = only ? entries : entries.filter((e) => !e.shadowed);
   if (!only) return visible;
@@ -4909,9 +4932,14 @@ function spawnChild(command, args, env) {
 async function cmdRun(argv) {
   const dashIdx = argv.indexOf("--");
   if (dashIdx === -1) throw new UsageError(USAGE6);
+  const prefixParsed = parseArgs(argv.slice(0, dashIdx), { value: ["only", "scope"] });
+  if (prefixParsed.positionals.length > 0) {
+    throw new UsageError(`${USAGE6}
+(stray positional before --: ${prefixParsed.positionals.join(" ")})`);
+  }
   const commandArgv = argv.slice(dashIdx + 1);
   if (commandArgv.length === 0) throw new UsageError(USAGE6);
-  const { flags } = parseArgs(argv.slice(0, dashIdx), { value: ["only", "scope"] });
+  const { flags } = prefixParsed;
   const scope = parseScope(flags.scope) ?? "all";
   const only = typeof flags.only === "string" ? flags.only.split(",").map((n) => n.trim()).filter((n) => n.length > 0) : void 0;
   const cwd = process.cwd();
@@ -4921,7 +4949,18 @@ async function cmdRun(argv) {
     childEnv[entry.name] = await resolveSecret(entry.name, { scope: entry.scope, cwd, actor: "cli" });
   }
   const [command, ...commandArgs] = commandArgv;
-  return spawnChild(command, commandArgs, childEnv);
+  try {
+    return await spawnChild(command, commandArgs, childEnv);
+  } catch (err) {
+    if (err instanceof Error && err.code === "ENOENT") {
+      throw new EnigmaError({
+        code: "E_BINARY_MISSING",
+        message: `command not found: ${command}`,
+        exitCode: EXIT_BINARY_MISSING
+      });
+    }
+    throw err;
+  }
 }
 
 // src/cli/commands/not-implemented.ts
@@ -4988,7 +5027,7 @@ ${USAGE7}`);
     if (err instanceof EnigmaError) {
       process.stderr.write(`${err.code}: ${err.message}
 `);
-      return 1;
+      return err.exitCode ?? 1;
     }
     process.stderr.write(`Error: ${err instanceof Error ? err.message : String(err)}
 `);

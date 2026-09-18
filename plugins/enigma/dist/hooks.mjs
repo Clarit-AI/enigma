@@ -56,12 +56,14 @@ var EnigmaError = class _EnigmaError extends Error {
   code;
   secretName;
   depository;
+  exitCode;
   constructor(options) {
     super(options.message);
     this.name = "EnigmaError";
     this.code = options.code;
     this.secretName = options.secretName;
     this.depository = options.depository;
+    this.exitCode = options.exitCode;
     Object.setPrototypeOf(this, _EnigmaError.prototype);
   }
 };
