@@ -66,4 +66,14 @@ describe('cli main dispatch', () => {
     const code = await main(['doctor', '--json']);
     expect(code).toBe(0);
   });
+
+  // Issue #22, AC #1: `enigma run <missing-binary>` must surface as exit 127
+  // with `E_BINARY_MISSING` on stderr, not `Error: spawn ENOENT` at exit 1.
+  it('maps E_BINARY_MISSING to exit 127 (Issue #22, AC #1)', async () => {
+    const code = await main(['run', '--scope', 'global', '--', 'definitely-not-a-binary-anywhere-12345']);
+    expect(code).toBe(127);
+    const stderr = stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    expect(stderr).toContain('E_BINARY_MISSING');
+    expect(stderr).toContain('definitely-not-a-binary-anywhere-12345');
+  });
 });
