@@ -9,6 +9,22 @@ import type { DepositoryId } from '../../storage/interfaces.js';
 
 const USAGE = 'enigma move NAME --to ID [--scope project|global]';
 
+/**
+ * Classify an old-depository delete error into a value-free reason label (Issue #22, AC #5).
+ * The label names the failure mode (e.g. `permission-denied`) but never the value or any
+ * text the depository might have echoed. Falls back to `auditErrorText` — which by contract
+ * returns either `CODE: message` for an EnigmaError or the constructor name for anything
+ * else — so we never surface a free-form error string that could carry value-derived text.
+ */
+function classifyCleanupError(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  if (code === 'ENOENT') return 'ref-not-found';
+  if (code === 'EACCES' || code === 'EPERM') return 'permission-denied';
+  if (code === 'ENOTDIR' || code === 'EISDIR') return 'path-invalid';
+  if (code === 'EBUSY') return 'resource-busy';
+  return auditErrorText(err);
+}
+
 export async function cmdMove(argv: string[]): Promise<number> {
   const { positionals, flags } = parseArgs(argv, { value: ['to', 'scope'] });
   const [name] = positionals;
@@ -64,8 +80,9 @@ export async function cmdMove(argv: string[]): Promise<number> {
       .create({ projectPath })
       .delete(entry.ref)
       .catch((err: unknown) => {
+        // Issue #22, AC #5: name the depository and the orphaned ref, never the value.
         process.stderr.write(
-          `Warning: failed to delete old copy from ${entry.depository} (ref ${entry.ref}): ${auditErrorText(err)}\n`,
+          `Warning: orphaned ref ${entry.ref} in ${entry.depository} (best-effort cleanup failed: ${classifyCleanupError(err)})\n`,
         );
       });
   }
