@@ -89,9 +89,9 @@ The user approved fast-forwarding Modules 2-5 from the approved plan: the Tech L
 **Goal and boundary**: make Enigma installable three ways and releasable safely.
 
 **Key decisions**:
-- D5.1 Repo `clarit-ai/enigma` is marketplace `clarit-enigma` (`.claude-plugin/marketplace.json` → `./plugins/enigma`) and npm package `@clarit-ai/enigma` (`bin: enigma`).
+- D5.1 Repo `clarit-ai/enigma` is marketplace `clarit-enigma` (`.claude-plugin/marketplace.json` → `./plugins/enigma`) and npm package `@clarit.ai/enigma` (`bin: enigma`).
 - D5.2 Plugin ships pre-bundled `dist/{mcp-server,hooks,cli}.mjs` (esbuild, deps inlined) committed per release; `.mcp.json` and hooks use `${CLAUDE_PLUGIN_ROOT}`. No postinstall.
-- D5.3 `npx @clarit-ai/enigma install` registers the marketplace and enables the plugin (claude-mem npx pattern). GitHub dev install: clone, `npm run build`, `claude --plugin-dir plugins/enigma`.
+- D5.3 `npx @clarit.ai/enigma install` registers the marketplace and enables the plugin (claude-mem npx pattern). GitHub dev install: clone, `npm run build`, `claude --plugin-dir plugins/enigma`.
 - D5.4 CI on every PR: lint, typecheck, unit + integration tests, static leak fence, `npm audit`. Release: `claude plugin tag --push`, npm publish from tag.
 - D5.5 `claude plugin eval` suite with the S3.x cases; docs in clarit-docs-voice; `docs/SECURITY.md` threat model.
 - D5.6 Node 20+ engines field; ESM; TypeScript strict; vitest; eslint.

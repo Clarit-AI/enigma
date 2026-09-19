@@ -14,7 +14,7 @@ const pkg = JSON.parse(readFileSync(join(REPO_ROOT, 'package.json'), 'utf8')) as
 
 describe('package.json (AC6)', () => {
   it('has the scoped package name', () => {
-    expect(pkg.name).toBe('@clarit-ai/enigma');
+    expect(pkg.name).toBe('@clarit.ai/enigma');
   });
 
   it('is an ESM package', () => {

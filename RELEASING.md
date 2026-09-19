@@ -7,7 +7,7 @@ once — bump versions together, but tag each channel separately.
 | Channel | Consumers use | Tag format | Triggers |
 |---|---|---|---|
 | Plugin (marketplace) | `claude plugin marketplace add Clarit-AI/enigma` + `claude plugin install enigma` | `enigma--v<version>` (`claude plugin tag` decides this) | Nothing in CI — marketplace installs read straight from the git repo/tag, no Action involved |
-| npm package (`@clarit-ai/enigma`) | `npx @clarit-ai/enigma install` | `v<version>` | `.github/workflows/release.yml` |
+| npm package (`@clarit.ai/enigma`) | `npx @clarit.ai/enigma install` | `v<version>` | `.github/workflows/release.yml` |
 
 Because `claude plugin tag`'s tag name always starts with `enigma--v`, not `v`,
 it never collides with the npm workflow's `v*` trigger. That's intentional,
@@ -68,7 +68,7 @@ and commit before tagging), and then `npm publish --provenance --dry-run
 --access public`.
 
 **That publish step is a dry run on purpose, unconditionally, and will stay
-one until the `@clarit-ai` npm scope actually exists.** It is not gated on a
+one until the `@clarit.ai` npm scope actually exists.** It is not gated on a
 missing secret that could quietly start publishing for real the moment
 someone adds one — it's a hardcoded `--dry-run` flag with a loud
 `::notice::` banner, so nobody tagging a release can be surprised into
@@ -80,7 +80,7 @@ the full pack/preflight locally and never contacts the registry for auth.
 
 ### Turning on real publishing (follow-up, once the scope exists)
 
-1. Claim the `@clarit-ai` scope on npmjs.com (or configure npm's [trusted
+1. Claim the `@clarit.ai` scope on npmjs.com (or configure npm's [trusted
    publishing](https://docs.npmjs.com/generating-provenance-statements) for
    this repo via OIDC — preferred over a long-lived token, and what
    `--provenance` is designed to pair with).
