@@ -64,34 +64,20 @@ Pushing a `v*` tag runs `.github/workflows/release.yml`: full gate (lint,
 typecheck, test, leak-fence, build, `npm audit`), a hard check that
 `plugins/enigma/dist` matches what's committed (mirrors `ci.yml`'s own
 check — if it fails, the message says exactly that: dist is stale, rebuild
-and commit before tagging), and then `npm publish --provenance --dry-run
+and commit before tagging), and then `npm publish --provenance
 --access public`.
 
-**That publish step is a dry run on purpose, unconditionally, and will stay
-one until the `@clarit.ai` npm scope actually exists.** It is not gated on a
-missing secret that could quietly start publishing for real the moment
-someone adds one — it's a hardcoded `--dry-run` flag with a loud
-`::notice::` banner, so nobody tagging a release can be surprised into
-thinking a real publish happened (or didn't) based on secrets configuration
-they didn't check. This was verified locally for this PR: `npm ci && npm run
-build && npm publish --provenance --dry-run --access public` completes
-cleanly with **no npm login and no network write** — the dry run performs
-the full pack/preflight locally and never contacts the registry for auth.
+**The publish step is now a live publish via npm trusted publishing (OIDC),
+not a dry run.** It will FAIL (not silently skip) until the npmjs.com
+trusted-publishing link is configured — see the "Trusted publishing
+prerequisite" section below. The OIDC token comes from the workflow's
+`id-token: write` permission, so no `NPM_TOKEN` repository secret is
+required.
 
-### Turning on real publishing (follow-up, once the scope exists)
+### Trusted publishing prerequisite (required before the first real publish)
 
-1. Claim the `@clarit.ai` scope on npmjs.com (or configure npm's [trusted
-   publishing](https://docs.npmjs.com/generating-provenance-statements) for
-   this repo via OIDC — preferred over a long-lived token, and what
-   `--provenance` is designed to pair with).
-2. If using a classic token instead: add it as the `NPM_TOKEN` repository
-   secret, and add `env: { NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }} }` to the
-   publish step (`setup-node`'s `registry-url` already wires `.npmrc` to read
-   `NODE_AUTH_TOKEN`).
-3. Remove `--dry-run` from the `npm publish` line in
-   `.github/workflows/release.yml` and delete the `::notice::` dry-run banner
-   above it.
-4. The `id-token: write` permission is already declared in the workflow
-   (needed for provenance) — no change required there.
-5. Tag a release the normal way (`git tag v<version> && git push origin
-   v<version>`) and confirm the Action actually publishes.
+On npmjs.com, open the `@clarit.ai/enigma` package → Access → Trusted
+publishing → add owner `Clarit-AI`, repository `enigma`, workflow path
+`.github/workflows/release.yml`, environment unset. `id-token: write` is
+already declared in the workflow and no `NPM_TOKEN` secret is used — the
+OIDC token supplies authentication for `npm publish --provenance`.
