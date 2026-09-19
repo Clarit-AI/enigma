@@ -21,7 +21,9 @@ export type EnigmaErrorCode =
   | 'E_CLAUDE_SETTINGS_INVALID'
   | 'E_CLAUDE_SETTINGS_UNWRITABLE'
   | 'E_VAULT_CORRUPT'
-  | 'E_CONFIG_CORRUPT';
+  | 'E_CONFIG_CORRUPT'
+  /** `enigma run` could not spawn its child because the binary does not exist on PATH (Issue #22, AC #1). Maps to exit 127 (the shell convention for "command not found"); see docs/api-contracts.md §3. */
+  | 'E_BINARY_MISSING';
 
 export interface EnigmaErrorOptions {
   code: EnigmaErrorCode;
@@ -30,12 +32,15 @@ export interface EnigmaErrorOptions {
   secretName?: string;
   /** The depository id this error concerns, if any. */
   depository?: string;
+  /** Override the default exit code (1). CLI maps an error with this set to it; useful for shell-convention codes like 127 ("command not found"). */
+  exitCode?: number;
 }
 
 export class EnigmaError extends Error {
   readonly code: EnigmaErrorCode;
   readonly secretName?: string;
   readonly depository?: string;
+  readonly exitCode?: number;
 
   constructor(options: EnigmaErrorOptions) {
     super(options.message);
@@ -43,6 +48,7 @@ export class EnigmaError extends Error {
     this.code = options.code;
     this.secretName = options.secretName;
     this.depository = options.depository;
+    this.exitCode = options.exitCode;
     Object.setPrototypeOf(this, EnigmaError.prototype);
   }
 }

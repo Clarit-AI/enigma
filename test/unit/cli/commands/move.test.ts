@@ -176,6 +176,44 @@ describe('cmdMove', () => {
     stderrSpy.mockRestore();
   });
 
+  // Issue #22, AC #5: the warning must name the depository AND the orphaned ref,
+  // and never carry a value-derived substring. Strengthens the previous test by
+  // also asserting the "orphaned ref" vocabulary the AC names, and that the
+  // classified failure mode is included (a category label, not a value echo).
+  it('warns with "orphaned ref <ref> in <depository>" and a classified failure mode (Issue #22, AC #5)', async () => {
+    await setSecret({ name: 'DB_PASSWORD', value: SENTINEL, scope: 'project', depository: 'encrypted', cwd: tmpProject, actor: 'cli' });
+    const [before] = listSecrets({ scope: 'project', cwd: tmpProject });
+    const oldRef = before!.ref;
+
+    const deleteSpy = vi
+      .spyOn(encryptedDepositoryModule, 'create')
+      .mockReturnValue({
+        id: 'encrypted',
+        promptProfile: 'none',
+        set: async (ref: string) => ref,
+        resolve: async () => SENTINEL,
+        delete: async () => {
+          throw Object.assign(new Error('boom'), { code: 'EACCES' });
+        },
+        has: async () => true,
+      });
+    const stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    const code = await cmdMove(['DB_PASSWORD', '--to', 'env', '--scope', 'project']);
+
+    expect(code).toBe(0);
+    const warning = stderrSpy.mock.calls.map((c) => String(c[0])).join('');
+    expect(warning).toContain('orphaned ref');
+    expect(warning).toContain(oldRef);
+    expect(warning).toContain('encrypted');
+    expect(warning).toContain('permission-denied');
+    expect(warning).not.toContain(SENTINEL);
+    expect(warning).not.toContain('boom'); // error message itself must not be echoed; only a classified label
+
+    deleteSpy.mockRestore();
+    stderrSpy.mockRestore();
+  });
+
   it('throws E_NOT_FOUND for a name that was never set', async () => {
     await expect(cmdMove(['NEVER_SET', '--to', 'env', '--scope', 'project'])).rejects.toThrow(
       expect.objectContaining({ code: 'E_NOT_FOUND' }),

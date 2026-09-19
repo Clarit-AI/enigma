@@ -63,8 +63,11 @@ export async function main(argv: string[]): Promise<number> {
       return 2;
     }
     if (err instanceof EnigmaError) {
+      // Errors with an explicit exitCode (e.g. E_BINARY_MISSING → 127, the shell
+      // convention for "command not found", Issue #22 AC #1) win over the default
+      // 1; the code is printed first so a script parsing stderr can match it.
       process.stderr.write(`${err.code}: ${err.message}\n`);
-      return 1;
+      return err.exitCode ?? 1;
     }
     process.stderr.write(`Error: ${err instanceof Error ? err.message : String(err)}\n`);
     return 1;

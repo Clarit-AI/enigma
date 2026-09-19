@@ -95,6 +95,46 @@ describe('cmdRun', () => {
     expect(code).toBe(128 + signum);
   });
 
+  // Issue #22, AC #1: `enigma run <missing-binary>` must exit with a distinct code
+  // (127, the shell convention) and a clear message naming the binary, not
+  // `Error: spawn ENOENT` at exit 1.
+  it('maps spawn ENOENT to exit 127 with E_BINARY_MISSING and the binary name in the message (Issue #22, AC #1)', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
+    const child = new FakeChild();
+    const enoentErr = Object.assign(new Error('spawn missing-binary-ENOENT-test ENOENT'), { code: 'ENOENT' });
+    spawnMock.mockImplementation(() => {
+      queueMicrotask(() => child.emit('error', enoentErr));
+      return child;
+    });
+
+    await expect(cmdRun(['--scope', 'global', '--', 'missing-binary-ENOENT-test'])).rejects.toThrow(
+      expect.objectContaining({
+        code: 'E_BINARY_MISSING',
+        exitCode: 127,
+        message: expect.stringContaining('missing-binary-ENOENT-test'),
+      }),
+    );
+    // The rejected value is an EnigmaError, not the raw ENOENT — a future refactor
+    // that re-throws `err` would still satisfy the shape check above, so guard the
+    // obvious regression directly.
+    const { EnigmaError } = await import('../../../../src/core/errors.js');
+    const rejected = await cmdRun(['--scope', 'global', '--', 'missing-binary-ENOENT-test-2']).catch((e: unknown) => e);
+    expect(rejected).toBeInstanceOf(EnigmaError);
+  });
+
+  // Issue #22, AC #2: `enigma run foo -- cmd` — a stray positional before `--` is a
+  // usage error, not silently dropped (the old behaviour lost the user's intent
+  // without complaint and ran `cmd` without the secret injection).
+  it('rejects a stray positional before `--` (Issue #22, AC #2)', async () => {
+    const { UsageError } = await import('../../../../src/cli/args.js');
+    await expect(cmdRun(['foo', '--', 'echo', 'hi'])).rejects.toThrow(UsageError);
+    await expect(cmdRun(['foo', '--', 'echo', 'hi'])).rejects.toThrow(/stray positional/);
+    expect(spawnMock).not.toHaveBeenCalled();
+  });
+
+  // Issue #22, AC #7's real-child-signal test lives in run-signal.test.ts (this file
+  // mocks `node:child_process`, which would defeat a real-spawn test).
+
   it('aborts before spawning when a --only name cannot be resolved', async () => {
     await expect(cmdRun(['--only', 'NEVER_SET', '--', 'echo', 'hi'])).rejects.toThrow(
       expect.objectContaining({ code: 'E_NOT_FOUND' }),

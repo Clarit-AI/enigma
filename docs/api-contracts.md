@@ -53,7 +53,9 @@ enigma install [--uninstall]       # register marketplace + enable plugin
 
 `enigma request` and `enigma reveal` are **not available at the CLI, by design**: `src/cli/index.ts` routes both names to a stub (`src/cli/commands/not-implemented.ts`) that prints `enigma <command> is not available at the CLI. Use \`enigma_<command>\` (MCP tool) or \`/enigma:<command>\` (slash command) instead.` and exits 2. That flow exists today only as the `enigma_request`/`enigma_reveal` MCP tools (§1) and the `/enigma:*` slash commands (Issue #14) — the stub's own header comment confirms this is a deliberate scope boundary, not a gap waiting to be filled, so this document does not carry them as CLI commands until a future decision reverses that.
 
-Exit codes: 0 ok, 1 Enigma error (code printed), 2 usage (also returned by the `request`/`reveal` stub). `run` exits with the child's code.
+Exit codes: 0 ok, 1 Enigma error (code printed), 2 usage (also returned by the `request`/`reveal` stub), **127 `E_BINARY_MISSING`** — `enigma run <binary>` could not spawn the child because the binary does not exist on `PATH` (Issue #22, AC #1; shell convention for "command not found"); the printed message names the binary, never a value. `run` otherwise exits with the child's code: the raw exit code for a normal exit, or `128 + signum` when the child is killed by a signal (POSIX shell convention).
+
+Boolean flags accept an explicit `--flag=true|false|yes|no|0|1` form too (case-insensitive) — `--json=false` is honored, not silently coerced to `true` (Issue #22, AC #4); any other value is a usage error (exit 2). A value flag followed by a token starting with `--` is a usage error rather than silently consuming the next flag (Issue #22, AC #3). `enigma run` refuses any positional before `--` (e.g. `enigma run foo -- cmd`) with a usage error (Issue #22, AC #2).
 
 ## 4. File formats
 

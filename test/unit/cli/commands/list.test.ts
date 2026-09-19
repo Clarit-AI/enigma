@@ -81,4 +81,23 @@ describe('cmdList', () => {
     const printed = JSON.parse(String(stdoutSpy.mock.calls[0]?.[0])) as { entries: Array<{ name: string }> };
     expect(printed.entries.map((e) => e.name)).toEqual(['DB_PASSWORD']);
   });
+
+  // Issue #22, AC #4: `enigma list --json=false` must be honored (table output),
+  // never silently coerced to JSON.
+  it('honors --json=false as table output, not JSON (Issue #22, AC #4)', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: 'v', scope: 'global', depository: 'encrypted', actor: 'cli' });
+
+    await cmdList(['--json=false']);
+
+    const printed = stdoutSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    // Table form prints column headers; JSON form prints a JSON object.
+    expect(printed).toContain('NAME');
+    expect(printed).toContain('OPENAI_API_KEY');
+    expect(() => JSON.parse(printed)).toThrow();
+  });
+
+  it('rejects --json with an unparseable =value (Issue #22, AC #4)', async () => {
+    const { UsageError } = await import('../../../../src/cli/args.js');
+    await expect(cmdList(['--json=maybe'])).rejects.toThrow(UsageError);
+  });
 });

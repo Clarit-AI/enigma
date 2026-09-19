@@ -11,7 +11,7 @@ export interface ParsedArgs {
 export interface ParseSpec {
   /** Flags that consume the following argument as a value: `--flag VALUE` or `--flag=VALUE`. */
   value?: string[];
-  /** Flags that are present/absent only: `--flag`. */
+  /** Flags that are present/absent only: `--flag`. The `--flag=VALUE` form is also accepted for booleans (Issue #22, AC #4): only `true|false|yes|no|0|1` (case-insensitive) are valid values; everything else throws UsageError. */
   boolean?: string[];
 }
 
@@ -36,17 +36,34 @@ export function parseArgs(argv: string[], spec: ParseSpec = {}): ParsedArgs {
         continue;
       }
       const next = argv[i + 1];
-      if (next === undefined) throw new UsageError(`--${rawName} requires a value`);
+      // A value flag's value must not begin with `--` — that's almost certainly the next
+      // flag (a missing-value typo like `--description --scope global`, Issue #22 AC #3).
+      // We refuse rather than silently consume, because the silently-consumed form produces
+      // a confusing downstream error (`invalid --scope`) instead of pointing at the typo.
+      if (next === undefined || next.startsWith('--')) {
+        throw new UsageError(`--${rawName} requires a value`);
+      }
       flags[rawName] = next;
       i++;
     } else if (booleanFlags.has(rawName)) {
-      flags[rawName] = true;
+      if (eqIdx !== -1) {
+        flags[rawName] = parseBooleanLiteral(arg.slice(eqIdx + 1), rawName);
+      } else {
+        flags[rawName] = true;
+      }
     } else {
       throw new UsageError(`unknown option: --${rawName}`);
     }
   }
 
   return { positionals, flags };
+}
+
+function parseBooleanLiteral(raw: string, flagName: string): boolean {
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'true' || normalized === 'yes' || normalized === '1') return true;
+  if (normalized === 'false' || normalized === 'no' || normalized === '0') return false;
+  throw new UsageError(`invalid --${flagName}: ${raw} (expected true or false)`);
 }
 
 export function parseScope(raw: string | boolean | undefined): Scope | undefined {
