@@ -34,7 +34,7 @@ Decision ids reference [PRD.md](../PRD.md).
 - No PIN on links in v1 (V2 candidate).
 
 ## ADR-006 — Packaging (D5.1–D5.6)
-- Repo is marketplace `clarit-enigma` and npm package `@clarit-ai/enigma`; plugin at `plugins/enigma`.
+- Repo is marketplace `clarit-enigma` and npm package `@clarit.ai/enigma`; plugin at `plugins/enigma`.
 - Pre-bundled `dist/*.mjs` committed per release; `${CLAUDE_PLUGIN_ROOT}` in `.mcp.json` and hooks; no postinstall.
 - CI on every PR: lint, typecheck, tests, leak fence, `npm audit`.
 

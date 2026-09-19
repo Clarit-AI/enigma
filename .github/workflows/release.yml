@@ -35,7 +35,7 @@ jobs:
           fi
       - run: npm audit --audit-level=high
       - name: Publish to npm (dry run)
-        # The @clarit-ai npm scope is not claimed yet (see RELEASING.md), so
+        # The @clarit.ai npm scope is not claimed yet (see RELEASING.md), so
         # this step is a DELIBERATE, hardcoded dry run — not conditional on a
         # secret or token being present — so a real tag can never trigger a
         # surprise live publish attempt. --dry-run performs the full pack and
@@ -45,5 +45,5 @@ jobs:
         # claimed, RELEASING.md documents removing --dry-run and adding the
         # NPM_TOKEN / trusted-publisher configuration this step will then need.
         run: |
-          echo "::notice::DRY RUN — @clarit-ai npm scope is not yet claimed. No package is being published. See RELEASING.md for the follow-up to enable a real publish."
+          echo "::notice::DRY RUN — @clarit.ai npm scope is not yet claimed. No package is being published. See RELEASING.md for the follow-up to enable a real publish."
           npm publish --provenance --dry-run --access public

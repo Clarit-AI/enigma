@@ -49,7 +49,7 @@ claude plugin install enigma@clarit-enigma
 **2. `npx` (no marketplace step).**
 
 ```bash
-npx @clarit-ai/enigma install
+npx @clarit.ai/enigma install
 ```
 
 This registers the `clarit-enigma` marketplace and enables the plugin in your Claude Code `settings.json` directly (honors `CLAUDE_CONFIG_DIR` if you've set it). Run `enigma install --uninstall` to reverse it.
