@@ -46,15 +46,7 @@ claude plugin install enigma@clarit-enigma
 
 (Or the equivalent `/plugin` menu inside an interactive Claude Code session.)
 
-**2. `npx` (no marketplace step).**
-
-```bash
-npx @clarit.ai/enigma install
-```
-
-This registers the `clarit-enigma` marketplace and enables the plugin in your Claude Code `settings.json` directly (honors `CLAUDE_CONFIG_DIR` if you've set it). Run `enigma install --uninstall` to reverse it.
-
-**3. GitHub checkout, for development on Enigma itself.**
+**2. GitHub checkout, for development on Enigma itself.**
 
 ```bash
 git clone https://github.com/Clarit-AI/enigma.git
@@ -64,6 +56,8 @@ claude plugin install enigma@clarit-enigma
 ```
 
 This registers your checkout itself as a local marketplace source, so rebuilding `dist/` (`npm run build`) picks up changes without reinstalling.
+
+> **npm distribution is shelved for now.** The `npx @clarit.ai/enigma install` method (and the standalone `enigma` binary it put on `PATH`) is on hold pending npm's newer token/2FA publish model. The marketplace path above is the supported install method; it needs no npm registry access.
 
 ## First request, step by step
 
