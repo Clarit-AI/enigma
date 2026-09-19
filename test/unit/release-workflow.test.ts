@@ -30,10 +30,12 @@ describe('.github/workflows/release.yml', () => {
     expect(workflow).toMatch(/npm publish --provenance/);
   });
 
-  it('keeps the publish step an unconditional, hardcoded dry run', () => {
-    expect(workflow).toMatch(/npm publish --provenance --dry-run/);
-    // Never conditional on a secret being present — see RELEASING.md's
-    // "why" for making this explicit rather than an accidental live publish.
+  it('publishes for real via trusted publishing, never gated on a NPM_TOKEN secret', () => {
+    // Real publish via npm trusted publishing (OIDC), not a dry run — see
+    // RELEASING.md. Never conditional on a token secret being present: the
+    // OIDC token comes from `id-token: write`, so no `NPM_TOKEN` is used.
+    expect(workflow).toMatch(/npm publish --provenance --access public/);
+    expect(workflow).not.toMatch(/--dry-run/);
     expect(workflow).not.toMatch(/if:\s*.*secrets\.NPM_TOKEN/);
   });
 
