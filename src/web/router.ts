@@ -5,6 +5,7 @@ import { handleImportFormGet, handleImportFormPost } from './routes/import-form.
 import { handleRequestFormGet, handleRequestFormPost } from './routes/request-form.js';
 import { handleRevealGet, handleRevealPost } from './routes/reveal.js';
 import { REVEAL_CLIENT_JS } from './static/reveal-script.js';
+import { REQUEST_DONE_CLIENT_JS } from './static/request-done-script.js';
 
 const ID = '[0-9a-f]{32}';
 const REQUEST_PATH = new RegExp(`^/r/(${ID})$`);
@@ -31,6 +32,10 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse): 
     }
     if (method === 'GET' && pathname === '/static/reveal.js') {
       sendStaticJs(res, REVEAL_CLIENT_JS);
+      return;
+    }
+    if (method === 'GET' && pathname === '/static/request-done.js') {
+      sendStaticJs(res, REQUEST_DONE_CLIENT_JS);
       return;
     }
 

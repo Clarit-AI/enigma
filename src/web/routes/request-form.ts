@@ -87,7 +87,18 @@ async function renderForm(res: ServerResponse, record: RequestRecord, opts: Rend
   html = renderRepeatingBlock(
     html,
     'DEP_OPTION',
-    options.map((o) => ({ DEP_ID: o.id, DEP_LABEL: o.label, DEP_SELECTED: o.selected ? 'selected' : '' })),
+    // Unavailable depositories stay in the list — never hidden — but are
+    // rendered `disabled` so they can't be silently selected, and their
+    // label states why (Issue #61: "a control that overstates itself is
+    // worse than one that states its limits"). `available`/`reason` are
+    // already computed by buildDepositoryOptions; this is the first call
+    // site that actually gates on them.
+    options.map((o) => ({
+      DEP_ID: o.id,
+      DEP_LABEL: o.available ? o.label : `${o.label} — unavailable: ${o.reason ?? 'not available'}`,
+      DEP_SELECTED: o.selected ? 'selected' : '',
+      DEP_DISABLED: o.available ? '' : 'disabled',
+    })),
   );
   html = renderRepeatingBlock(html, 'ERROR_BLOCK', opts.errorMessage ? [{ ERROR_MESSAGE: opts.errorMessage }] : []);
   const confirmRows = opts.confirmDepository ? [{ CONFIRM_DEPOSITORY: opts.confirmDepository }] : [];
@@ -192,7 +203,19 @@ export async function handleRequestFormPost(req: IncomingMessage, res: ServerRes
       });
       results.push({ name, ok: true });
     } catch (err) {
-      results.push({ name, ok: false, errorCode: err instanceof EnigmaError ? err.code : 'E_UNKNOWN' });
+      // reason: only ever EnigmaError.message from this specific call site (setSecret's
+      // per-name write, above) — audited across every EnigmaError this path can throw
+      // (src/storage/manager.ts's setSecret + all five depositories' `set()`): every
+      // message interpolates only structural text (the secret NAME, a depository id, a
+      // byte limit, a ref pattern) or is a static string, never opts.value. See
+      // test/unit/reason-field-surfaces.test.ts (Issue #38) for the golden-set guard that
+      // fails this file's build if a future edit here ever changes what's assigned.
+      results.push({
+        name,
+        ok: false,
+        errorCode: err instanceof EnigmaError ? err.code : 'E_UNKNOWN',
+        reason: err instanceof EnigmaError ? err.message : undefined,
+      });
     }
   }
 
@@ -205,7 +228,7 @@ export async function handleRequestFormPost(req: IncomingMessage, res: ServerRes
     results.map((r) => ({
       NAME: r.name,
       STATUS_CLASS: r.ok ? 'ok' : 'fail',
-      STATUS_TEXT: r.ok ? 'stored' : `failed (${r.errorCode})`,
+      STATUS_TEXT: r.ok ? 'stored' : r.reason ? `failed (${r.errorCode}): ${r.reason}` : `failed (${r.errorCode})`,
     })),
   );
   sendHtml(res, 200, html);

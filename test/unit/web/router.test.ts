@@ -48,4 +48,13 @@ describe('router', () => {
     expect(resp.headers.get('content-type')).toContain('javascript');
     expect(await resp.text()).toContain('revealBtn');
   });
+
+  it('serves /static/request-done.js as JavaScript', async () => {
+    const resp = await fetch(`${origin}/static/request-done.js`);
+    expect(resp.status).toBe(200);
+    expect(resp.headers.get('content-type')).toContain('javascript');
+    const body = await resp.text();
+    expect(body).toContain('window.close()');
+    expect(body).toContain('5000');
+  });
 });

@@ -8,7 +8,7 @@
   :root { color-scheme: light dark; }
   body {
     font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-    max-width: 480px;
+    max-width: 600px;
     margin: 10vh auto 0;
     padding: 0 16px;
     box-sizing: border-box;
@@ -38,7 +38,8 @@
       <li class="{{STATUS_CLASS}}">{{NAME}} — {{STATUS_TEXT}}</li>
       <!--/BLOCK:RESULT_ROW-->
     </ul>
-    <p class="muted">You can close this tab.</p>
+    <p class="muted">This tab closes automatically in a few seconds — or you can close it now.</p>
   </div>
+  <script src="/static/request-done.js"></script>
 </body>
 </html>

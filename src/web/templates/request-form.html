@@ -8,7 +8,7 @@
   :root { color-scheme: light dark; }
   body {
     font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-    max-width: 480px;
+    max-width: 600px;
     margin: 6vh auto 40px;
     padding: 0 16px;
     box-sizing: border-box;
@@ -82,7 +82,7 @@
         <label for="depository">Depository</label>
         <select id="depository" name="depository">
           <!--BLOCK:DEP_OPTION-->
-          <option value="{{DEP_ID}}" {{DEP_SELECTED}}>{{DEP_LABEL}}</option>
+          <option value="{{DEP_ID}}" {{DEP_SELECTED}} {{DEP_DISABLED}}>{{DEP_LABEL}}</option>
           <!--/BLOCK:DEP_OPTION-->
         </select>
 

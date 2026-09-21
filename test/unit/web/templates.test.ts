@@ -22,6 +22,19 @@ describe('templates', () => {
     expect(revealShellHtml).not.toMatch(/<script>[^<]/);
   });
 
+  it.each([
+    ['errorHtml', errorHtml],
+    ['requestDoneHtml', requestDoneHtml],
+    ['requestFormHtml', requestFormHtml],
+    ['revealShellHtml', revealShellHtml],
+  ])('%s caps its layout width at max-width: 600px', (_name, html) => {
+    expect(html).toContain('max-width: 600px');
+  });
+
+  it('importFormHtml caps its layout width at max-width: 800px (wider for the import form)', () => {
+    expect(importFormHtml).toContain('max-width: 800px');
+  });
+
   it('no template contains an inline <script> block', () => {
     for (const html of Object.values(TEMPLATES)) {
       expect(html).not.toMatch(/<script>[\s\S]*?[^\s][\s\S]*?<\/script>/);
