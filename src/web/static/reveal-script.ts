@@ -8,6 +8,14 @@
 // Fetches the value once via POST /v/:id/reveal, shows it, and blanks it
 // again after 60 seconds (PRD D2.4). The value never appears in this page's
 // initial HTML, in a URL, or in a redirect.
+//
+// Issue #61: also closes the tab a couple of seconds after the blank, since
+// the reveal action is single-use server-side (POST /v/:id/reveal consumes
+// the id — see handleRevealPost) and there is nothing left to do here once
+// the value is hidden again. The close is scheduled from INSIDE the blank's
+// own setTimeout callback, after the blanking statements already ran, so it
+// can never race the value-hiding guarantee — there is no independent timer
+// that could fire early or out of order relative to the blank.
 export const REVEAL_CLIENT_JS = `(() => {
   const btn = document.getElementById('revealBtn');
   const box = document.getElementById('valueBox');
@@ -39,7 +47,10 @@ export const REVEAL_CLIENT_JS = `(() => {
       setTimeout(() => {
         box.textContent = '';
         box.hidden = true;
-        status.textContent = 'Hidden.';
+        status.textContent = 'Hidden. Closing this tab…';
+        setTimeout(() => {
+          window.close();
+        }, 2000);
       }, 60000);
     } catch (err) {
       status.textContent = 'Network error.';

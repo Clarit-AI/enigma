@@ -128,7 +128,9 @@ describe('request/reveal integration, against the real server', () => {
   it('every response carries the required security headers, including /static/*', async () => {
     for (const path of ['/healthz', '/static/reveal.js']) {
       const resp = await fetch(`${origin}${path}`);
-      expect(resp.headers.get('content-security-policy')).toBe("default-src 'self'; script-src 'self'");
+      expect(resp.headers.get('content-security-policy')).toBe(
+        "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'",
+      );
       expect(resp.headers.get('x-frame-options')).toBe('DENY');
       expect(resp.headers.get('referrer-policy')).toBe('no-referrer');
       expect(resp.headers.get('cache-control')).toBe('no-store');

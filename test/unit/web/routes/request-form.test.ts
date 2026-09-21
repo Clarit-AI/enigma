@@ -81,6 +81,30 @@ describe('GET/POST /r/:id', () => {
     expect(html).toContain('testing');
   });
 
+  it(
+    'GET marks an unavailable depository disabled and states why, instead of hiding it (Issue #61: ' +
+      '"a control that overstates itself is worse than one that states its limits")',
+    async () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+      const resp = await fetch(`${origin}/r/${record.id}`);
+      const html = await resp.text();
+
+      // 1password is always unavailable in this file's op-ENOENT mock (op CLI not
+      // installed) — it must still be listed, just disabled with its reason appended.
+      expect(html).toContain('1password');
+      const optionMatch = html.match(/<option value="1password"[^>]*>([^<]*)<\/option>/);
+      expect(optionMatch, 'expected a 1password <option> in the rendered form').not.toBeNull();
+      const optionTag = html.slice(html.indexOf('<option value="1password"'), html.indexOf('</option>', html.indexOf('<option value="1password"')));
+      expect(optionTag).toContain('disabled');
+      expect(optionMatch![1]).toContain('unavailable: op CLI not installed');
+
+      // An available depository (encrypted) must stay enabled and unsuffixed.
+      const encryptedTag = html.slice(html.indexOf('<option value="encrypted"'), html.indexOf('</option>', html.indexOf('<option value="encrypted"')));
+      expect(encryptedTag).not.toContain('disabled');
+      expect(encryptedTag).not.toContain('unavailable');
+    },
+  );
+
   it('POST without a chosen depository re-renders the form with an error, id stays usable', async () => {
     const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
     const resp = await fetch(`${origin}/r/${record.id}`, {
@@ -123,12 +147,45 @@ describe('GET/POST /r/:id', () => {
     });
 
     expect(resp.status).toBe(200);
-    expect(await resp.text()).toContain('failed');
+    const html = await resp.text();
+    expect(html).toContain('failed');
+    // Issue #61: the failure page now names the depository and reason, not just the
+    // bare error code, threaded from EnigmaError.message (value-free by construction —
+    // see the reason-field-surfaces.test.ts golden set this comes from).
+    expect(html).toContain('failed to write secret to 1password depository');
     expect(RequestStore.get(record.id)?.usedAt).toBeDefined();
     expect(RequestStore.get(record.id)?.results).toEqual([
-      { name: 'OPENAI_API_KEY', ok: false, errorCode: 'E_WRITE_FAILED' },
+      {
+        name: 'OPENAI_API_KEY',
+        ok: false,
+        errorCode: 'E_WRITE_FAILED',
+        reason: 'failed to write secret to 1password depository',
+      },
     ]);
   });
+
+  it(
+    'a value submitted for a name that then fails to write never appears in the failure reason text ' +
+      '(sentinel for test/unit/reason-field-surfaces.test.ts — Issue #38/#61)',
+    async () => {
+      const SENTINEL = 'sk-plant-should-never-appear-in-reason';
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+      const resp = await fetch(`${origin}/r/${record.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({
+          OPENAI_API_KEY: SENTINEL,
+          depository: '1password',
+          scope: 'global',
+          confirmCreateVault: 'on',
+        }).toString(),
+      });
+
+      const html = await resp.text();
+      expect(html).not.toContain(SENTINEL);
+      expect(RequestStore.get(record.id)?.results?.[0]?.reason).not.toContain(SENTINEL);
+    },
+  );
 
   it('GET shows no QR code when no tunnel is active for this request (Issue #12 AC4)', async () => {
     const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });

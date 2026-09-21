@@ -1927,7 +1927,7 @@ function decideInsecureHttpPolicy(host, allowOverride) {
 
 // src/web/headers.ts
 function applySecurityHeaders(res) {
-  res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'");
+  res.setHeader("Content-Security-Policy", "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'");
   res.setHeader("X-Frame-Options", "DENY");
   res.setHeader("Referrer-Policy", "no-referrer");
   res.setHeader("Cache-Control", "no-store");
@@ -1944,7 +1944,7 @@ var request_form_default = `<!doctype html>
   :root { color-scheme: light dark; }
   body {
     font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-    max-width: 480px;
+    max-width: 600px;
     margin: 6vh auto 40px;
     padding: 0 16px;
     box-sizing: border-box;
@@ -2018,7 +2018,7 @@ var request_form_default = `<!doctype html>
         <label for="depository">Depository</label>
         <select id="depository" name="depository">
           <!--BLOCK:DEP_OPTION-->
-          <option value="{{DEP_ID}}" {{DEP_SELECTED}}>{{DEP_LABEL}}</option>
+          <option value="{{DEP_ID}}" {{DEP_SELECTED}} {{DEP_DISABLED}}>{{DEP_LABEL}}</option>
           <!--/BLOCK:DEP_OPTION-->
         </select>
 
@@ -2049,13 +2049,13 @@ var request_form_default = `<!doctype html>
 `;
 
 // src/web/templates/request-done.html?raw
-var request_done_default = '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8" />\n<meta name="viewport" content="width=device-width, initial-scale=1" />\n<title>Enigma \u2014 done</title>\n<style>\n  :root { color-scheme: light dark; }\n  body {\n    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;\n    max-width: 480px;\n    margin: 10vh auto 0;\n    padding: 0 16px;\n    box-sizing: border-box;\n    color: #18181b;\n    background: #ffffff;\n  }\n  @media (prefers-color-scheme: dark) {\n    body { color: #e4e4e7; background: #18181b; }\n    .card { border-color: #3f3f46 !important; background: #27272a !important; }\n  }\n  * { box-sizing: border-box; }\n  .card { border: 1px solid #e4e4e7; border-radius: 12px; padding: 20px; }\n  h1 { font-size: 1.1rem; margin: 0 0 12px; }\n  ul { list-style: none; margin: 0; padding: 0; }\n  li { padding: 6px 0; border-top: 1px solid #e4e4e7; }\n  li:first-child { border-top: none; }\n  .ok { color: #16a34a; }\n  .fail { color: #dc2626; }\n  p.muted { color: #71717a; margin-top: 16px; font-size: 0.9rem; }\n</style>\n</head>\n<body>\n  <div class="card">\n    <h1>Request complete</h1>\n    <ul>\n      <!--BLOCK:RESULT_ROW-->\n      <li class="{{STATUS_CLASS}}">{{NAME}} \u2014 {{STATUS_TEXT}}</li>\n      <!--/BLOCK:RESULT_ROW-->\n    </ul>\n    <p class="muted">You can close this tab.</p>\n  </div>\n</body>\n</html>\n';
+var request_done_default = '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8" />\n<meta name="viewport" content="width=device-width, initial-scale=1" />\n<title>Enigma \u2014 done</title>\n<style>\n  :root { color-scheme: light dark; }\n  body {\n    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;\n    max-width: 600px;\n    margin: 10vh auto 0;\n    padding: 0 16px;\n    box-sizing: border-box;\n    color: #18181b;\n    background: #ffffff;\n  }\n  @media (prefers-color-scheme: dark) {\n    body { color: #e4e4e7; background: #18181b; }\n    .card { border-color: #3f3f46 !important; background: #27272a !important; }\n  }\n  * { box-sizing: border-box; }\n  .card { border: 1px solid #e4e4e7; border-radius: 12px; padding: 20px; }\n  h1 { font-size: 1.1rem; margin: 0 0 12px; }\n  ul { list-style: none; margin: 0; padding: 0; }\n  li { padding: 6px 0; border-top: 1px solid #e4e4e7; }\n  li:first-child { border-top: none; }\n  .ok { color: #16a34a; }\n  .fail { color: #dc2626; }\n  p.muted { color: #71717a; margin-top: 16px; font-size: 0.9rem; }\n</style>\n</head>\n<body>\n  <div class="card">\n    <h1>Request complete</h1>\n    <ul>\n      <!--BLOCK:RESULT_ROW-->\n      <li class="{{STATUS_CLASS}}">{{NAME}} \u2014 {{STATUS_TEXT}}</li>\n      <!--/BLOCK:RESULT_ROW-->\n    </ul>\n    <p class="muted">This tab closes automatically in a few seconds \u2014 or you can close it now.</p>\n  </div>\n  <script src="/static/request-done.js"></script>\n</body>\n</html>\n';
 
 // src/web/templates/reveal-shell.html?raw
-var reveal_shell_default = '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8" />\n<meta name="viewport" content="width=device-width, initial-scale=1" />\n<title>Enigma \u2014 reveal {{NAME}}</title>\n<style>\n  :root { color-scheme: light dark; }\n  body {\n    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;\n    max-width: 480px;\n    margin: 10vh auto 0;\n    padding: 0 16px;\n    box-sizing: border-box;\n    color: #18181b;\n    background: #ffffff;\n  }\n  @media (prefers-color-scheme: dark) {\n    body { color: #e4e4e7; background: #18181b; }\n    .card { border-color: #3f3f46 !important; background: #27272a !important; }\n    button { background: #e4e4e7 !important; color: #18181b !important; }\n    code { background: #3f3f46 !important; }\n  }\n  * { box-sizing: border-box; }\n  .card { border: 1px solid #e4e4e7; border-radius: 12px; padding: 20px; }\n  h1 { font-size: 1.1rem; margin: 0 0 4px; }\n  p.muted { color: #71717a; margin: 4px 0 16px; }\n  button { width: 100%; padding: 12px; border: none; border-radius: 8px; background: #18181b; color: #fff; font-size: 1rem; cursor: pointer; }\n  button:disabled { opacity: 0.6; cursor: default; }\n  code { display: block; word-break: break-all; background: #f4f4f5; padding: 10px; border-radius: 8px; margin-top: 12px; }\n  #status { margin-top: 12px; color: #71717a; font-size: 0.9rem; }\n</style>\n</head>\n<body>\n  <div class="card">\n    <h1>Reveal {{NAME}}</h1>\n    <p class="muted">This link works once. The value never appears until you click Reveal, and it is hidden again after 60 seconds.</p>\n    <button id="revealBtn" type="button" data-id="{{ID}}">Reveal</button>\n    <code id="valueBox" hidden></code>\n    <p id="status"></p>\n  </div>\n  <script src="/static/reveal.js"></script>\n</body>\n</html>\n';
+var reveal_shell_default = '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8" />\n<meta name="viewport" content="width=device-width, initial-scale=1" />\n<title>Enigma \u2014 reveal {{NAME}}</title>\n<style>\n  :root { color-scheme: light dark; }\n  body {\n    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;\n    max-width: 600px;\n    margin: 10vh auto 0;\n    padding: 0 16px;\n    box-sizing: border-box;\n    color: #18181b;\n    background: #ffffff;\n  }\n  @media (prefers-color-scheme: dark) {\n    body { color: #e4e4e7; background: #18181b; }\n    .card { border-color: #3f3f46 !important; background: #27272a !important; }\n    button { background: #e4e4e7 !important; color: #18181b !important; }\n    code { background: #3f3f46 !important; }\n  }\n  * { box-sizing: border-box; }\n  .card { border: 1px solid #e4e4e7; border-radius: 12px; padding: 20px; }\n  h1 { font-size: 1.1rem; margin: 0 0 4px; }\n  p.muted { color: #71717a; margin: 4px 0 16px; }\n  button { width: 100%; padding: 12px; border: none; border-radius: 8px; background: #18181b; color: #fff; font-size: 1rem; cursor: pointer; }\n  button:disabled { opacity: 0.6; cursor: default; }\n  code { display: block; word-break: break-all; background: #f4f4f5; padding: 10px; border-radius: 8px; margin-top: 12px; }\n  #status { margin-top: 12px; color: #71717a; font-size: 0.9rem; }\n</style>\n</head>\n<body>\n  <div class="card">\n    <h1>Reveal {{NAME}}</h1>\n    <p class="muted">This link works once. The value never appears until you click Reveal, and it is hidden again after 60 seconds.</p>\n    <button id="revealBtn" type="button" data-id="{{ID}}">Reveal</button>\n    <code id="valueBox" hidden></code>\n    <p id="status"></p>\n  </div>\n  <script src="/static/reveal.js"></script>\n</body>\n</html>\n';
 
 // src/web/templates/error.html?raw
-var error_default = '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8" />\n<meta name="viewport" content="width=device-width, initial-scale=1" />\n<title>Enigma \u2014 {{STATUS}}</title>\n<style>\n  :root { color-scheme: light dark; }\n  body {\n    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;\n    max-width: 480px;\n    margin: 15vh auto 0;\n    padding: 0 16px;\n    color: #18181b;\n    background: #ffffff;\n  }\n  @media (prefers-color-scheme: dark) {\n    body { color: #e4e4e7; background: #18181b; }\n  }\n  h1 { font-size: 1.25rem; }\n  p { color: #71717a; }\n</style>\n</head>\n<body>\n  <h1>{{STATUS}}</h1>\n  <p>{{MESSAGE}}</p>\n</body>\n</html>\n';
+var error_default = '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8" />\n<meta name="viewport" content="width=device-width, initial-scale=1" />\n<title>Enigma \u2014 {{STATUS}}</title>\n<style>\n  :root { color-scheme: light dark; }\n  body {\n    font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;\n    max-width: 600px;\n    margin: 15vh auto 0;\n    padding: 0 16px;\n    color: #18181b;\n    background: #ffffff;\n  }\n  @media (prefers-color-scheme: dark) {\n    body { color: #e4e4e7; background: #18181b; }\n  }\n  h1 { font-size: 1.25rem; }\n  p { color: #71717a; }\n</style>\n</head>\n<body>\n  <h1>{{STATUS}}</h1>\n  <p>{{MESSAGE}}</p>\n</body>\n</html>\n';
 
 // src/web/templates/import-form.html?raw
 var import_form_default = `<!doctype html>
@@ -2068,7 +2068,7 @@ var import_form_default = `<!doctype html>
   :root { color-scheme: light dark; }
   body {
     font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
-    max-width: 480px;
+    max-width: 800px;
     margin: 6vh auto 40px;
     padding: 0 16px;
     box-sizing: border-box;
@@ -4185,7 +4185,18 @@ async function renderForm2(res, record, opts = {}) {
   html = renderRepeatingBlock(
     html,
     "DEP_OPTION",
-    options.map((o) => ({ DEP_ID: o.id, DEP_LABEL: o.label, DEP_SELECTED: o.selected ? "selected" : "" }))
+    // Unavailable depositories stay in the list — never hidden — but are
+    // rendered `disabled` so they can't be silently selected, and their
+    // label states why (Issue #61: "a control that overstates itself is
+    // worse than one that states its limits"). `available`/`reason` are
+    // already computed by buildDepositoryOptions; this is the first call
+    // site that actually gates on them.
+    options.map((o) => ({
+      DEP_ID: o.id,
+      DEP_LABEL: o.available ? o.label : `${o.label} \u2014 unavailable: ${o.reason ?? "not available"}`,
+      DEP_SELECTED: o.selected ? "selected" : "",
+      DEP_DISABLED: o.available ? "" : "disabled"
+    }))
   );
   html = renderRepeatingBlock(html, "ERROR_BLOCK", opts.errorMessage ? [{ ERROR_MESSAGE: opts.errorMessage }] : []);
   const confirmRows = opts.confirmDepository ? [{ CONFIRM_DEPOSITORY: opts.confirmDepository }] : [];
@@ -4275,7 +4286,12 @@ async function handleRequestFormPost(req, res, id) {
       });
       results.push({ name, ok: true });
     } catch (err) {
-      results.push({ name, ok: false, errorCode: err instanceof EnigmaError ? err.code : "E_UNKNOWN" });
+      results.push({
+        name,
+        ok: false,
+        errorCode: err instanceof EnigmaError ? err.code : "E_UNKNOWN",
+        reason: err instanceof EnigmaError ? err.message : void 0
+      });
     }
   }
   RequestStore.fulfill(id, results);
@@ -4286,7 +4302,7 @@ async function handleRequestFormPost(req, res, id) {
     results.map((r) => ({
       NAME: r.name,
       STATUS_CLASS: r.ok ? "ok" : "fail",
-      STATUS_TEXT: r.ok ? "stored" : `failed (${r.errorCode})`
+      STATUS_TEXT: r.ok ? "stored" : r.reason ? `failed (${r.errorCode}): ${r.reason}` : `failed (${r.errorCode})`
     }))
   );
   sendHtml(res, 200, html);
@@ -4368,12 +4384,23 @@ var REVEAL_CLIENT_JS = `(() => {
       setTimeout(() => {
         box.textContent = '';
         box.hidden = true;
-        status.textContent = 'Hidden.';
+        status.textContent = 'Hidden. Closing this tab\u2026';
+        setTimeout(() => {
+          window.close();
+        }, 2000);
       }, 60000);
     } catch (err) {
       status.textContent = 'Network error.';
     }
   });
+})();
+`;
+
+// src/web/static/request-done-script.ts
+var REQUEST_DONE_CLIENT_JS = `(() => {
+  setTimeout(() => {
+    window.close();
+  }, 5000);
 })();
 `;
 
@@ -4400,6 +4427,10 @@ async function handleRequest(req, res) {
     }
     if (method === "GET" && pathname === "/static/reveal.js") {
       sendStaticJs(res, REVEAL_CLIENT_JS);
+      return;
+    }
+    if (method === "GET" && pathname === "/static/request-done.js") {
+      sendStaticJs(res, REQUEST_DONE_CLIENT_JS);
       return;
     }
     const requestMatch = pathname.match(REQUEST_PATH);

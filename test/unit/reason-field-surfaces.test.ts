@@ -64,9 +64,20 @@ const SURFACES: Surface[] = [
     reasonAssignments: ["reason: f.errorCode === 'E_VALUE_AMBIGUOUS' ? f.message : undefined,"],
     sentinelTest: 'test/unit/web/routes/import-form.test.ts',
   },
-  // Constructs RequestNameResult (E_MISSING_VALUE / generic failure) but
-  // never sets reason — the golden empty array is the guarantee.
-  { file: 'src/web/routes/request-form.ts', reasonAssignments: [] },
+  // Issue #61: surfaces EnigmaError.message from a per-name setSecret()
+  // write failure, so the failure page can name what went wrong (e.g.
+  // "E_WRITE_FAILED: failed to write secret to secret-service depository")
+  // instead of a bare error code. E_MISSING_VALUE (no EnigmaError involved)
+  // still gets no reason. Audited every EnigmaError this call site's
+  // setSecret() can throw (src/storage/manager.ts + all depositories'
+  // `set()`) and confirmed each message is static or interpolates only
+  // structural text (secret NAME, depository id, byte limit, ref pattern) —
+  // never opts.value.
+  {
+    file: 'src/web/routes/request-form.ts',
+    reasonAssignments: ['reason: err instanceof EnigmaError ? err.message : undefined,'],
+    sentinelTest: 'test/unit/web/routes/request-form.test.ts',
+  },
   // Constructs RequestNameResult for the native/elicitation request paths
   // (never setting reason on it — hence the two entries below being the
   // full golden set even though this file constructs RequestNameResult).
