@@ -140,6 +140,111 @@ describe('RequestStore', () => {
     expect(RequestStore.get(reveal.id)?.results).toEqual([]);
   });
 
+  describe('consumeOutcome and listUnconsumedFulfilled (Issue #62)', () => {
+    it('a fulfilled request/import shows up in listUnconsumedFulfilled before its outcome is ever consumed', () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'] });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [
+        { name: 'OPENAI_API_KEY', ok: true },
+        { name: 'GITHUB_TOKEN', ok: true },
+      ]);
+
+      const pending = RequestStore.listUnconsumedFulfilled();
+      expect(pending).toEqual([{ id: record.id, names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'] }]);
+    });
+
+    it('listUnconsumedFulfilled never returns a value or per-name result, only id and names', () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
+
+      const [entry] = RequestStore.listUnconsumedFulfilled();
+      expect(entry).toEqual({ id: record.id, names: ['OPENAI_API_KEY'] });
+      expect(Object.keys(entry!)).toEqual(['id', 'names']);
+    });
+
+    it('reading listUnconsumedFulfilled repeatedly does not itself mark anything consumed (the signal cannot erase itself)', () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
+
+      RequestStore.listUnconsumedFulfilled();
+      RequestStore.listUnconsumedFulfilled();
+      RequestStore.listUnconsumedFulfilled();
+
+      expect(RequestStore.listUnconsumedFulfilled()).toHaveLength(1);
+      expect(RequestStore.get(record.id)?.outcomeConsumedAt).toBeUndefined();
+    });
+
+    it('once consumeOutcome has read a record, it no longer appears in listUnconsumedFulfilled', () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
+
+      expect(RequestStore.listUnconsumedFulfilled()).toHaveLength(1);
+
+      const results = RequestStore.consumeOutcome(record.id);
+
+      expect(results).toEqual([{ name: 'OPENAI_API_KEY', ok: true }]);
+      expect(RequestStore.listUnconsumedFulfilled()).toEqual([]);
+      expect(RequestStore.get(record.id)?.outcomeConsumedAt).toBeTypeOf('number');
+    });
+
+    it('consumeOutcome is idempotent: a second call (a re-await) still returns the same results and does not reset outcomeConsumedAt', () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
+
+      const first = RequestStore.consumeOutcome(record.id);
+      const firstConsumedAt = RequestStore.get(record.id)?.outcomeConsumedAt;
+      const second = RequestStore.consumeOutcome(record.id);
+
+      expect(second).toEqual(first);
+      expect(RequestStore.get(record.id)?.outcomeConsumedAt).toBe(firstConsumedAt);
+    });
+
+    it('consumeOutcome returns undefined for an unknown id or a record not yet fulfilled', () => {
+      expect(RequestStore.consumeOutcome('deadbeefdeadbeefdeadbeefdeadbeef')).toBeUndefined();
+
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+      expect(RequestStore.consumeOutcome(record.id)).toBeUndefined();
+    });
+
+    it('a fulfilled reveal never appears in listUnconsumedFulfilled — enigma_reveal never blocks on resolveRequestOutcome', () => {
+      const reveal = RequestStore.create({ kind: 'reveal', names: ['GITHUB_TOKEN'] });
+      RequestStore.tryMarkUsed(reveal.id);
+      RequestStore.fulfill(reveal.id);
+
+      expect(RequestStore.listUnconsumedFulfilled()).toEqual([]);
+    });
+
+    it('a fulfilled import shows up too, since enigma_import also reads through resolveRequestOutcome', () => {
+      const record = RequestStore.create({ kind: 'import', names: ['OPENAI_API_KEY'] });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
+
+      expect(RequestStore.listUnconsumedFulfilled()).toEqual([{ id: record.id, names: ['OPENAI_API_KEY'] }]);
+    });
+
+    it('a record that is not yet fulfilled (no results) does not appear', () => {
+      RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+      expect(RequestStore.listUnconsumedFulfilled()).toEqual([]);
+    });
+
+    it('an expired/swept record is gone from the store entirely, so it cannot appear as unconsumed-fulfilled', () => {
+      vi.useFakeTimers();
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 1000 });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
+      expect(RequestStore.listUnconsumedFulfilled()).toHaveLength(1);
+
+      // Past the used-record grace period the sweeper deletes it outright.
+      vi.advanceTimersByTime(6 * 60 * 1000);
+
+      expect(RequestStore.listUnconsumedFulfilled()).toEqual([]);
+    });
+  });
+
   describe('expiry and the sweeper', () => {
     beforeEach(() => {
       vi.useFakeTimers();

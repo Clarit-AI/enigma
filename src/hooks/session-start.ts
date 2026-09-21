@@ -5,6 +5,7 @@
 import { loadConfig, loadProjectManifest } from '../core/config.js';
 import { computeManifestGaps } from '../core/manifest-gaps.js';
 import { findProjectPath } from '../core/project.js';
+import { RequestStore } from '../request/store.js';
 import type { SessionStartInput, SessionStartOutput } from './types.js';
 
 export function runSessionStart(input: SessionStartInput): SessionStartOutput {
@@ -25,6 +26,19 @@ export function runSessionStart(input: SessionStartInput): SessionStartOutput {
   if (gaps.length > 0) {
     lines.push(
       `Enigma: manifest (.enigma.json) declares ${gaps.join(', ')} but no value is stored yet — call enigma_request to collect them.`,
+    );
+  }
+
+  // Issue #62: same recovery signal as enigma_doctor, surfaced at session
+  // start too — a request/import whose outcome was never returned to a
+  // model (e.g. the enigma_await call that would have reported it was
+  // interrupted), even though the secret was already stored by the
+  // independent web layer. Names and ids only, never values.
+  const pendingRequests = RequestStore.listUnconsumedFulfilled();
+  if (pendingRequests.length > 0) {
+    const summary = pendingRequests.map((r) => `${r.id} (names: ${r.names.join(', ')})`).join('; ');
+    lines.push(
+      `Enigma: pending unconfirmed request(s) whose outcome you may not have seen — ${summary} — call enigma_await(request_id) to check.`,
     );
   }
 

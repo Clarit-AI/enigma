@@ -46,6 +46,17 @@ export interface RequestRecord {
   /** Set once POST /r/:id has attempted a write for every name (Issue #10 reads this after the waiter resolves). */
   results?: RequestNameResult[];
   /**
+   * Set the first time `consumeOutcome` reads this record's `results` — i.e.
+   * the first time an `enigma_await`/`enigma_request`/`enigma_import` call
+   * actually returns the outcome text to the model (Issue #62). Distinct
+   * from `usedAt` (set when the human submits the form) and from `results`
+   * being set (the web layer recording what happened): this timestamp is
+   * about whether the AGENT has learned the outcome, which can lag well
+   * behind either. Never set by `listUnconsumedFulfilled` itself — reading
+   * the recovery signal must not erase it.
+   */
+  outcomeConsumedAt?: number;
+  /**
    * kind 'import' only: the already-parsed values keyed by name, carried
    * in-flight from the CLI/MCP process that read the source `.env` through
    * to the web POST handler that commits them (style-guide: `src/request/**`
@@ -245,6 +256,54 @@ export const RequestStore = {
       waiters.set(id, waiter);
     }
     return waiter.promise;
+  },
+
+  /**
+   * Reads a fulfilled record's per-name results and marks its outcome as
+   * consumed the first time this is called for a given id (Issue #62) — the
+   * single choke point `resolveRequestOutcome` (used by enigma_await,
+   * enigma_request, and enigma_import) reads through, so
+   * `listUnconsumedFulfilled` can tell "the agent already learned this
+   * outcome" from "it never did." Idempotent: a second `enigma_await` for
+   * the same id still returns the same results (that's the whole point of
+   * the idempotent-await recovery path) and leaves `outcomeConsumedAt` at
+   * its first value. Returns undefined if the id is unknown or not yet
+   * fulfilled — callers already treat that the same as "no results".
+   */
+  consumeOutcome(id: string): RequestNameResult[] | undefined {
+    const record = records.get(id);
+    if (!record || record.results === undefined) return undefined;
+    if (record.outcomeConsumedAt === undefined) record.outcomeConsumedAt = Date.now();
+    return record.results;
+  },
+
+  /**
+   * Enumerates fulfilled 'request'/'import' records (results are in) whose
+   * outcome has never been read via `consumeOutcome` — Issue #62's recovery
+   * signal for an `enigma_await`/`enigma_request` call that was interrupted
+   * before the agent ever saw the outcome text, even though the secret was
+   * stored correctly by the independent web layer. 'reveal' records are
+   * excluded: `enigma_reveal` never blocks on `resolveRequestOutcome` (by
+   * design — the revealed value goes only to the human), so a fulfilled
+   * reveal has nothing pending for the agent to re-await.
+   *
+   * Returns names and ids only, never values or per-name results (ADR-001)
+   * — this is purely "there is an outcome you may not have seen; call
+   * enigma_await(id)", not the outcome itself. Reading this list never
+   * marks anything consumed, so calling it repeatedly (e.g. from
+   * enigma_doctor) cannot make the signal disappear on its own. Bounded by
+   * the same in-memory TTL/used-grace sweep as every other record; no new
+   * persistence.
+   */
+  listUnconsumedFulfilled(): Array<{ id: string; names: string[] }> {
+    const out: Array<{ id: string; names: string[] }> = [];
+    for (const record of records.values()) {
+      if (record.kind === 'reveal') continue;
+      if (record.results === undefined) continue;
+      if (record.outcomeConsumedAt !== undefined) continue;
+      out.push({ id: record.id, names: [...record.names] });
+    }
+    return out;
   },
 
   /** Test-only: clears all records/waiters and stops the sweeper so state never leaks between test files. */

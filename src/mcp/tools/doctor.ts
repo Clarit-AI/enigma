@@ -7,6 +7,7 @@ import { EnigmaError } from '../../core/errors.js';
 import { readIndex } from '../../core/index-store.js';
 import { computeManifestGaps } from '../../core/manifest-gaps.js';
 import { auditLogPath, configPath, enigmaHome, indexPath, keyPath, secretsPath } from '../../core/paths.js';
+import { RequestStore } from '../../request/store.js';
 import { detectAll } from '../../storage/detect.js';
 import { supportsFormElicitation, supportsUrlElicitation } from '../elicit.js';
 import { textResult } from '../result-text.js';
@@ -69,6 +70,22 @@ export function registerDoctorTool(server: McpServer): void {
         `Manifest gaps: ${manifestGaps.length === 0 ? 'none' : manifestGaps.join(', ')}`,
         `Paths: index=${indexPath()} audit=${auditLogPath()} config=${configPath()}`,
       ];
+
+      // Issue #62: a request/import whose form was already submitted (the
+      // web layer stored the secret independently of this tool call) but
+      // whose outcome no enigma_await/enigma_request/enigma_import call has
+      // ever returned to the model — e.g. the original blocking call was
+      // interrupted before the user submitted. Names and ids only, never
+      // values or per-name results; omitted entirely when there is nothing
+      // pending, matching every other line above that only reports when
+      // there's something to report.
+      const pendingRequests = RequestStore.listUnconsumedFulfilled();
+      if (pendingRequests.length > 0) {
+        lines.push(
+          'Pending unconfirmed requests:',
+          ...pendingRequests.map((r) => `  ${r.id} (names: ${r.names.join(', ')}) — call enigma_await(${r.id})`),
+        );
+      }
 
       return textResult(lines.join('\n'));
     },
