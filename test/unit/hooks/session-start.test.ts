@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runSessionStart } from '../../../src/hooks/session-start.js';
+import { RequestStore } from '../../../src/request/store.js';
 import { setSecret } from '../../../src/storage/manager.js';
 import { configPath } from '../../../src/core/paths.js';
 
@@ -17,6 +18,7 @@ describe('SessionStart', () => {
     process.env.ENIGMA_HOME = tmpHome;
     tmpProject = mkdtempSync(join(tmpdir(), 'enigma-project-'));
     mkdirSync(join(tmpProject, '.git'));
+    RequestStore.__resetForTests();
   });
 
   afterEach(() => {
@@ -24,6 +26,7 @@ describe('SessionStart', () => {
     else process.env.ENIGMA_HOME = originalHome;
     rmSync(tmpHome, { recursive: true, force: true });
     rmSync(tmpProject, { recursive: true, force: true });
+    RequestStore.__resetForTests();
   });
 
   it('lists no secrets and contains no values when the index is empty', () => {
@@ -90,5 +93,54 @@ describe('SessionStart', () => {
 
   it('falls back to process.cwd() when cwd is missing from the hook input', () => {
     expect(() => runSessionStart({})).not.toThrow();
+  });
+
+  describe('pending unconfirmed requests (Issue #62)', () => {
+    it('surfaces a fulfilled request whose outcome was never consumed by enigma_await', () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'] });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [
+        { name: 'OPENAI_API_KEY', ok: true },
+        { name: 'GITHUB_TOKEN', ok: true },
+      ]);
+
+      const output = runSessionStart({ cwd: tmpProject });
+      const ctx = output.hookSpecificOutput.additionalContext;
+
+      expect(ctx).toContain(record.id);
+      expect(ctx).toContain('OPENAI_API_KEY, GITHUB_TOKEN');
+      expect(ctx).toContain('enigma_await');
+    });
+
+    it('adds no pending-request line when nothing is unconsumed', () => {
+      const output = runSessionStart({ cwd: tmpProject });
+      const ctx = output.hookSpecificOutput.additionalContext;
+
+      expect(ctx).not.toContain('pending unconfirmed request');
+    });
+
+    it('does not surface a request whose outcome was already consumed', () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
+      RequestStore.consumeOutcome(record.id);
+
+      const output = runSessionStart({ cwd: tmpProject });
+      const ctx = output.hookSpecificOutput.additionalContext;
+
+      expect(ctx).not.toContain('pending unconfirmed request');
+      expect(ctx).not.toContain(record.id);
+    });
+
+    it('never surfaces a fulfilled reveal as a pending unconfirmed request', () => {
+      const reveal = RequestStore.create({ kind: 'reveal', names: ['GITHUB_TOKEN'] });
+      RequestStore.tryMarkUsed(reveal.id);
+      RequestStore.fulfill(reveal.id);
+
+      const output = runSessionStart({ cwd: tmpProject });
+      const ctx = output.hookSpecificOutput.additionalContext;
+
+      expect(ctx).not.toContain('pending unconfirmed request');
+    });
   });
 });

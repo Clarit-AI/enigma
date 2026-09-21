@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { connectWithCapabilities } from './harness.js';
+import { RequestStore } from '../../../src/request/store.js';
 import { setSecret } from '../../../src/storage/manager.js';
 
 describe('enigma_doctor', () => {
@@ -18,6 +19,7 @@ describe('enigma_doctor', () => {
     tmpProject = mkdtempSync(join(tmpdir(), 'enigma-project-'));
     mkdirSync(join(tmpProject, '.git'));
     originalCwd = process.cwd();
+    RequestStore.__resetForTests();
   });
 
   afterEach(() => {
@@ -26,6 +28,7 @@ describe('enigma_doctor', () => {
     else process.env.ENIGMA_HOME = originalHome;
     rmSync(tmpHome, { recursive: true, force: true });
     rmSync(tmpProject, { recursive: true, force: true });
+    RequestStore.__resetForTests();
   });
 
   it('reports the platform, an ok index, and the connected client elicitation capability — never a value', async () => {
@@ -86,5 +89,61 @@ describe('enigma_doctor', () => {
     } finally {
       rmSync(otherProject, { recursive: true, force: true });
     }
+  });
+
+  it('reports a fulfilled request whose outcome was never consumed by enigma_await (Issue #62)', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'] });
+    RequestStore.tryMarkUsed(record.id);
+    RequestStore.fulfill(record.id, [
+      { name: 'OPENAI_API_KEY', ok: true },
+      { name: 'GITHUB_TOKEN', ok: true },
+    ]);
+
+    const pair = await connectWithCapabilities({});
+    const result = await pair.client.callTool({ name: 'enigma_doctor', arguments: {} });
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+    expect(text).toContain('Pending unconfirmed requests:');
+    expect(text).toContain(`${record.id} (names: OPENAI_API_KEY, GITHUB_TOKEN) — call enigma_await(${record.id})`);
+    await pair.close();
+  });
+
+  it('adds no "Pending unconfirmed requests" line when there is nothing unconsumed', async () => {
+    const pair = await connectWithCapabilities({});
+    const result = await pair.client.callTool({ name: 'enigma_doctor', arguments: {} });
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+    expect(text).not.toContain('Pending unconfirmed requests');
+    await pair.close();
+  });
+
+  it('does not report a request whose outcome was already consumed via enigma_await', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    RequestStore.tryMarkUsed(record.id);
+    RequestStore.fulfill(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
+
+    const awaitPair = await connectWithCapabilities({});
+    await awaitPair.client.callTool({ name: 'enigma_await', arguments: { request_id: record.id } });
+    await awaitPair.close();
+
+    const pair = await connectWithCapabilities({});
+    const result = await pair.client.callTool({ name: 'enigma_doctor', arguments: {} });
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+    expect(text).not.toContain('Pending unconfirmed requests');
+    await pair.close();
+  });
+
+  it('never reports a fulfilled reveal as a pending unconfirmed request', async () => {
+    const reveal = RequestStore.create({ kind: 'reveal', names: ['GITHUB_TOKEN'] });
+    RequestStore.tryMarkUsed(reveal.id);
+    RequestStore.fulfill(reveal.id);
+
+    const pair = await connectWithCapabilities({});
+    const result = await pair.client.callTool({ name: 'enigma_doctor', arguments: {} });
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+    expect(text).not.toContain('Pending unconfirmed requests');
+    await pair.close();
   });
 });

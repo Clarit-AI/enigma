@@ -42335,6 +42335,52 @@ var RequestStore = {
     }
     return waiter.promise;
   },
+  /**
+   * Reads a fulfilled record's per-name results and marks its outcome as
+   * consumed the first time this is called for a given id (Issue #62) — the
+   * single choke point `resolveRequestOutcome` (used by enigma_await,
+   * enigma_request, and enigma_import) reads through, so
+   * `listUnconsumedFulfilled` can tell "the agent already learned this
+   * outcome" from "it never did." Idempotent: a second `enigma_await` for
+   * the same id still returns the same results (that's the whole point of
+   * the idempotent-await recovery path) and leaves `outcomeConsumedAt` at
+   * its first value. Returns undefined if the id is unknown or not yet
+   * fulfilled — callers already treat that the same as "no results".
+   */
+  consumeOutcome(id) {
+    const record2 = records.get(id);
+    if (!record2 || record2.results === void 0) return void 0;
+    if (record2.outcomeConsumedAt === void 0) record2.outcomeConsumedAt = Date.now();
+    return record2.results;
+  },
+  /**
+   * Enumerates fulfilled 'request'/'import' records (results are in) whose
+   * outcome has never been read via `consumeOutcome` — Issue #62's recovery
+   * signal for an `enigma_await`/`enigma_request` call that was interrupted
+   * before the agent ever saw the outcome text, even though the secret was
+   * stored correctly by the independent web layer. 'reveal' records are
+   * excluded: `enigma_reveal` never blocks on `resolveRequestOutcome` (by
+   * design — the revealed value goes only to the human), so a fulfilled
+   * reveal has nothing pending for the agent to re-await.
+   *
+   * Returns names and ids only, never values or per-name results (ADR-001)
+   * — this is purely "there is an outcome you may not have seen; call
+   * enigma_await(id)", not the outcome itself. Reading this list never
+   * marks anything consumed, so calling it repeatedly (e.g. from
+   * enigma_doctor) cannot make the signal disappear on its own. Bounded by
+   * the same in-memory TTL/used-grace sweep as every other record; no new
+   * persistence.
+   */
+  listUnconsumedFulfilled() {
+    const out = [];
+    for (const record2 of records.values()) {
+      if (record2.kind === "reveal") continue;
+      if (record2.results === void 0) continue;
+      if (record2.outcomeConsumedAt !== void 0) continue;
+      out.push({ id: record2.id, names: [...record2.names] });
+    }
+    return out;
+  },
   /** Test-only: clears all records/waiters and stops the sweeper so state never leaks between test files. */
   __resetForTests() {
     records.clear();
@@ -43776,7 +43822,7 @@ function renderOutcome(results, cwd) {
 // src/mcp/request-outcome.ts
 async function resolveRequestOutcome(id, cwd) {
   await RequestStore.waitForFulfilled(id);
-  const results = RequestStore.get(id)?.results ?? [];
+  const results = RequestStore.consumeOutcome(id) ?? [];
   return renderOutcome(results, cwd);
 }
 
@@ -43939,6 +43985,13 @@ function registerDoctorTool(server) {
         `Manifest gaps: ${manifestGaps.length === 0 ? "none" : manifestGaps.join(", ")}`,
         `Paths: index=${indexPath()} audit=${auditLogPath()} config=${configPath()}`
       ];
+      const pendingRequests = RequestStore.listUnconsumedFulfilled();
+      if (pendingRequests.length > 0) {
+        lines.push(
+          "Pending unconfirmed requests:",
+          ...pendingRequests.map((r) => `  ${r.id} (names: ${r.names.join(", ")}) \u2014 call enigma_await(${r.id})`)
+        );
+      }
       return textResult(lines.join("\n"));
     }
   );
