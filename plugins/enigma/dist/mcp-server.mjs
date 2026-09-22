@@ -47410,7 +47410,7 @@ Open this link to reveal ${args.name}.`);
 
 // src/mcp/server.ts
 function createServer2() {
-  const server = new McpServer({ name: "enigma", version: "0.1.0" });
+  const server = new McpServer({ name: "enigma", version: "0.2.0" });
   registerListTool(server);
   registerRequestTool(server);
   registerAwaitTool(server);
