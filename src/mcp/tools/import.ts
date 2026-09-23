@@ -113,9 +113,19 @@ export function registerImportTool(server: McpServer): void {
         return textResult(`Import cancelled for ${names.join(', ')}`, true);
       }
 
-      const outcome = await resolveRequestOutcome(record.id, cwd);
-      await sendElicitationComplete(server.server, record.id);
-      return textResult(outcome.text, outcome.isError);
+      try {
+        const outcome = await resolveRequestOutcome(record.id, cwd);
+        await sendElicitationComplete(server.server, record.id);
+        return textResult(outcome.text, outcome.isError);
+      } catch (err) {
+        // resolveRequestOutcome maps used-but-swept → E_OUTCOME_UNKNOWN
+        // (Issue #69 AC #5); let its EnigmaError pass through, consistent
+        // with enigma_await/enigma_request (PR #78 review, finding 4) —
+        // without this catch, that rejection reached the caller as an
+        // unhandled tool-call rejection instead of a named error result.
+        if (err instanceof EnigmaError) return errorResult(err);
+        throw err;
+      }
     },
   );
 }
