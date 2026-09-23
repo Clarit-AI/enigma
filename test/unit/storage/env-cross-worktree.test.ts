@@ -20,6 +20,7 @@
 // location-vs-identity split), so a resolve from B follows the index
 // entry's stored projectPath back to A's `.env` — and when A's `.env` is
 // gone, the env depository throws E_NOT_FOUND naming 'env' (D1.4).
+import { EventEmitter } from 'node:events';
 import {
   existsSync,
   mkdirSync,
@@ -30,8 +31,9 @@ import {
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { basename } from 'node:path';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   deleteSecret,
   hasSecret,
@@ -40,8 +42,43 @@ import {
   setSecret,
 } from '../../../src/storage/manager.js';
 import { EnigmaError } from '../../../src/core/errors.js';
+import { findRepoIdentityPath, projectId } from '../../../src/core/project.js';
 
 const SENTINEL = 'sk-cross-worktree-sentinel';
+
+/** Captures every `op` invocation the test issues, so we can assert on
+ *  argv shape and on the JSON template the depository sends to stdin. */
+interface FakeCall {
+  args: string[];
+  stdinData: string;
+}
+const opCalls: FakeCall[] = [];
+let respondToOp: (call: FakeCall) => { stdout?: string; stderr?: string; fail?: boolean };
+
+vi.mock('node:child_process', () => ({
+  execFile: (_file: string, args: string[], _options: unknown, callback: (...cbArgs: unknown[]) => void) => {
+    const stdin = new EventEmitter() as EventEmitter & { write: (d: string) => boolean; end: () => void };
+    const call: FakeCall = { args, stdinData: '' };
+    stdin.write = (data: string) => {
+      call.stdinData += data;
+      return true;
+    };
+    stdin.end = () => {};
+    opCalls.push(call);
+    const result = respondToOp(call);
+    queueMicrotask(() => {
+      if (result.fail) {
+        callback(Object.assign(new Error('op failure'), {}), result.stdout ?? '', result.stderr ?? '');
+      } else {
+        callback(null, result.stdout ?? '', result.stderr ?? '');
+      }
+    });
+    const child = new EventEmitter() as EventEmitter & { stdin: typeof stdin; kill: () => void };
+    child.stdin = stdin;
+    child.kill = () => {};
+    return child;
+  },
+}));
 
 describe('env depository across linked worktrees (Issue #67 AC)', () => {
   let tmpHome: string;
@@ -72,6 +109,16 @@ describe('env depository across linked worktrees (Issue #67 AC)', () => {
 
     wtB = realpathSync(mkdtempSync(join(tmpdir(), 'enigma-cross-wt-b-')));
     writeFileSync(join(wtB, '.git'), `gitdir: ${repo}/.git/worktrees/b\n`);
+
+    // Default: every `op item create` succeeds with an op item id. Tests
+    // that need different behaviour override respondToOp before setSecret.
+    opCalls.length = 0;
+    respondToOp = (call) => {
+      if (call.args[0] === 'item' && call.args[1] === 'create') {
+        return { stdout: JSON.stringify({ id: 'opitemid', title: 'x', category: 'API_CREDENTIAL' }) };
+      }
+      return { stdout: '' };
+    };
   });
 
   afterEach(() => {
@@ -81,6 +128,20 @@ describe('env depository across linked worktrees (Issue #67 AC)', () => {
     rmSync(repo, { recursive: true, force: true });
     rmSync(wtA, { recursive: true, force: true });
     rmSync(wtB, { recursive: true, force: true });
+  });
+
+  it('projectId matches across the main clone and both worktrees (identity == repo)', () => {
+    // All three cwds hash to the same identity: the canonical common git
+    // dir's realpath, basename stripped, is /repo for each of them.
+    // findRepoIdentityPath(repo) goes through the directory branch
+    // (worktreeRoot/.git is a directory), wtA/wtB go through the .git-
+    // file + commondir branch, and all three converge on the same path.
+    expect(findRepoIdentityPath(repo)).toBe(repo);
+    expect(findRepoIdentityPath(wtA)).toBe(repo);
+    expect(findRepoIdentityPath(wtB)).toBe(repo);
+    expect(projectId(repo)).toBe(projectId(wtA));
+    expect(projectId(repo)).toBe(projectId(wtB));
+    expect(projectId(wtA)).toBe(projectId(wtB));
   });
 
   it('a secret written from worktree A is listed and resolvable from worktree B (reads A/.env)', async () => {
@@ -128,15 +189,6 @@ describe('env depository across linked worktrees (Issue #67 AC)', () => {
 
     // From A, resolve reaches the same index entry and reads B/.env.
     await expect(resolveSecret('OPENAI_API_KEY', { scope: 'project', cwd: wtA, actor: 'cli' })).resolves.toBe(SENTINEL);
-  });
-
-  it('the main clone (cwd=repo) sees the same projectId as both worktrees', () => {
-    // Sanity: the identity walk resolves to /repo for all three cwds —
-    // not just for the worktree checkouts, but for the main clone too,
-    // because main's .git is a directory whose basename IS .git.
-    expect(hasSecret('UNUSED_NAME', { scope: 'project', cwd: repo })).toBeDefined();
-    // Implicit: listSecrets does not throw; an empty index is fine.
-    expect(listSecrets({ scope: 'project', cwd: repo })).toEqual([]);
   });
 
   it('AC literal reading: after `rm -rf` worktree A, resolve from B fails fast naming `env` (D1.4)', async () => {
@@ -230,5 +282,60 @@ describe('env depository across linked worktrees (Issue #67 AC)', () => {
       expect(readFileSync(join(wtA, '.env'), 'utf8')).not.toContain(SENTINEL);
       expect(readFileSync(join(wtA, '.env'), 'utf8')).not.toMatch(/OPENAI_API_KEY=/);
     }
+  });
+
+  describe('AC8 — location-side behaviour: env gitignore + 1Password title use wtA, not the identity (repo)', () => {
+    it('checkEnvGitignore warns about wtA/.gitignore, not repo/.gitignore, even when both share an identity', async () => {
+      // The repo carries a gitignore that covers .env — so anything that
+      // reads checkEnvGitignore(repo) would see "covered, no warning".
+      writeFileSync(join(repo, '.gitignore'), '.env\n');
+
+      // setSecret from wtA, env depository, runs checkEnvGitignore(wtA) and
+      // therefore warns: wtA has no .gitignore, regardless of the repo's.
+      const result = await setSecret({
+        name: 'OPENAI_API_KEY',
+        value: SENTINEL,
+        scope: 'project',
+        depository: 'env',
+        cwd: wtA,
+        actor: 'cli',
+      });
+      expect(result.warnings.length).toBeGreaterThan(0);
+      expect(result.warnings.join('\n')).toMatch(/gitignore/i);
+
+      // Add wtA/.gitignore covering .env — the next setSecret from wtA
+      // emits no warning, proving the check targeted wtA specifically.
+      writeFileSync(join(wtA, '.gitignore'), '.env\n');
+      const result2 = await setSecret({
+        name: 'OPENAI_API_KEY',
+        value: SENTINEL,
+        scope: 'project',
+        depository: 'env',
+        cwd: wtA,
+        rotate: true,
+        actor: 'cli',
+      });
+      expect(result2.warnings).toEqual([]);
+    });
+
+    it('1Password title uses basename(wtA), not basename(repo) — title builder sees the location, not the identity', async () => {
+      // Identity is repo for both worktrees; the depository context's
+      // projectPath is the lexical worktree root, so the title folder is
+      // the worktree's basename. The op CLI is mocked — no real call.
+      await setSecret({
+        name: 'OPENAI_API_KEY',
+        value: SENTINEL,
+        scope: 'project',
+        depository: '1password',
+        cwd: wtA,
+        actor: 'cli',
+      });
+
+      const itemCreateCall = opCalls.find((c) => c.args[0] === 'item' && c.args[1] === 'create');
+      expect(itemCreateCall).toBeDefined();
+      const template = JSON.parse(itemCreateCall!.stdinData) as { title: string };
+      expect(template.title).toBe(`OPENAI_API_KEY · ${basename(wtA)}`);
+      expect(template.title).not.toBe(`OPENAI_API_KEY · ${basename(repo)}`);
+    });
   });
 });

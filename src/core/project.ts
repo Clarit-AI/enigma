@@ -29,15 +29,20 @@ const platformPath: PlatformPath = nodePath;
 /**
  * Parses the contents of a `.git` pointer file. Returns the trimmed
  * gitdir path, or `null` if the file's first line isn't a `gitdir:`
- * pointer (with or without a space after the colon — git accepts both).
- * Trailing whitespace and CRLF are trimmed.
+ * pointer (with or without a space after the colon — git accepts both),
+ * or if the value is missing or whitespace-only. Trailing whitespace and
+ * CRLF are trimmed.
  */
 export function parseGitdirPointer(content: string): string | null {
   const firstLine = content.split(/\r?\n/, 1)[0];
   if (firstLine === undefined) return null;
-  const match = /^gitdir:(\s*)(.+?)\s*$/.exec(firstLine);
+  // (\S.*?)? — the value must start with a non-whitespace character, and
+  // the group is optional. "gitdir:" alone, or "gitdir:   ", would otherwise
+  // match (.+?) as a single space character and produce a whitespace-only
+  // pointer that breaks downstream resolution.
+  const match = /^gitdir:(\s*)(\S.*?)?\s*$/.exec(firstLine);
   if (!match) return null;
-  return match[2] || null;
+  return match[2] ?? null;
 }
 
 /**
@@ -84,7 +89,8 @@ function safeRealpath(p: string, fallback: string): string {
   }
 }
 
-function readFirstLine(filePath: string): string | null {
+/** Returns the file's UTF-8 contents, or `null` on any read failure. */
+function readFileSafe(filePath: string): string | null {
   try {
     return readFileSync(filePath, 'utf8');
   } catch {
@@ -105,7 +111,12 @@ function readFirstLine(filePath: string): string | null {
  *  3. Identity path = the parent of `realpath(commonDir)` if its basename is
  *     `.git`, otherwise `realpath(commonDir)` itself (e.g. a bare `repo.git`).
  *  4. If any read, parse, or realpath step fails → fall back to
- *     `realpath(worktreeRoot)`. Never throws.
+ *     `realpath(worktreeRoot)`. In particular, a `<gitdir>/commondir` that
+ *     is present but empty / whitespace-only / unreadable is treated as a
+ *     failure (NOT a "use gitdir" success): git itself never writes an
+ *     empty commondir, so its presence in that state means something is
+ *     wrong with the worktree, not that commondir is intentionally absent.
+ *     Never throws.
  */
 export function findRepoIdentityPath(cwd: string): string {
   const worktreeRoot = findProjectPath(cwd);
@@ -119,22 +130,25 @@ export function findRepoIdentityPath(cwd: string): string {
     if (kind === 'directory') {
       commonDir = gitEntryPath;
     } else if (kind === 'file') {
-      const raw = readFirstLine(gitEntryPath);
+      const raw = readFileSafe(gitEntryPath);
       if (raw === null) return fallback;
       const pointer = parseGitdirPointer(raw);
       if (pointer === null) return fallback;
       const gitdir = resolveGitPointer(worktreeRoot, pointer);
       if (!existsSync(gitdir)) return fallback;
+
       const commondirFile = join(gitdir, 'commondir');
-      let resolvedCommon: string | null = null;
       if (existsSync(commondirFile)) {
-        const content = readFirstLine(commondirFile);
-        if (content !== null) {
-          const cdp = parseCommondirPointer(content);
-          if (cdp !== null) resolvedCommon = resolveGitPointer(gitdir, cdp);
-        }
+        // Present: must be readable AND parse to a non-empty pointer, or
+        // we fall back. Distinguishes from "absent" (common dir = gitdir).
+        const content = readFileSafe(commondirFile);
+        if (content === null) return fallback;
+        const cdp = parseCommondirPointer(content);
+        if (cdp === null) return fallback;
+        commonDir = resolveGitPointer(gitdir, cdp);
+      } else {
+        commonDir = gitdir;
       }
-      commonDir = resolvedCommon ?? gitdir;
     } else {
       return fallback;
     }

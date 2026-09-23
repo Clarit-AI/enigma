@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import {
+  chmodSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -90,6 +91,12 @@ describe('parseGitdirPointer', () => {
     expect(parseGitdirPointer('not gitdir: anything\n')).toBeNull();
     expect(parseGitdirPointer('')).toBeNull();
     expect(parseGitdirPointer('gitdir:\n')).toBeNull();
+    // Whitespace-only after the colon is a malformed pointer, not a value
+    // made of a single space character. Without the (\S.*?)? guard, the
+    // regex would have matched (.+?) as ' ' and returned a whitespace value.
+    expect(parseGitdirPointer('gitdir:   ')).toBeNull();
+    expect(parseGitdirPointer('gitdir:   \n')).toBeNull();
+    expect(parseGitdirPointer('gitdir:\t\n')).toBeNull();
   });
 
   it('only inspects the first line; later lines are ignored', () => {
@@ -181,9 +188,11 @@ describe('findRepoIdentityPath (Issue #67)', () => {
 
   it('Issue #67 / 0.2.0 regression pin: normal clone at a non-symlinked path → identity = sha256(path.resolve(root)).slice(0,16)', () => {
     // Real, non-symlinked clone: .git is a directory, no gitdir/commondir.
-    // The 0.2.0 hash was sha256(realpath(worktreeRoot)).slice(0,16); under
-    // 0.3.0 the same path produces the same hash because realpath of a
-    // common dir whose basename is ".git" unwraps to the same worktree root.
+    // 0.2.0 hashed `findProjectPath(cwd)` = `path.resolve(cwd)`. Under 0.3.0
+    // the identity walk resolves the same path (realpath of the .git
+    // directory's parent unwraps to the worktree root), so the hash is
+    // identical for any path that is not itself under a symlink. The
+    // symlinked-path test below exercises the divergence.
     mkdirSync(join(tmpRoot, '.git'));
     const expected = createHash('sha256')
       .update(nodePath.resolve(tmpRoot))
@@ -404,6 +413,99 @@ describe('findRepoIdentityPath (Issue #67)', () => {
       }
     } finally {
       rmSync(main, { recursive: true, force: true });
+    }
+  });
+
+  it('commondir present but empty: not the same as absent → falls back, no hashing the per-worktree gitdir', () => {
+    const main = realTmpDir('enigma-identity-empty-cd-main-');
+    try {
+      mkdirSync(join(main, '.git', 'worktrees', 'wt'), { recursive: true });
+      // Empty commondir: present but with no content. Per the issue rule
+      // step 4, this is a failure — NOT the "commondir absent" case that
+      // would silently fall back to the per-worktree gitdir (which would
+      // give every worktree its own identity and break the S1.4 contract).
+      writeFileSync(join(main, '.git', 'worktrees', 'wt', 'commondir'), '');
+
+      const wt = realTmpDir('enigma-identity-empty-cd-wt-');
+      try {
+        writeFileSync(join(wt, '.git'), `gitdir: ${main}/.git/worktrees/wt\n`);
+
+        expect(findRepoIdentityPath(wt)).toBe(wt);
+        expect(projectId(wt)).toBe(
+          createHash('sha256')
+            .update(nodePath.resolve(wt))
+            .digest('hex')
+            .slice(0, PROJECT_ID_LENGTH),
+        );
+      } finally {
+        rmSync(wt, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(main, { recursive: true, force: true });
+    }
+  });
+
+  it('commondir present but whitespace-only: also falls back, not the gitdir', () => {
+    const main = realTmpDir('enigma-identity-ws-cd-main-');
+    try {
+      mkdirSync(join(main, '.git', 'worktrees', 'wt'), { recursive: true });
+      writeFileSync(join(main, '.git', 'worktrees', 'wt', 'commondir'), '   \n');
+
+      const wt = realTmpDir('enigma-identity-ws-cd-wt-');
+      try {
+        writeFileSync(join(wt, '.git'), `gitdir: ${main}/.git/worktrees/wt\n`);
+        expect(findRepoIdentityPath(wt)).toBe(wt);
+      } finally {
+        rmSync(wt, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(main, { recursive: true, force: true });
+    }
+  });
+
+  it('commondir present but unreadable (EACCES) → falls back, not the gitdir (skipped as root)', () => {
+    // macOS root (uid 0) bypasses chmod 000; chmod's permission bits are
+    // bypassed entirely on Linux for root. Skip rather than fake-pass when
+    // the test wouldn't actually exercise the EACCES path.
+    const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+    if (isRoot) return;
+
+    const main = realTmpDir('enigma-identity-eacces-cd-main-');
+    try {
+      mkdirSync(join(main, '.git', 'worktrees', 'wt'), { recursive: true });
+      const commondirFile = join(main, '.git', 'worktrees', 'wt', 'commondir');
+      writeFileSync(commondirFile, '../..\n');
+      chmodSync(commondirFile, 0o000);
+
+      const wt = realTmpDir('enigma-identity-eacces-cd-wt-');
+      try {
+        writeFileSync(join(wt, '.git'), `gitdir: ${main}/.git/worktrees/wt\n`);
+        try {
+          expect(findRepoIdentityPath(wt)).toBe(wt);
+        } finally {
+          // Restore so rmSync can clean up.
+          chmodSync(commondirFile, 0o644);
+        }
+      } finally {
+        rmSync(wt, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(main, { recursive: true, force: true });
+    }
+  });
+
+  it('unreadable .git file (EACCES) → falls back without throwing (skipped as root)', () => {
+    const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
+    if (isRoot) return;
+
+    const gitFile = join(tmpRoot, '.git');
+    writeFileSync(gitFile, 'gitdir: /tmp/whatever\n');
+    chmodSync(gitFile, 0o000);
+    try {
+      expect(() => findRepoIdentityPath(tmpRoot)).not.toThrow();
+      expect(findRepoIdentityPath(tmpRoot)).toBe(tmpRoot);
+    } finally {
+      chmodSync(gitFile, 0o644);
     }
   });
 

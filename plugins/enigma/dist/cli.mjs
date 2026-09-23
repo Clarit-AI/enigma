@@ -286,9 +286,9 @@ var platformPath = nodePath;
 function parseGitdirPointer(content) {
   const firstLine = content.split(/\r?\n/, 1)[0];
   if (firstLine === void 0) return null;
-  const match = /^gitdir:(\s*)(.+?)\s*$/.exec(firstLine);
+  const match = /^gitdir:(\s*)(\S.*?)?\s*$/.exec(firstLine);
   if (!match) return null;
-  return match[2] || null;
+  return match[2] ?? null;
 }
 function parseCommondirPointer(content) {
   const firstLine = content.split(/\r?\n/, 1)[0];
@@ -317,7 +317,7 @@ function safeRealpath(p, fallback) {
     return fallback;
   }
 }
-function readFirstLine(filePath) {
+function readFileSafe(filePath) {
   try {
     return readFileSync2(filePath, "utf8");
   } catch {
@@ -334,22 +334,22 @@ function findRepoIdentityPath(cwd) {
     if (kind === "directory") {
       commonDir = gitEntryPath;
     } else if (kind === "file") {
-      const raw = readFirstLine(gitEntryPath);
+      const raw = readFileSafe(gitEntryPath);
       if (raw === null) return fallback;
       const pointer = parseGitdirPointer(raw);
       if (pointer === null) return fallback;
       const gitdir = resolveGitPointer(worktreeRoot, pointer);
       if (!existsSync2(gitdir)) return fallback;
       const commondirFile = join3(gitdir, "commondir");
-      let resolvedCommon = null;
       if (existsSync2(commondirFile)) {
-        const content = readFirstLine(commondirFile);
-        if (content !== null) {
-          const cdp = parseCommondirPointer(content);
-          if (cdp !== null) resolvedCommon = resolveGitPointer(gitdir, cdp);
-        }
+        const content = readFileSafe(commondirFile);
+        if (content === null) return fallback;
+        const cdp = parseCommondirPointer(content);
+        if (cdp === null) return fallback;
+        commonDir = resolveGitPointer(gitdir, cdp);
+      } else {
+        commonDir = gitdir;
       }
-      commonDir = resolvedCommon ?? gitdir;
     } else {
       return fallback;
     }
