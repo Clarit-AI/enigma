@@ -29,6 +29,32 @@ export interface RequestNameResult {
   ok: boolean;
   errorCode?: string;
   reason?: string;
+  /**
+   * Set (only ever to `true`) on a result for a name the human added to the
+   * request form (Issue #71) that the agent did not ask for — set only after
+   * the name passed `validateName`, so it is safe to render. Lets the outcome
+   * text tell the agent an extra name is not one it requested. Carries no
+   * value and no message.
+   */
+  addedByUser?: true;
+}
+
+// Outcome readers (`consumeOutcome` → `renderOutcome`) receive only the
+// `results` array, not the record, so the count of invalid names the web layer
+// skipped (Issue #71) travels beside that array rather than inside a
+// `RequestNameResult`: an invalid name is never a result, and its text must
+// never be stored anywhere — only how many there were.
+const skippedNameCounts = new WeakMap<RequestNameResult[], number>();
+
+/** Records how many submitted names were skipped as invalid; returns `results` for chaining into `fulfill`. */
+export function annotateSkippedNames(results: RequestNameResult[], count: number): RequestNameResult[] {
+  if (count > 0) skippedNameCounts.set(results, count);
+  return results;
+}
+
+/** How many submitted names were skipped as invalid for this batch (0 when none were recorded). */
+export function getSkippedNameCount(results: RequestNameResult[]): number {
+  return skippedNameCounts.get(results) ?? 0;
 }
 
 export interface RequestRecord {
