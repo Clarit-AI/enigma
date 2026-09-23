@@ -71,18 +71,29 @@ export function registerDoctorTool(server: McpServer): void {
         `Paths: index=${indexPath()} audit=${auditLogPath()} config=${configPath()}`,
       ];
 
-      // Issue #62 + #68: a request/import whose form was already submitted
-      // (the web layer stored the secret independently of this tool call)
-      // but whose outcome no enigma_await/enigma_request/enigma_import call
-      // has ever returned to the model — e.g. the original blocking call
-      // was interrupted before the user submitted. Names and ids only,
-      // never values, per-name `errorCode`, or `reason` text (ADR-001):
-      // failed names are rendered with a static "failed" label only, so the
-      // agent knows not to retry blindly without ever seeing value-bearing
-      // error text. Omitted entirely when there is nothing pending,
-      // matching every other line above that only reports when there's
-      // something to report. Records whose `results` is empty are skipped
-      // at the store layer (nothing to re-await).
+      // Issue #62 + #68 + #40: a request/import whose form was already
+      // submitted (the web layer stored the secret independently of this
+      // tool call) but whose outcome no enigma_await/enigma_request/
+      // enigma_import call has ever returned to the model — e.g. the
+      // original blocking call was interrupted before the user
+      // submitted. Names and ids only, never values, per-name
+      // `errorCode`, or `reason` text (ADR-001). The buckets mirror
+      // `renderOutcome`'s three-way split in `src/mcp/result-text.ts`:
+      //   - "stored: …"        — the per-name write succeeded
+      //   - "failed: …"        — the per-name write was a confirmed refusal
+      //   - "outcome unknown: …" — the per-name write's outcome is unknown
+      //                            (commitImport crashed; the name MAY
+      //                            already be stored, the agent must check
+      //                            before retrying — this is the Issue #40
+      //                            distinction: an unknown outcome is not
+      //                            a confirmed failure, the word "failed"
+      //                            is never used for it).
+      // The store reads `errorCode` only to choose the bucket; it never
+      // appears in the rendered text. Omitted entirely when there is
+      // nothing pending, matching every other line above that only
+      // reports when there's something to report. Records whose `results`
+      // is empty (or whose bucketed lists are all empty) are skipped at
+      // the store layer (nothing to re-await).
       const pendingRequests = RequestStore.listUnconsumedFulfilled();
       if (pendingRequests.length > 0) {
         lines.push(
@@ -91,6 +102,7 @@ export function registerDoctorTool(server: McpServer): void {
             const parts: string[] = [];
             if (r.stored.length > 0) parts.push(`stored: ${r.stored.join(', ')}`);
             if (r.failed.length > 0) parts.push(`failed: ${r.failed.join(', ')}`);
+            if (r.unknown.length > 0) parts.push(`outcome unknown: ${r.unknown.join(', ')}`);
             return `  ${r.id} (${parts.join('; ')}) — call enigma_await(${r.id})`;
           }),
         );

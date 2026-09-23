@@ -287,38 +287,50 @@ export const RequestStore = {
    * design — the revealed value goes only to the human), so a fulfilled
    * reveal has nothing pending for the agent to re-await.
    *
-   * Each entry carries the names split into `stored` (ok === true) and
-   * `failed` (ok === false), so the recovery signal can label a failed
-   * write as such — `call enigma_await(id)` followed by a "failed: C" label
-   * tells the agent not to retry blindly — without ever exposing the
-   * per-name `errorCode` or `reason` text (ADR-001). Names come from
-   * `record.results[*].name` (what the web POST handler actually
-   * processed), not `record.names` (what the agent originally requested):
-   * Issue #68, forward-contract for the extensible request form (#71) that
-   * lets the human add or remove names at submit time. A record whose
-   * `results` is empty is omitted — there are no names to re-await, so the
-   * signal has nothing to say about it. Reading this list never marks
-   * anything consumed, so calling it repeatedly (e.g. from enigma_doctor)
-   * cannot make the signal disappear on its own. Bounded by the same
-   * in-memory TTL/used-grace sweep as every other record; no new
-   * persistence. Lives in the MCP server process only — SessionStart runs
-   * in a separate short-lived subprocess and never reaches this code (see
-   * Issue #68 for the dead-code removal).
+   * Each entry carries the names split into three static buckets, mirroring
+   * the bucketing `renderOutcome` (src/mcp/result-text.ts) uses for the
+   * `enigma_request` / `enigma_await` / `enigma_import` result text:
+   *   - `stored`  — ok === true
+   *   - `failed`  — ok === false AND errorCode !== 'E_OUTCOME_UNKNOWN'
+   *                 (a confirmed refusal: E_VALUE_AMBIGUOUS, E_EXISTS, …)
+   *   - `unknown` — ok === false AND errorCode === 'E_OUTCOME_UNKNOWN'
+   *                 (commitImport crashed after its own internal storage
+   *                 loop — names may genuinely be stored; the agent must
+   *                 check before retrying)
+   * The `errorCode` is read HERE only to choose the bucket — it is never
+   * returned, never logged, never rendered (ADR-001). The recovery signal
+   * surfaces only names and the bucket they fell into.
+   *
+   * Names come from `record.results[*].name` (what the web POST handler
+   * actually processed), not `record.names` (what the agent originally
+   * requested): Issue #68, forward-contract for the extensible request form
+   * (#71) that lets the human add or remove names at submit time. A record
+   * whose `results` is empty, or whose bucketed lists are all empty, is
+   * omitted — there are no names to re-await, so the signal has nothing
+   * to say about it. Reading this list never marks anything consumed, so
+   * calling it repeatedly (e.g. from enigma_doctor) cannot make the
+   * signal disappear on its own. Bounded by the same in-memory
+   * TTL/used-grace sweep as every other record; no new persistence. Lives
+   * in the MCP server process only — SessionStart runs in a separate
+   * short-lived subprocess and never reaches this code (see Issue #68 for
+   * the dead-code removal).
    */
-  listUnconsumedFulfilled(): Array<{ id: string; stored: string[]; failed: string[] }> {
-    const out: Array<{ id: string; stored: string[]; failed: string[] }> = [];
+  listUnconsumedFulfilled(): Array<{ id: string; stored: string[]; failed: string[]; unknown: string[] }> {
+    const out: Array<{ id: string; stored: string[]; failed: string[]; unknown: string[] }> = [];
     for (const record of records.values()) {
       if (record.kind === 'reveal') continue;
       if (record.results === undefined) continue;
       if (record.outcomeConsumedAt !== undefined) continue;
       const stored: string[] = [];
       const failed: string[] = [];
+      const unknown: string[] = [];
       for (const r of record.results) {
         if (r.ok) stored.push(r.name);
+        else if (r.errorCode === 'E_OUTCOME_UNKNOWN') unknown.push(r.name);
         else failed.push(r.name);
       }
-      if (stored.length === 0 && failed.length === 0) continue;
-      out.push({ id: record.id, stored, failed });
+      if (stored.length === 0 && failed.length === 0 && unknown.length === 0) continue;
+      out.push({ id: record.id, stored, failed, unknown });
     }
     return out;
   },
