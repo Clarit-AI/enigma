@@ -5,9 +5,11 @@ import { handleRequest } from './router.js';
 
 const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1000;
-/** Defensive floor on the re-arm delay (Issue #69 AC #9): keeps the timer from
- *  spinning if a future relaxation of `earliestOpenExpiry`'s strict-< filter
- *  ever returns `expiry - now <= 0`. Today the floor is unreachable. */
+/** Defensive floor on the re-arm delay (Issue #69 AC #9): keeps the timer
+ *  from spinning. Reachable in practice, not just defensively — at exactly
+ *  `now === expiresAt` (the boundary `earliestOpenExpiry` treats as still
+ *  open, PR #78 review), `expiry - now + 1` is `1`, so this floor is what
+ *  actually supplies the re-arm delay at that instant. */
 const MIN_REARM_DELAY_MS = 1000;
 
 export interface StartServerOptions {
@@ -43,12 +45,14 @@ function toHandle(s: ServerState): ServerHandle {
 
 /** When the idle timer fires, do not close the server while any `RequestStore`
  *  record is still `open` (Issue #69 §3): `usedAt === undefined &&
- *  now < expiresAt`. Re-arm to the smaller of `idleTimeoutMs` (so a request
- *  created long after the original arm still gets a full idle window on the
- *  next fire) and the moment the earliest open request expires (so the
- *  server stays up until just past the request's TTL, then closes). The
- *  HTTP-triggered `resetIdleTimer` path is unchanged — it still arms the
- *  full `idleTimeoutMs` so the existing per-request-reset test stays green. */
+ *  now <= expiresAt` (boundary decided on PR #78 review — see
+ *  `earliestOpenExpiry`'s own doc comment). Re-arm to the smaller of
+ *  `idleTimeoutMs` (so a request created long after the original arm still
+ *  gets a full idle window on the next fire) and the moment the earliest
+ *  open request expires (so the server stays up until just past the
+ *  request's TTL, then closes). The HTTP-triggered `resetIdleTimer` path is
+ *  unchanged — it still arms the full `idleTimeoutMs` so the existing
+ *  per-request-reset test stays green. */
 function onIdleTimer(): void {
   const current = state;
   if (!current) return;
@@ -117,4 +121,18 @@ export function stopServer(): Promise<void> {
   state = undefined;
   if (current.idleTimer) clearTimeout(current.idleTimer);
   return new Promise((resolve) => current.server.close(() => resolve()));
+}
+
+/**
+ * Test-only: reads whether the server is currently running, and on which
+ * port, with no side effects — unlike `startServer()` (which calls
+ * `resetIdleTimer` whenever a server is already up) or an actual HTTP
+ * request (whose handler does the same), either of which would mask
+ * whether `onIdleTimer`'s own re-arm/close logic — the exact thing a
+ * boundary or long-duration idle-timer test needs to observe — actually
+ * ran (PR #78 review, AC #9 boundary evidence / AC #6 production-duration
+ * evidence).
+ */
+export function __peekServerStateForTests(): { port: number } | undefined {
+  return state ? { port: state.port } : undefined;
 }
