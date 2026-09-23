@@ -258,6 +258,9 @@ function appendAuditEvent(event) {
   appendLineSecure(auditLogPath(), JSON.stringify(line));
 }
 
+// src/core/native-lock.ts
+var HOST_TAG = `${process.platform}-${process.arch}`;
+
 // src/core/index-store.ts
 var EMPTY_INDEX = { version: 1, entries: [] };
 function readIndex() {

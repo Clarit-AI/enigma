@@ -412,8 +412,9 @@ import { existsSync as existsSync3 } from "node:fs";
 import { dirname as dirname3, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 var SUPPORTED_NATIVE_TARGETS = ["darwin-arm64", "darwin-x64", "linux-x64"];
+var HOST_TAG = `${process.platform}-${process.arch}`;
 function nativeTargetTag() {
-  return `${process.platform}-${process.arch}`;
+  return HOST_TAG;
 }
 var cached;
 function candidatePaths(tag) {
