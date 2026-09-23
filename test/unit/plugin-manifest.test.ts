@@ -61,8 +61,8 @@ describe('plugins/enigma/skills/enigma/SKILL.md', () => {
 });
 
 describe('plugins/enigma/commands', () => {
-  const COMMANDS = ['request', 'reveal', 'list', 'doctor', 'import'];
-  const DISABLE_MODEL_INVOCATION = new Set(['reveal', 'import']);
+  const COMMANDS = ['request', 'reveal', 'list', 'doctor', 'import', 'remove'];
+  const DISABLE_MODEL_INVOCATION = new Set(['reveal', 'import', 'remove']);
 
   it.each(COMMANDS)('%s.md exists with a description', (name) => {
     const path = join(PLUGIN_ROOT, 'commands', `${name}.md`);
@@ -81,6 +81,26 @@ describe('plugins/enigma/commands', () => {
     const path = join(PLUGIN_ROOT, 'commands', `${name}.md`);
     const { frontmatter } = readFrontmatter(path);
     expect(frontmatter['disable-model-invocation']).toBeUndefined();
+  });
+
+  describe('remove.md', () => {
+    const { body } = readFrontmatter(join(PLUGIN_ROOT, 'commands', 'remove.md'));
+
+    it('rejects an invalid or extra scope token instead of silently dropping it', () => {
+      expect(body).toMatch(/exactly `project` or `global`/);
+      expect(body).toMatch(/is invalid input\. Do not call the tool/);
+    });
+
+    it('requires an explicit affirmative reply before retrying with confirm: true', () => {
+      expect(body).toContain('E_CONFIRMATION_REQUIRED');
+      expect(body).toContain('confirm: true');
+      expect(body).toMatch(/declines or doesn't answer, stop/);
+    });
+
+    it('does not promise scope as part of the relayed result', () => {
+      expect(body).toMatch(/names, status, and depository/);
+      expect(body).not.toMatch(/scope, and depository/);
+    });
   });
 });
 
