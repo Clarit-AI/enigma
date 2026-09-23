@@ -1,6 +1,6 @@
 import { createRequire } from 'node:module';
 import { existsSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
+import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { EnigmaError } from './errors.js';
 
@@ -33,23 +33,47 @@ export function nativeTargetTag(): string {
 
 let cached: IndexLockAddon | undefined;
 
-function candidatePaths(tag: string): string[] {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const paths: string[] = [];
-  // 1. Explicit override (tests / exotic installs).
+interface ArtifactLocation {
+  path: string;
+  /** Where the location came from — surfaced in failure messages. */
+  origin: 'ENIGMA_NATIVE_DIR' | 'installed package layout' | 'source-tree layout';
+}
+
+/**
+ * The ONE artifact location for the executing module's own layout — or none.
+ * There is deliberately no candidate list and no existence probing across
+ * roots: a missing artifact in the executing package must surface as
+ * E_LOCK_UNAVAILABLE, never silently substitute an addon found in a foreign
+ * checkout, the cwd, or an ancestor directory. The native code and the JS
+ * lock protocol are versioned together, so an addon belonging to a different
+ * tree can be incompatible with this build.
+ *
+ *   - ENIGMA_NATIVE_DIR set → <dir>/<tag>/index-lock.node, AUTHORITATIVE:
+ *     the only location consulted. An absent/corrupt artifact there fails
+ *     closed; the override is never masked by searching elsewhere.
+ *   - module inside `<pkg>/dist/` (bundled install: .mcp.json / bin run
+ *     plugins/enigma/dist/*.mjs) → sibling `<pkg>/native/<tag>/`.
+ *   - module at `<repo>/src/core/` (source tree: vitest, dev runs) →
+ *     `<repo>/plugins/enigma/native/<tag>/`.
+ *   - anything else → undefined: the layout is not a package we shipped, so
+ *     there is no artifact location to trust (set ENIGMA_NATIVE_DIR).
+ */
+function artifactLocation(tag: string): ArtifactLocation | undefined {
   const override = process.env.ENIGMA_NATIVE_DIR;
-  if (override) paths.push(resolve(override, tag, 'index-lock.node'));
-  // 2. Marketplace/bundle layout: this module is inside plugins/enigma/dist/,
-  //    so the committed artifacts live at ../native/<tag>/index-lock.node.
-  paths.push(resolve(here, '..', 'native', tag, 'index-lock.node'));
-  // 3. Source-tree layout (vitest runs TS from src/): ../../plugins/enigma/native/<tag>.
-  paths.push(resolve(here, '..', '..', 'plugins', 'enigma', 'native', tag, 'index-lock.node'));
-  // 4. Repo-root cwd — covers bundles written to a temp dir and spawned from
-  //    the repo root (e.g. test/integration/mcp-server.test.ts). Candidate 2
-  //    always wins inside a real plugin tree, so this cannot shadow an
-  //    installed artifact.
-  paths.push(resolve(process.cwd(), 'plugins', 'enigma', 'native', tag, 'index-lock.node'));
-  return paths;
+  if (override) {
+    return { path: resolve(override, tag, 'index-lock.node'), origin: 'ENIGMA_NATIVE_DIR' };
+  }
+  const here = dirname(fileURLToPath(import.meta.url));
+  if (basename(here) === 'dist') {
+    return { path: resolve(here, '..', 'native', tag, 'index-lock.node'), origin: 'installed package layout' };
+  }
+  if (basename(here) === 'core' && basename(dirname(here)) === 'src') {
+    return {
+      path: resolve(here, '..', '..', 'plugins', 'enigma', 'native', tag, 'index-lock.node'),
+      origin: 'source-tree layout',
+    };
+  }
+  return undefined;
 }
 
 /**
@@ -70,16 +94,28 @@ export function loadIndexLock(): IndexLockAddon {
         'Refusing to run without kernel-held exclusion (no fallback protocol).',
     });
   }
-  const paths = candidatePaths(tag);
-  const found = paths.find((p) => existsSync(p));
-  if (!found) {
+  const artifact = artifactLocation(tag);
+  if (!artifact) {
     throw new EnigmaError({
       code: 'E_LOCK_UNAVAILABLE',
       message:
-        `Enigma's index lock artifact for ${tag} is missing (looked for: ${paths.join(', ')}). ` +
+        `Enigma's index lock cannot locate a native artifact for ${tag}: this module ` +
+        `(${fileURLToPath(import.meta.url)}) is not in a recognized layout ` +
+        '(installed <pkg>/dist or the <repo>/src/core source tree). ' +
+        'Set ENIGMA_NATIVE_DIR to the directory containing the per-platform artifacts; ' +
+        'refusing to run without kernel-held exclusion.',
+    });
+  }
+  if (!existsSync(artifact.path)) {
+    throw new EnigmaError({
+      code: 'E_LOCK_UNAVAILABLE',
+      message:
+        `Enigma's index lock artifact for ${tag} is missing (expected at ${artifact.path} ` +
+        `via ${artifact.origin}${artifact.origin === 'ENIGMA_NATIVE_DIR' ? ' — the override is authoritative; no other location was searched' : ''}). ` +
         'Reinstall the plugin; refusing to run without kernel-held exclusion.',
     });
   }
+  const found = artifact.path;
   try {
     const addon = createRequire(import.meta.url)(found) as IndexLockAddon;
     if (typeof addon.tryLockSync !== 'function' || typeof addon.unlockSync !== 'function') {

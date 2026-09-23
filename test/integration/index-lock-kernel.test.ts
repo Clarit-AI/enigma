@@ -51,6 +51,21 @@ function spawnHold(behavior: 'pause' | 'park'): Promise<{ pid: number; child: Re
   });
 }
 
+/**
+ * SIGKILLs a spawned holder and resolves once its 'exit' event has fired —
+ * the point where the kernel has actually released the holder's flock. The
+ * listener is registered BEFORE the signal so the exit can never be missed,
+ * and an already-dead child resolves immediately (cleanup can never hang).
+ */
+async function killAndWait(child: ReturnType<typeof spawn>): Promise<void> {
+  const exited =
+    child.exitCode === null && child.signalCode === null
+      ? new Promise((resolvePromise) => child.once('exit', resolvePromise))
+      : Promise.resolve();
+  child.kill('SIGKILL');
+  await exited;
+}
+
 function entry(name: string) {
   return {
     name,
@@ -115,7 +130,11 @@ describe('index lock — real processes against the committed flock addon (Issue
       // Never evicted: same inode as the paused holder's anchor.
       expect(statSync(lockPath).ino).toBe(heldIno);
     } finally {
-      child.kill('SIGKILL');
+      // Await the holder's actual death: the kernel drops its flock when the
+      // fd dies with the process, so reacquiring before 'exit' races the
+      // release — the recovery below must observe a DEAD holder, not a
+      // still-dying one.
+      await killAndWait(child);
     }
 
     // The paused holder is dead → the kernel released its lock → recovery

@@ -6,7 +6,8 @@
 // sent and received and asserting the sentinel is absent from all of them.
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import * as esbuild from 'esbuild';
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -52,7 +53,15 @@ async function connect(opts: {
   const transport = new StdioClientTransport({
     command: process.execPath,
     args: [bundledServerPath],
-    env: { ...getDefaultEnvironment(), ENIGMA_HOME: opts.tmpHome },
+    env: {
+      ...getDefaultEnvironment(),
+      ENIGMA_HOME: opts.tmpHome,
+      // The bundle lands in os.tmpdir() — no recognized package layout — so
+      // the index-lock addon location is supplied explicitly (the same
+      // authoritative override an exotic install would use), never derived
+      // from the spawned server's ambient cwd.
+      ENIGMA_NATIVE_DIR: join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'plugins', 'enigma', 'native'),
+    },
   });
 
   const captured: CapturedMessage[] = [];
