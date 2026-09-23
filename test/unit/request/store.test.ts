@@ -264,6 +264,32 @@ describe('RequestStore', () => {
       expect(RequestStore.tryMarkUsed(record.id)).toBeUndefined();
     });
 
+    it('tryMarkUsed on an expired id rejects an outstanding waiter immediately, not only on the sweeper\'s next tick (PR #78 review, finding 2 — the in-flight-POST hang)', async () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 1000 });
+      const waiter = RequestStore.waitForFulfilled(record.id);
+      const assertion = expect(waiter).rejects.toThrow(/request expired/);
+
+      // Simulates the TTL elapsing in the window between the web layer's
+      // initial get(id) lookup and its later tryMarkUsed(id) call — before
+      // expireRecord existed, this deleted the record silently and left
+      // the waiter (an enigma_await caller) hanging forever.
+      vi.advanceTimersByTime(1001);
+      expect(RequestStore.tryMarkUsed(record.id)).toBeUndefined();
+
+      await assertion;
+    });
+
+    it('get on an expired unused id rejects an outstanding waiter too, via the same expireRecord path', async () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 1000 });
+      const waiter = RequestStore.waitForFulfilled(record.id);
+      const assertion = expect(waiter).rejects.toThrow(/request expired/);
+
+      vi.advanceTimersByTime(1001);
+      expect(RequestStore.get(record.id)).toBeUndefined();
+
+      await assertion;
+    });
+
     it('the sweeper rejects an outstanding waiter once its record expires', async () => {
       const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 1000 });
       const waiter = RequestStore.waitForFulfilled(record.id);
@@ -362,9 +388,16 @@ describe('RequestStore', () => {
       expect(RequestStore.earliestOpenExpiry(now)).toBe(later.expiresAt);
     });
 
-    it('boundary: at now === expiresAt the record is NOT open (AC #9, strict `<` matches isExpired)', () => {
-      RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 1000 });
+    it('boundary: at now === expiresAt the record IS still open (PR #78 review decision: open := !isExpired, i.e. now <= expiresAt, matching isExpired\'s own now > expiresAt)', () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 1000 });
       vi.advanceTimersByTime(1000);
+
+      expect(RequestStore.earliestOpenExpiry(Date.now())).toBe(record.expiresAt);
+    });
+
+    it('boundary: one ms past expiresAt the record is no longer open', () => {
+      RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 1000 });
+      vi.advanceTimersByTime(1001);
 
       expect(RequestStore.earliestOpenExpiry(Date.now())).toBeUndefined();
     });

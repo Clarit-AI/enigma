@@ -177,10 +177,13 @@ describe('GET /r/:id/status (Issue #69 §1)', () => {
       body: new URLSearchParams({ OPENAI_API_KEY: 'value', depository: 'encrypted', scope: 'global' }).toString(),
     });
 
-    // Yield enough ticks for the handler to reach setSecret.
-    for (let i = 0; i < 5; i += 1) await new Promise<void>((r) => setImmediate(r));
-
-    expect(setSecret).toHaveBeenCalledTimes(1);
+    // Waits for the handler to actually reach setSecret rather than
+    // assuming a fixed tick count — a fixed-tick delay (PR #78 review,
+    // finding 5) is exactly what made this test flaky under a full
+    // parallel `npm test` run: detectAll() and needsCreateVaultConfirmation()
+    // both do real, variable-latency async work ahead of setSecret, so the
+    // number of ticks needed isn't constant under load.
+    await vi.waitFor(() => expect(setSecret).toHaveBeenCalledTimes(1), { timeout: 5000 });
     const recordDuring = RequestStore.get(record.id);
     expect(recordDuring?.usedAt).toBeDefined();
     expect(recordDuring?.results).toBeUndefined();
