@@ -84,9 +84,19 @@ for (const target of REQUIRED_TARGETS) {
     );
   }
 
-  // 4. Linux libc compatibility record.
+  // 4. Linux libc compatibility record + no C++ runtime dependency (the
+  //    addon is compiled as C; a libstdc++ entry would reintroduce a
+  //    per-toolchain GLIBCXX floor that breaks loads on older distros).
   if (target === 'linux-x64' && !manifest.glibc?.maxRequiredSymbolVersion) {
     problems.push('linux-x64: manifest lacks glibc.maxRequiredSymbolVersion (readelf --version-info audit)');
+  }
+  const needed = manifest.neededLibs;
+  if (target === 'linux-x64') {
+    if (!Array.isArray(needed) || needed.length === 0) {
+      problems.push('linux-x64: manifest lacks neededLibs (readelf -d NEEDED audit)');
+    } else if (needed.some((lib) => /libstdc\+\+|libc\+\+/.test(String(lib)))) {
+      problems.push(`linux-x64: artifact links a C++ runtime (${needed.join(', ')}) — compile as C to keep the libc-only dependency floor`);
+    }
   }
 
   // 3. Load + smoke the COMMITTED artifact — host target only.

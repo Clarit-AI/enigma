@@ -3,7 +3,7 @@
   "target": "darwin-arm64",
   "napiVersion": 8,
   "binary": "index-lock.node",
-  "binarySha256": "0ade9aa97cd24584ea37f22cb986d3b16669bcaccc74a26646252ca7a862ca45",
+  "binarySha256": "a54388e32fa27e0fb300b19ef3f44c6cd603135b3af31600fb912fef1796dc15",
   "sourceSha256": "ba713e34567192e700161b2ff2fc7486195a562eb1e50e17d1d7334bd229bfb1",
   "sourceFiles": [
     "include/js_native_api.h",
@@ -12,9 +12,9 @@
     "include/node_api_types.h",
     "index-lock.cc"
   ],
-  "builtAt": "2026-09-23T20:17:42.895Z",
+  "builtAt": "2026-09-23T20:36:33.937Z",
   "builder": "scripts/build-native.mjs",
-  "buildCommand": "clang++ -std=c++17 -O2 -fPIC -arch arm64 -bundle -undefined dynamic_lookup -DNAPI_VERSION=8 -I native/include -o /Users/bbrenner/.traycer/worktrees/clarit-ai__enigma/feat-66-index-lock/plugins/enigma/native/darwin-arm64/index-lock.node native/index-lock.cc",
+  "buildCommand": "clang -x c -std=c11 -O2 -fPIC -arch arm64 -bundle -undefined dynamic_lookup -DNAPI_VERSION=8 -I native/include -o /Users/bbrenner/.traycer/worktrees/clarit-ai__enigma/feat-66-index-lock/plugins/enigma/native/darwin-arm64/index-lock.node native/index-lock.cc",
   "toolchain": "Apple clang version 21.0.0 (clang-2100.3.34.2)",
   "buildHost": "host darwin-arm64, macOS cross -arch arm64",
   "notes": "sourceSha256 is staleness metadata, not proof the binary came from these sources (builds are not byte-reproducible); binarySha256 pins the shipped bytes. See native/PROVENANCE.md."

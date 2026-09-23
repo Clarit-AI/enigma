@@ -3,7 +3,7 @@
   "target": "linux-x64",
   "napiVersion": 8,
   "binary": "index-lock.node",
-  "binarySha256": "7120dc6bcde3fbd92d2497d179669706669ec8b7e13f6fd970a8d11839c0f419",
+  "binarySha256": "bb16dd33d87a930062e06facc77c6158e30b372fee04ab75b52bbecd32bc1e99",
   "sourceSha256": "ba713e34567192e700161b2ff2fc7486195a562eb1e50e17d1d7334bd229bfb1",
   "sourceFiles": [
     "include/js_native_api.h",
@@ -12,14 +12,18 @@
     "include/node_api_types.h",
     "index-lock.cc"
   ],
-  "builtAt": "2026-09-23T20:17:58.406Z",
+  "builtAt": "2026-09-23T20:36:21.566Z",
   "builder": "scripts/build-native.mjs",
-  "buildCommand": "docker run --rm -v /Users/bbrenner/.traycer/worktrees/clarit-ai__enigma/feat-66-index-lock:/src -v /Users/bbrenner/.traycer/worktrees/clarit-ai__enigma/feat-66-index-lock/plugins/enigma/native/linux-x64:/out -w /src node:20-bookworm g++ -std=c++17 -O2 -fPIC -shared -DNAPI_VERSION=8 -I native/include -o /out/index-lock.node native/index-lock.cc",
-  "toolchain": "g++ (Debian 12.2.0-14+deb12u1) 12.2.0",
+  "buildCommand": "docker run --rm -v /Users/bbrenner/.traycer/worktrees/clarit-ai__enigma/feat-66-index-lock:/src -v /Users/bbrenner/.traycer/worktrees/clarit-ai__enigma/feat-66-index-lock/plugins/enigma/native/linux-x64:/out -w /src node:20-bookworm gcc -x c -std=c11 -O2 -fPIC -shared -DNAPI_VERSION=8 -I native/include -o /out/index-lock.node native/index-lock.cc",
+  "toolchain": "gcc (Debian 12.2.0-14+deb12u1) 12.2.0",
   "buildHost": "docker node:20-bookworm",
   "glibc": {
     "maxRequiredSymbolVersion": "GLIBC_2.17",
     "audit": "readelf --version-info"
   },
+  "neededLibs": [
+    "libc.so.6"
+  ],
+  "audit": "readelf -d (NEEDED)",
   "notes": "sourceSha256 is staleness metadata, not proof the binary came from these sources (builds are not byte-reproducible); binarySha256 pins the shipped bytes. See native/PROVENANCE.md."
 }
