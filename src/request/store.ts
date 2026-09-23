@@ -133,11 +133,45 @@ function startSweeper(): void {
   sweepTimer.unref();
 }
 
+/**
+ * A request whose single-use token was already consumed (the human submitted
+ * the form, `tryMarkUsed` returned a record), but whose per-name `results`
+ * were never recorded — `fulfill` never ran for it. Distinct from
+ * `new Error('request expired')`, which `sweep` only ever throws for a
+ * record that was never used in the first place. `await.ts`/`request.ts` map
+ * this to `E_OUTCOME_UNKNOWN` (the names MAY already be stored — the
+ * web layer's independent write loop in `request-form.ts` could have
+ * completed some names before crashing); `E_REQUEST_EXPIRED` stays reserved
+ * for a record that was never used (Issue #69 AC #5).
+ */
+export class OutcomeUnknownError extends Error {
+  readonly names: string[];
+  constructor(names: string[]) {
+    super('request swept without outcome');
+    this.name = 'OutcomeUnknownError';
+    this.names = [...names];
+    Object.setPrototypeOf(this, OutcomeUnknownError.prototype);
+  }
+}
+
 function sweep(): void {
   const now = Date.now();
   for (const [id, record] of records) {
     if (record.usedAt !== undefined) {
-      if (now - record.usedAt > USED_GRACE_MS) records.delete(id);
+      // fulfill() defaults `results` to [] (a reveal calls fulfill(id)
+      // without results, since it has no per-name write outcome to report),
+      // so `results === undefined` is the single, uniform test for
+      // "fulfilled never ran" across every kind — request, reveal, import.
+      if (now - record.usedAt > USED_GRACE_MS) {
+        if (record.results === undefined) {
+          const waiter = waiters.get(id);
+          if (waiter) {
+            waiter.reject(new OutcomeUnknownError(record.names));
+            waiters.delete(id);
+          }
+        }
+        records.delete(id);
+      }
       continue;
     }
     if (isExpired(record, now)) {
@@ -304,6 +338,33 @@ export const RequestStore = {
       out.push({ id: record.id, names: [...record.names] });
     }
     return out;
+  },
+
+  /**
+   * Names-free query for the smallest `expiresAt` of any record that is
+   * currently `open` (Issue #69 AC #3 + §3): `usedAt === undefined &&
+   * now < expiresAt`. The strict `<` matters because `isExpired` uses
+   * `now > expiresAt`, so at exactly `now === expiresAt` a record is open
+   * (not yet expired) and the server's idle timer must re-arm with a
+   * positive delay rather than spin — a plain `<=` would drop that
+   * boundary record at the instant the timer fires (AC #9). Used by
+   * `src/web/server.ts` to decide whether to close or re-arm the idle
+   * timer. Returns `undefined` when no record is open, so the server
+   * falls back to its existing close behavior. Deliberately returns a
+   * timestamp and not a record: the server only needs the moment to
+   * close at, and exposing a record here would risk names or values
+   * ever reaching it through a future caller.
+   */
+  earliestOpenExpiry(now: number): number | undefined {
+    let earliest: number | undefined;
+    for (const record of records.values()) {
+      if (record.usedAt !== undefined) continue;
+      if (now >= record.expiresAt) continue;
+      if (earliest === undefined || record.expiresAt < earliest) {
+        earliest = record.expiresAt;
+      }
+    }
+    return earliest;
   },
 
   /** Test-only: clears all records/waiters and stops the sweeper so state never leaks between test files. */

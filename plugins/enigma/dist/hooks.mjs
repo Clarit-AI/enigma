@@ -1023,11 +1023,29 @@ function startSweeper() {
   sweepTimer = setInterval(sweep, SWEEP_INTERVAL_MS);
   sweepTimer.unref();
 }
+var OutcomeUnknownError = class _OutcomeUnknownError extends Error {
+  names;
+  constructor(names) {
+    super("request swept without outcome");
+    this.name = "OutcomeUnknownError";
+    this.names = [...names];
+    Object.setPrototypeOf(this, _OutcomeUnknownError.prototype);
+  }
+};
 function sweep() {
   const now = Date.now();
   for (const [id, record] of records) {
     if (record.usedAt !== void 0) {
-      if (now - record.usedAt > USED_GRACE_MS) records.delete(id);
+      if (now - record.usedAt > USED_GRACE_MS) {
+        if (record.results === void 0) {
+          const waiter = waiters.get(id);
+          if (waiter) {
+            waiter.reject(new OutcomeUnknownError(record.names));
+            waiters.delete(id);
+          }
+        }
+        records.delete(id);
+      }
       continue;
     }
     if (isExpired(record, now)) {
@@ -1182,6 +1200,32 @@ var RequestStore = {
       out.push({ id: record.id, names: [...record.names] });
     }
     return out;
+  },
+  /**
+   * Names-free query for the smallest `expiresAt` of any record that is
+   * currently `open` (Issue #69 AC #3 + §3): `usedAt === undefined &&
+   * now < expiresAt`. The strict `<` matters because `isExpired` uses
+   * `now > expiresAt`, so at exactly `now === expiresAt` a record is open
+   * (not yet expired) and the server's idle timer must re-arm with a
+   * positive delay rather than spin — a plain `<=` would drop that
+   * boundary record at the instant the timer fires (AC #9). Used by
+   * `src/web/server.ts` to decide whether to close or re-arm the idle
+   * timer. Returns `undefined` when no record is open, so the server
+   * falls back to its existing close behavior. Deliberately returns a
+   * timestamp and not a record: the server only needs the moment to
+   * close at, and exposing a record here would risk names or values
+   * ever reaching it through a future caller.
+   */
+  earliestOpenExpiry(now) {
+    let earliest;
+    for (const record of records.values()) {
+      if (record.usedAt !== void 0) continue;
+      if (now >= record.expiresAt) continue;
+      if (earliest === void 0 || record.expiresAt < earliest) {
+        earliest = record.expiresAt;
+      }
+    }
+    return earliest;
   },
   /** Test-only: clears all records/waiters and stops the sweeper so state never leaks between test files. */
   __resetForTests() {
