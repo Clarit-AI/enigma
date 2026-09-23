@@ -1,6 +1,7 @@
-import { readFileSync, readdirSync } from 'node:fs';
+import { chmodSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { dirname, join, relative } from 'node:path';
+import { basename, dirname, join, relative } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 // Issue #38: `scripts/leak-fence.mjs` matches value-returning CALL shapes; it
@@ -114,10 +115,18 @@ function walkTsFiles(dir: string): string[] {
     // leak-fence's security fixtures (test/security/leak-fence.test.ts) are
     // written into real src/ paths mid-run — the fence scans the real tree, so
     // they must live there — and deleted in that file's afterEach. Under full
-    // parallel `npm test` this walk can observe one half-created or watch it
-    // vanish before the readFileSync below (ENOENT), which is exactly the
-    // flake this skip closes: those fixtures are ephemeral test artifacts,
-    // never RequestNameResult surfaces to register.
+    // parallel `npm test` this walk can list one that is deleted before the
+    // read below. This NAME-BASED skip is the whole fixture-race handling
+    // (PR #78 review): known __leak-fence-fixture-* entries are ephemeral
+    // test artifacts, never RequestNameResult surfaces to register.
+    //
+    // Deliberately NO catch around the later read: a read error on any OTHER
+    // file must propagate and fail this inventory. Swallowing errors there
+    // would drop the file from the scan — silently hiding a possible
+    // unregistered surface, which is the exact failure this registry exists
+    // to prevent. The fixture-name skip above is the only transient condition
+    // treated as "not a surface", and only because those names are a proven
+    // fixture convention of one test file.
     if (entry.name.startsWith('__leak-fence-fixture-')) continue;
     const full = join(dir, entry.name);
     if (entry.isDirectory()) out.push(...walkTsFiles(full));
@@ -126,21 +135,25 @@ function walkTsFiles(dir: string): string[] {
   return out;
 }
 
+/** Every .ts file under root whose text references RequestNameResult. */
+function listTsFilesReferencing(root: string): string[] {
+  return readReferencingFiles(walkTsFiles(root))
+    .map((f) => relative(REPO_ROOT, f))
+    .sort();
+}
+
+/**
+ * Read stage of the inventory (PR #78 review: kept separately testable so the
+ * negative path is provable): a read error on ANY path here propagates — only
+ * walkTsFiles' fixture-name skip, never this read, decides "not a surface".
+ */
+function readReferencingFiles(paths: string[]): string[] {
+  return paths.filter((f) => TYPE_REFERENCE.test(readFileSync(f, 'utf8')));
+}
+
 describe('RequestNameResult.reason surfaces are tracked systematically (Issue #38)', () => {
   it('every src/ file referencing RequestNameResult is registered in SURFACES', () => {
-    const referencing = walkTsFiles(join(REPO_ROOT, 'src'))
-      .filter((f) => {
-        // A file can still vanish between readdirSync and this read when
-        // leak-fence fixtures are cleaned up concurrently (see walkTsFiles);
-        // a file that no longer exists is not an unregistered surface.
-        let text: string;
-        try {
-          text = readFileSync(f, 'utf8');
-        } catch {
-          return false;
-        }
-        return TYPE_REFERENCE.test(text);
-      })
+    const referencing = listTsFilesReferencing(join(REPO_ROOT, 'src'))
       .map((f) => relative(REPO_ROOT, f))
       .sort();
     const registered = SURFACES.map((s) => s.file).sort();
@@ -153,6 +166,77 @@ describe('RequestNameResult.reason surfaces are tracked systematically (Issue #3
         'empty array if it never sets reason), and give it a sentinel test if it renders `reason` ' +
         'toward a model, browser response, or CLI stdout.',
     ).toEqual(registered);
+  });
+
+  it('a non-fixture file that vanishes before the read is an ERROR, not a silent "no surface" (PR #78 review negative path)', () => {
+    // Proves the read stage propagates instead of swallowing: a listed file
+    // is deleted after walkTsFiles, so readFileSync throws ENOENT. A broad
+    // catch would turn this into "the file references nothing" and quietly
+    // drop a possible unregistered surface from the inventory — the exact
+    // regression this guards against. No fixtures involved, so the
+    // fixture-name exclusion cannot be what saves this run.
+    const dir = mkdtempSync(join(tmpdir(), 'reason-field-vanish-'));
+    try {
+      writeFileSync(join(dir, 'kept.ts'), 'export type K = RequestNameResult;\n');
+      const doomed = join(dir, 'doomed.ts');
+      writeFileSync(doomed, 'export type D = RequestNameResult;\n');
+
+      const listed = walkTsFiles(dir);
+      expect(listed.map((f) => basename(f)).sort()).toEqual(['doomed.ts', 'kept.ts']);
+
+      rmSync(doomed);
+      expect(() => readReferencingFiles(listed), 'a non-fixture read error must propagate').toThrow(
+        /ENOENT/,
+      );
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('an unreadable non-fixture surface file throws — it cannot be silently omitted as "no surface" (PR #78 review negative path)', () => {
+    // The lead's exact concern: a newly added file that DOES reference
+    // RequestNameResult but cannot be read. A broad catch around the read
+    // would return false for it and quietly drop it from the inventory,
+    // leaving an unregistered surface invisible to this test. With errors
+    // propagating, the read throws and the inventory fails loudly instead.
+    // Unreadable-but-existing is distinct from the vanished case above: the
+    // path is still there at read time (chmod, not delete), so no fixture
+    // race is involved and the name exclusion cannot apply.
+    const dir = mkdtempSync(join(tmpdir(), 'reason-field-unreadable-'));
+    const target = join(dir, 'hidden-surface.ts');
+    try {
+      writeFileSync(target, 'export type H = RequestNameResult;\n');
+      expect(readReferencingFiles(walkTsFiles(dir)).map((f) => basename(f))).toEqual(['hidden-surface.ts']);
+
+      chmodSync(target, 0o000);
+      expect(
+        () => listTsFilesReferencing(dir),
+        'an unreadable non-fixture file must fail the inventory, never be read as "references nothing"',
+      ).toThrow();
+
+      chmodSync(target, 0o644);
+      expect(readReferencingFiles(walkTsFiles(dir)).map((f) => basename(f))).toEqual(['hidden-surface.ts']);
+    } finally {
+      chmodSync(target, 0o644);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  it('fixture-named entries are excluded by NAME before any read (the narrow exclusion, PR #78 review)', () => {
+    // Positive control for the exclusion being name-based and fixture-scoped:
+    // a __leak-fence-fixture-* file is never listed, so there is nothing to
+    // read and nothing to error on — while a sibling non-fixture .ts with
+    // identical content is listed and read normally.
+    const dir = mkdtempSync(join(tmpdir(), 'reason-field-fixture-'));
+    try {
+      writeFileSync(join(dir, '__leak-fence-fixture-demo__.ts'), 'export type F = RequestNameResult;\n');
+      writeFileSync(join(dir, 'real.ts'), 'export type R = RequestNameResult;\n');
+
+      expect(walkTsFiles(dir).map((f) => basename(f))).toEqual(['real.ts']);
+      expect(readReferencingFiles(walkTsFiles(dir)).map((f) => basename(f))).toEqual(['real.ts']);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 
   for (const surface of SURFACES.filter((s) => s.reasonAssignments !== undefined)) {
