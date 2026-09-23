@@ -15,8 +15,20 @@ export interface IndexLockAddon {
 /** Platforms with a committed artifact under `plugins/enigma/native/<tag>/`. */
 export const SUPPORTED_NATIVE_TARGETS = ['darwin-arm64', 'darwin-x64', 'linux-x64'] as const;
 
+/**
+ * The host's platform/arch, bound at MODULE EVALUATION. process.platform is
+ * a process-lifetime constant in production; binding it here also keeps test
+ * suites that stub `process.platform` (the macOS native-dialog suites run
+ * `Object.defineProperty(process, 'platform', { value: 'darwin' })` in
+ * beforeEach) from redirecting addon selection — the index lock is a HOST
+ * facility and always loads the artifact for the machine the process runs
+ * on. Per-call evaluation would make such a test dlopen a Mach-O on Linux
+ * ("invalid ELF header") or vice versa.
+ */
+const HOST_TAG = `${process.platform}-${process.arch}`;
+
 export function nativeTargetTag(): string {
-  return `${process.platform}-${process.arch}`;
+  return HOST_TAG;
 }
 
 let cached: IndexLockAddon | undefined;
