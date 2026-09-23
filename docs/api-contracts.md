@@ -18,7 +18,7 @@ Every tool result is text and contains names, depository ids, scopes, and status
 
 `DepositoryId = "env" | "encrypted" | "keychain" | "secret-service" | "1password"`.
 
-Errors: `isError: true`, text `E_CODE: message` (no values). `E_EXISTS` when `rotate` is not set for an existing name.
+Errors: `isError: true`, text `E_CODE: message` (no values). `E_EXISTS` when `rotate` is not set for an existing name. `E_OUTCOME_UNKNOWN` (Issue #69 AC #5): `enigma_await` and blocking `enigma_request` could not determine whether the declared names were stored — the single-use token was consumed (the human submitted the form) but `fulfill` never ran before the used-record grace period elapsed; the message names the declared names and tells the agent to run `enigma list` to verify, never carries a value. `E_REQUEST_EXPIRED` stays reserved for a record that was never used in the first place.
 
 `confirmCreateVault` (Issue #28) is the explicit, one-time user confirmation to create a depository's backing collection when it doesn't exist yet — currently only 1Password's `Enigma` vault. It is never defaulted to true anywhere. `enigma_request`'s `ui:"native"` path consumes it directly: an unconfirmed `E_VAULT_MISSING` is asked about via form-mode elicitation (a yes/no confirmation is not a credential, so form mode is permitted here — same reasoning as `enigma_remove`'s confirmation) before falling back to a client without form-elicitation support. The URL-mode path doesn't need the field itself — its actual write happens on the human's web form (`POST /r/:id`, §2), which asks for the same confirmation there. `enigma add` (§3) exposes the identical confirmation as `--confirm-create-vault`.
 
@@ -28,6 +28,7 @@ Errors: `isError: true`, text `E_CODE: message` (no values). `E_EXISTS` when `ro
 |---|---|---|
 | `GET /r/:id` | request form | 404 unknown/expired, 410 used |
 | `POST /r/:id` | submit values | body `application/x-www-form-urlencoded` or JSON: `{ values: { NAME: string }, depository, scope }`; atomic single-use; 200 done page; 410 on replay; 413 over 64 KB |
+| `GET /r/:id/status` | cheap state-only poll for host background-watch tools (Issue #69 §1) | 200 `{"state":"pending"}` while the human hasn't submitted, `{"state":"fulfilled"}` once results are recorded; 404 unknown/expired/swept or when the id is not `kind === 'request'` (so the route never confirms other kinds exist); no names, no values, never calls `consumeOutcome` |
 | `GET /v/:id` | reveal page shell (no value) | 404/410 as above |
 | `POST /v/:id/reveal` | returns the value once, burns the id | JSON `{ name, value }`; only route that ever carries a value; never logged |
 | `GET /static/*` | css/js | CSP `script-src 'self'` |
