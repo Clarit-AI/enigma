@@ -7,6 +7,7 @@ import { handleRequestStatusGet } from './routes/request-status.js';
 import { handleRevealGet, handleRevealPost } from './routes/reveal.js';
 import { REVEAL_CLIENT_JS } from './static/reveal-script.js';
 import { REQUEST_DONE_CLIENT_JS } from './static/request-done-script.js';
+import { REQUEST_FORM_CLIENT_JS } from './static/request-form-script.js';
 
 const ID = '[0-9a-f]{32}';
 const REQUEST_PATH = new RegExp(`^/r/(${ID})$`);
@@ -38,6 +39,11 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse): 
     }
     if (method === 'GET' && pathname === '/static/request-done.js') {
       sendStaticJs(res, REQUEST_DONE_CLIENT_JS);
+      return;
+    }
+
+    if (method === 'GET' && pathname === '/static/request-form.js') {
+      sendStaticJs(res, REQUEST_FORM_CLIENT_JS);
       return;
     }
 

@@ -18,8 +18,9 @@
   @media (prefers-color-scheme: dark) {
     body { color: #e4e4e7; background: #18181b; }
     .card, fieldset { border-color: #3f3f46 !important; background: #27272a !important; }
-    input, select { background: #18181b !important; color: #e4e4e7 !important; border-color: #3f3f46 !important; }
+    input, select, textarea { background: #18181b !important; color: #e4e4e7 !important; border-color: #3f3f46 !important; }
     button[type="submit"] { background: #e4e4e7 !important; color: #18181b !important; }
+    button.secondary { background: transparent !important; color: #e4e4e7 !important; border-color: #3f3f46 !important; }
     .warn { background: #422006 !important; color: #fde68a !important; }
     .error { background: #450a0a !important; color: #fecaca !important; }
   }
@@ -30,8 +31,17 @@
   fieldset { border: 1px solid #e4e4e7; border-radius: 10px; margin: 0 0 12px; padding: 12px; }
   legend { padding: 0 6px; font-weight: 600; font-size: 0.9rem; }
   label { display: block; font-size: 0.85rem; margin: 10px 0 4px; }
-  input[type="password"], input[type="text"], select {
+  input[type="password"], input[type="text"], select, textarea {
     width: 100%; padding: 10px; border: 1px solid #d4d4d8; border-radius: 8px; font-size: 1rem;
+  }
+  textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9rem; resize: vertical; }
+  .extra-row { display: grid; gap: 6px; margin: 10px 0 0; padding-top: 10px; border-top: 1px solid #e4e4e7; }
+  .extra-row input { margin: 0; }
+  details { margin: 0 0 12px; }
+  summary { cursor: pointer; font-size: 0.9rem; font-weight: 600; padding: 4px 0; }
+  button.secondary {
+    padding: 8px 12px; border: 1px solid #d4d4d8; border-radius: 8px;
+    background: transparent; color: inherit; font-size: 0.9rem; cursor: pointer; margin: 4px 0 12px;
   }
   .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
   .checkbox-row label { margin: 0; }
@@ -78,6 +88,25 @@
       <!--/BLOCK:NAME_ROW-->
 
       <fieldset>
+        <legend>More secrets (optional)</legend>
+        <p class="muted">Store additional names alongside the requested ones. They share the depository, scope, and rotate choice below.</p>
+        <div id="extra-rows"></div>
+        <!-- Progressive enhancement: hidden until /static/request-form.js is running, so a page without script never shows a dead control. -->
+        <button type="button" class="secondary" id="add-secret" hidden>+ Add secret</button>
+        <template id="extra-row-template">
+          <div class="extra-row">
+            <input type="text" data-extra="name" placeholder="SECRET_NAME" aria-label="Additional secret name" autocomplete="off" autocapitalize="characters" spellcheck="false" />
+            <input type="password" data-extra="value" placeholder="Value" aria-label="Additional secret value" autocomplete="off" />
+          </div>
+        </template>
+        <details>
+          <summary>Paste a .env blob</summary>
+          <label for="dotenv_blob">KEY=value lines; each valid name is stored</label>
+          <textarea id="dotenv_blob" name="dotenv_blob" rows="6" autocomplete="off" spellcheck="false" placeholder="DATABASE_URL=...&#10;DIRECT_URL=..."></textarea>
+        </details>
+      </fieldset>
+
+      <fieldset>
         <legend>Where to store it</legend>
         <label for="depository">Depository</label>
         <select id="depository" name="depository">
@@ -108,5 +137,6 @@
       <button type="submit">Submit</button>
     </form>
   </div>
+  <script src="/static/request-form.js"></script>
 </body>
 </html>

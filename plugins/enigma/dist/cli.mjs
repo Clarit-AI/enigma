@@ -1556,36 +1556,16 @@ async function cmdGet(argv) {
 import { existsSync as existsSync8, readFileSync as readFileSync6 } from "node:fs";
 import { isAbsolute, join as join5 } from "node:path";
 
-// src/mcp/result-text.ts
-function findJustWrittenEntry(name, cwd) {
-  const entries = listSecrets({ scope: "all", cwd }).filter((e) => e.name === name);
-  if (entries.length <= 1) return entries[0];
-  return entries.reduce((latest, entry) => entry.updatedAt > latest.updatedAt ? entry : latest);
-}
-function renderStoredLine(name, cwd) {
-  const entry = findJustWrittenEntry(name, cwd);
-  return entry ? `Stored ${name} in ${entry.depository} (${entry.scope})` : `Stored ${name}`;
-}
-function renderStoredLines(names, cwd) {
-  return names.map((name) => renderStoredLine(name, cwd));
-}
-function renderOutcome(results, cwd) {
-  const failed = results.filter((r) => !r.ok && r.errorCode !== "E_OUTCOME_UNKNOWN");
-  const unknown = results.filter((r) => !r.ok && r.errorCode === "E_OUTCOME_UNKNOWN");
-  const succeeded = results.filter((r) => r.ok);
-  const lines = [
-    ...failed.map((r) => r.reason ? `${r.name}: failed (${r.errorCode ?? "E_UNKNOWN"}) \u2014 ${r.reason}` : `${r.name}: failed (${r.errorCode ?? "E_UNKNOWN"})`),
-    ...unknown.map((r) => `${r.name}: outcome unknown (E_OUTCOME_UNKNOWN)`),
-    ...renderStoredLines(succeeded.map((r) => r.name), cwd)
-  ];
-  if (unknown.length > 0) {
-    lines.push("Some secrets may already be stored \u2014 run `enigma list` or `enigma doctor` to check before retrying.");
-  }
-  return { text: lines.join("\n"), isError: succeeded.length === 0 };
-}
-
 // src/request/store.ts
 import { randomBytes as randomBytes3 } from "node:crypto";
+var skippedNameCounts = /* @__PURE__ */ new WeakMap();
+function annotateSkippedNames(results, count) {
+  if (count > 0) skippedNameCounts.set(results, count);
+  return results;
+}
+function getSkippedNameCount(results) {
+  return skippedNameCounts.get(results) ?? 0;
+}
 var REQUEST_TTL_MS = 15 * 60 * 1e3;
 var REVEAL_TTL_MS = 5 * 60 * 1e3;
 var SWEEP_INTERVAL_MS = 60 * 1e3;
@@ -1892,6 +1872,41 @@ var RequestStore = {
     }
   }
 };
+
+// src/mcp/result-text.ts
+function findJustWrittenEntry(name, cwd) {
+  const entries = listSecrets({ scope: "all", cwd }).filter((e) => e.name === name);
+  if (entries.length <= 1) return entries[0];
+  return entries.reduce((latest, entry) => entry.updatedAt > latest.updatedAt ? entry : latest);
+}
+function renderStoredLine(name, cwd) {
+  const entry = findJustWrittenEntry(name, cwd);
+  return entry ? `Stored ${name} in ${entry.depository} (${entry.scope})` : `Stored ${name}`;
+}
+var ADDED_BY_USER_SUFFIX = " \u2014 added by user";
+function addedByUserSuffix(result) {
+  return result.addedByUser ? ADDED_BY_USER_SUFFIX : "";
+}
+function renderOutcome(results, cwd) {
+  const failed = results.filter((r) => !r.ok && r.errorCode !== "E_OUTCOME_UNKNOWN");
+  const unknown = results.filter((r) => !r.ok && r.errorCode === "E_OUTCOME_UNKNOWN");
+  const succeeded = results.filter((r) => r.ok);
+  const lines = [
+    ...failed.map(
+      (r) => (r.reason ? `${r.name}: failed (${r.errorCode ?? "E_UNKNOWN"}) \u2014 ${r.reason}` : `${r.name}: failed (${r.errorCode ?? "E_UNKNOWN"})`) + addedByUserSuffix(r)
+    ),
+    ...unknown.map((r) => `${r.name}: outcome unknown (E_OUTCOME_UNKNOWN)${addedByUserSuffix(r)}`),
+    ...succeeded.map((r) => renderStoredLine(r.name, cwd) + addedByUserSuffix(r))
+  ];
+  if (unknown.length > 0) {
+    lines.push("Some secrets may already be stored \u2014 run `enigma list` or `enigma doctor` to check before retrying.");
+  }
+  const skipped = getSkippedNameCount(results);
+  if (skipped > 0) {
+    lines.push(`${skipped} invalid ${skipped === 1 ? "name" : "names"} skipped`);
+  }
+  return { text: lines.join("\n"), isError: succeeded.length === 0 };
+}
 
 // src/storage/dotenv-file.ts
 var BEGIN_MARKER2 = "# enigma:begin";
@@ -2211,8 +2226,9 @@ var request_form_default = `<!doctype html>
   @media (prefers-color-scheme: dark) {
     body { color: #e4e4e7; background: #18181b; }
     .card, fieldset { border-color: #3f3f46 !important; background: #27272a !important; }
-    input, select { background: #18181b !important; color: #e4e4e7 !important; border-color: #3f3f46 !important; }
+    input, select, textarea { background: #18181b !important; color: #e4e4e7 !important; border-color: #3f3f46 !important; }
     button[type="submit"] { background: #e4e4e7 !important; color: #18181b !important; }
+    button.secondary { background: transparent !important; color: #e4e4e7 !important; border-color: #3f3f46 !important; }
     .warn { background: #422006 !important; color: #fde68a !important; }
     .error { background: #450a0a !important; color: #fecaca !important; }
   }
@@ -2223,8 +2239,17 @@ var request_form_default = `<!doctype html>
   fieldset { border: 1px solid #e4e4e7; border-radius: 10px; margin: 0 0 12px; padding: 12px; }
   legend { padding: 0 6px; font-weight: 600; font-size: 0.9rem; }
   label { display: block; font-size: 0.85rem; margin: 10px 0 4px; }
-  input[type="password"], input[type="text"], select {
+  input[type="password"], input[type="text"], select, textarea {
     width: 100%; padding: 10px; border: 1px solid #d4d4d8; border-radius: 8px; font-size: 1rem;
+  }
+  textarea { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9rem; resize: vertical; }
+  .extra-row { display: grid; gap: 6px; margin: 10px 0 0; padding-top: 10px; border-top: 1px solid #e4e4e7; }
+  .extra-row input { margin: 0; }
+  details { margin: 0 0 12px; }
+  summary { cursor: pointer; font-size: 0.9rem; font-weight: 600; padding: 4px 0; }
+  button.secondary {
+    padding: 8px 12px; border: 1px solid #d4d4d8; border-radius: 8px;
+    background: transparent; color: inherit; font-size: 0.9rem; cursor: pointer; margin: 4px 0 12px;
   }
   .checkbox-row { display: flex; align-items: center; gap: 8px; margin-top: 10px; }
   .checkbox-row label { margin: 0; }
@@ -2271,6 +2296,25 @@ var request_form_default = `<!doctype html>
       <!--/BLOCK:NAME_ROW-->
 
       <fieldset>
+        <legend>More secrets (optional)</legend>
+        <p class="muted">Store additional names alongside the requested ones. They share the depository, scope, and rotate choice below.</p>
+        <div id="extra-rows"></div>
+        <!-- Progressive enhancement: hidden until /static/request-form.js is running, so a page without script never shows a dead control. -->
+        <button type="button" class="secondary" id="add-secret" hidden>+ Add secret</button>
+        <template id="extra-row-template">
+          <div class="extra-row">
+            <input type="text" data-extra="name" placeholder="SECRET_NAME" aria-label="Additional secret name" autocomplete="off" autocapitalize="characters" spellcheck="false" />
+            <input type="password" data-extra="value" placeholder="Value" aria-label="Additional secret value" autocomplete="off" />
+          </div>
+        </template>
+        <details>
+          <summary>Paste a .env blob</summary>
+          <label for="dotenv_blob">KEY=value lines; each valid name is stored</label>
+          <textarea id="dotenv_blob" name="dotenv_blob" rows="6" autocomplete="off" spellcheck="false" placeholder="DATABASE_URL=...&#10;DIRECT_URL=..."></textarea>
+        </details>
+      </fieldset>
+
+      <fieldset>
         <legend>Where to store it</legend>
         <label for="depository">Depository</label>
         <select id="depository" name="depository">
@@ -2301,6 +2345,7 @@ var request_form_default = `<!doctype html>
       <button type="submit">Submit</button>
     </form>
   </div>
+  <script src="/static/request-form.js"></script>
 </body>
 </html>
 `;
@@ -2492,6 +2537,22 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
     req.on("error", settleError);
   });
 }
+var EXTRA_NAME_FIELD = /^extra_name_(\d{1,6})$/;
+function readExtraRows(params) {
+  const indexes = /* @__PURE__ */ new Set();
+  for (const key of params.keys()) {
+    const match = key.match(EXTRA_NAME_FIELD);
+    if (match) indexes.add(Number(match[1]));
+  }
+  const rows = [];
+  for (const n of [...indexes].sort((a, b) => a - b)) {
+    const name = params.get(`extra_name_${n}`) ?? "";
+    const value = params.get(`extra_value_${n}`) ?? "";
+    if (name === "" && value === "") continue;
+    rows.push({ name, value });
+  }
+  return rows;
+}
 function truthy(value) {
   return value === "on" || value === "true" || value === "1";
 }
@@ -2509,7 +2570,8 @@ function parseSubmission(contentType, body, names) {
       depository: typeof parsed.depository === "string" ? parsed.depository : void 0,
       scope: typeof parsed.scope === "string" ? parsed.scope : void 0,
       rotate: Boolean(parsed.rotate),
-      confirmCreateVault: Boolean(parsed.confirmCreateVault)
+      confirmCreateVault: Boolean(parsed.confirmCreateVault),
+      extraRows: []
     };
   }
   const params = new URLSearchParams(text);
@@ -2523,7 +2585,9 @@ function parseSubmission(contentType, body, names) {
     depository: params.get("depository") ?? void 0,
     scope: params.get("scope") ?? void 0,
     rotate: truthy(params.get("rotate")),
-    confirmCreateVault: truthy(params.get("confirmCreateVault"))
+    confirmCreateVault: truthy(params.get("confirmCreateVault")),
+    extraRows: readExtraRows(params),
+    dotenvBlob: params.get("dotenv_blob") ?? void 0
   };
 }
 
@@ -4410,6 +4474,73 @@ function insertQrBlock(html, activeRemoteUrl, requestId) {
   const filled = blockContent.replace(RAW_QR_SVG_TOKEN, () => svg);
   return html.slice(0, start) + filled + html.slice(end + QR_BLOCK_END.length);
 }
+var MAX_TOTAL_NAMES = 25;
+var MAX_EXTRA_NAME_LENGTH = 128;
+function isValidExtraName(name) {
+  if (name.length > MAX_EXTRA_NAME_LENGTH) return false;
+  try {
+    validateName(name);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function planSubmission(declared, submission) {
+  const candidates = [...new Set(declared)].map((name) => ({
+    name,
+    value: submission.values[name] ?? "",
+    addedByUser: false,
+    ambiguous: false
+  }));
+  let skippedRows = 0;
+  for (const row of submission.extraRows) {
+    if (!isValidExtraName(row.name)) {
+      skippedRows++;
+      continue;
+    }
+    candidates.push({ name: row.name, value: row.value, addedByUser: true, ambiguous: false });
+  }
+  let skippedBlobNames = 0;
+  if (submission.dotenvBlob) {
+    const parsed = parseDotEnv(submission.dotenvBlob);
+    skippedBlobNames += parsed.invalidNames.length;
+    for (const entry of parsed.entries) {
+      if (!isValidExtraName(entry.name)) {
+        skippedBlobNames++;
+        continue;
+      }
+      candidates.push({
+        name: entry.name,
+        value: entry.value,
+        addedByUser: true,
+        ambiguous: entry.ambiguous,
+        ambiguousReason: entry.ambiguousReason
+      });
+    }
+  }
+  const byName = /* @__PURE__ */ new Map();
+  for (const candidate of candidates) {
+    const group = byName.get(candidate.name);
+    if (group) group.push(candidate);
+    else byName.set(candidate.name, [candidate]);
+  }
+  const names = [];
+  for (const [name, group] of byName) {
+    const first = group[0];
+    const ambiguous = group.length > 1 || first.ambiguous;
+    names.push({
+      name,
+      value: first.value,
+      // The first occurrence decides: a declared name that a row or the blob repeats stays "requested".
+      addedByUser: first.addedByUser,
+      refusal: ambiguous ? { errorCode: "E_VALUE_AMBIGUOUS", reason: group.find((c) => c.ambiguousReason !== void 0)?.ambiguousReason } : void 0
+    });
+  }
+  return { names, skippedRows, skippedBlobNames };
+}
+function plural(count, one, many) {
+  return count === 1 ? one : many;
+}
 async function renderForm2(res, record, opts = {}) {
   const detections = await detectAll();
   const config = loadConfig();
@@ -4504,6 +4635,17 @@ async function handleRequestFormPost(req, res, id) {
   }
   const chosenDepository = submission.depository;
   const scope = submission.scope ?? record.scope ?? "project";
+  const plan = planSubmission(record.names, submission);
+  if (plan.names.length > MAX_TOTAL_NAMES) {
+    await renderForm2(res, record, {
+      status: 400,
+      errorMessage: `Too many secrets: a request can hold at most ${MAX_TOTAL_NAMES}. Remove some and submit again.`,
+      selectedDepositoryId: chosenDepository,
+      selectedScope: scope,
+      rotateChecked: submission.rotate
+    });
+    return;
+  }
   if (!chosenDepository) {
     await renderForm2(res, record, { errorMessage: "Choose a depository.", selectedScope: scope, rotateChecked: submission.rotate });
     return;
@@ -4524,16 +4666,27 @@ async function handleRequestFormPost(req, res, id) {
     return;
   }
   const results = [];
-  for (const name of record.names) {
-    const value = submission.values[name];
-    if (!value) {
-      results.push({ name, ok: false, errorCode: "E_MISSING_VALUE" });
+  for (const planned of plan.names) {
+    const { name } = planned;
+    const marker = planned.addedByUser ? { addedByUser: true } : {};
+    if (planned.refusal) {
+      results.push({
+        name,
+        ok: false,
+        errorCode: planned.refusal.errorCode,
+        reason: planned.refusal.reason,
+        ...marker
+      });
+      continue;
+    }
+    if (!planned.value) {
+      results.push({ name, ok: false, errorCode: "E_MISSING_VALUE", ...marker });
       continue;
     }
     try {
       await setSecret({
         name,
-        value,
+        value: planned.value,
         scope,
         depository: chosenDepository,
         cwd: process.cwd(),
@@ -4541,28 +4694,38 @@ async function handleRequestFormPost(req, res, id) {
         actor: "user",
         createVault: submission.confirmCreateVault
       });
-      results.push({ name, ok: true });
+      results.push({ name, ok: true, ...marker });
     } catch (err) {
       results.push({
         name,
         ok: false,
         errorCode: err instanceof EnigmaError ? err.code : "E_UNKNOWN",
-        reason: err instanceof EnigmaError ? err.message : void 0
+        reason: err instanceof EnigmaError ? err.message : void 0,
+        ...marker
       });
     }
   }
-  RequestStore.fulfill(id, results);
-  let html = request_done_default;
-  html = renderRepeatingBlock(
-    html,
-    "RESULT_ROW",
-    results.map((r) => ({
-      NAME: r.name,
-      STATUS_CLASS: r.ok ? "ok" : "fail",
-      STATUS_TEXT: r.ok ? "stored" : r.reason ? `failed (${r.errorCode}): ${r.reason}` : `failed (${r.errorCode})`
-    }))
-  );
-  sendHtml(res, 200, html);
+  RequestStore.fulfill(id, annotateSkippedNames(results, plan.skippedRows + plan.skippedBlobNames));
+  const rows = results.map((r) => ({
+    NAME: r.addedByUser ? `${r.name} (added by you)` : r.name,
+    STATUS_CLASS: r.ok ? "ok" : "fail",
+    STATUS_TEXT: r.ok ? "stored" : r.reason ? `failed (${r.errorCode}): ${r.reason}` : `failed (${r.errorCode})`
+  }));
+  if (plan.skippedRows > 0) {
+    rows.push({
+      NAME: `${plan.skippedRows} added ${plural(plan.skippedRows, "row", "rows")} skipped`,
+      STATUS_CLASS: "fail",
+      STATUS_TEXT: "invalid name"
+    });
+  }
+  if (plan.skippedBlobNames > 0) {
+    rows.push({
+      NAME: `${plan.skippedBlobNames} invalid ${plural(plan.skippedBlobNames, "name", "names")} skipped`,
+      STATUS_CLASS: "fail",
+      STATUS_TEXT: "in the pasted .env blob"
+    });
+  }
+  sendHtml(res, 200, renderRepeatingBlock(request_done_default, "RESULT_ROW", rows));
 }
 
 // src/web/routes/request-status.ts
@@ -4672,6 +4835,31 @@ var REQUEST_DONE_CLIENT_JS = `(() => {
 })();
 `;
 
+// src/web/static/request-form-script.ts
+var REQUEST_FORM_CLIENT_JS = `(() => {
+  const button = document.getElementById('add-secret');
+  const container = document.getElementById('extra-rows');
+  const template = document.getElementById('extra-row-template');
+  if (!button || !container || !(template instanceof HTMLTemplateElement)) return;
+
+  let next = 1;
+  button.hidden = false;
+  button.addEventListener('click', () => {
+    const row = template.content.cloneNode(true);
+    const name = row.querySelector('[data-extra="name"]');
+    const value = row.querySelector('[data-extra="value"]');
+    if (!name || !value) return;
+    name.name = 'extra_name_' + next;
+    name.id = 'extra_name_' + next;
+    value.name = 'extra_value_' + next;
+    value.id = 'extra_value_' + next;
+    next += 1;
+    container.appendChild(row);
+    name.focus();
+  });
+})();
+`;
+
 // src/web/router.ts
 var ID = "[0-9a-f]{32}";
 var REQUEST_PATH = new RegExp(`^/r/(${ID})$`);
@@ -4700,6 +4888,10 @@ async function handleRequest(req, res) {
     }
     if (method === "GET" && pathname === "/static/request-done.js") {
       sendStaticJs(res, REQUEST_DONE_CLIENT_JS);
+      return;
+    }
+    if (method === "GET" && pathname === "/static/request-form.js") {
+      sendStaticJs(res, REQUEST_FORM_CLIENT_JS);
       return;
     }
     const requestMatch = pathname.match(REQUEST_PATH);

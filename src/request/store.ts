@@ -10,12 +10,16 @@ export type RequestKind = 'request' | 'reveal' | 'import';
 /**
  * Outcome of writing one name through the storage core; never a value or a
  * message that could carry one. `reason` is the one narrow, deliberate
- * exception (Issue #13 review, round 4, finding 2): kind 'import' only,
- * populated ONLY from `ParsedDotEnvEntry.ambiguousReason` — static text
+ * exception (Issue #13 review, round 4, finding 2): populated ONLY from
+ * `ParsedDotEnvEntry.ambiguousReason` — static text
  * about structure ("assigned more than once in this file", "quote the value
  * if the # belongs to it") computed by the parser before any value is
- * looked at, plus the entry's own name and file path. Never populate this
- * from an EnigmaError's `.message` in general, or from anything else
+ * looked at, plus the entry's own name and file path (the import flows, and
+ * since Issue #71 the request form's refusal path) — or, in request-form.ts
+ * only, the Issue #61-audited `EnigmaError.message` passthrough for a
+ * per-name write failure (every message reachable there is static or
+ * structural — never opts.value). Never populate this
+ * from an EnigmaError's `.message` anywhere else, or from anything else
  * derived from a parsed value — widening this field is exactly how a
  * value-carrying string gets introduced here by someone with good
  * intentions later. If you're tempted to set `reason` for a NEW error code,
@@ -29,6 +33,35 @@ export interface RequestNameResult {
   ok: boolean;
   errorCode?: string;
   reason?: string;
+  /**
+   * Set (only ever to `true`) on a result for a name the human added to the
+   * request form (Issue #71) that the agent did not ask for — set only after
+   * the name passed `validateName`, so it is safe to render. Lets the outcome
+   * text tell the agent an extra name is not one it requested. Carries no
+   * value and no message.
+   */
+  addedByUser?: true;
+}
+
+// Outcome readers (`consumeOutcome` → `renderOutcome`) receive only the
+// `results` array, not the record, so the count of invalid names the web layer
+// skipped (Issue #71) travels beside that array rather than inside a
+// `RequestNameResult`: an invalid name is never a result, and its text must
+// never be stored anywhere — only how many there were. This depends on
+// `fulfill` storing, and `consumeOutcome` returning, the SAME array the web
+// layer annotated (neither may copy it); test/unit/request/skipped-name-count.test.ts
+// pins each hop.
+const skippedNameCounts = new WeakMap<RequestNameResult[], number>();
+
+/** Records how many submitted names were skipped as invalid; returns `results` for chaining into `fulfill`. */
+export function annotateSkippedNames(results: RequestNameResult[], count: number): RequestNameResult[] {
+  if (count > 0) skippedNameCounts.set(results, count);
+  return results;
+}
+
+/** How many submitted names were skipped as invalid for this batch (0 when none were recorded). */
+export function getSkippedNameCount(results: RequestNameResult[]): number {
+  return skippedNameCounts.get(results) ?? 0;
 }
 
 export interface RequestRecord {
