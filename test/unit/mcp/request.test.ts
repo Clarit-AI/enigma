@@ -543,6 +543,38 @@ describe('enigma_request remote access (Issue #12)', () => {
     await pair.close();
   });
 
+  it('blocking enigma_request: a NEVER-USED expiry yields structured E_REQUEST_EXPIRED through the shared mapper (Kimi QA AC5 regression — was: untyped Error rethrown as an unhandled tool failure)', async () => {
+    // Drives the real blocking tool path end to end (URL-mode accept →
+    // resolveRequestOutcome), injecting only the store's typed
+    // RequestExpiredError rejection — exactly what expireRecord/waitForFulfilled
+    // produce for a never-used record. request.ts's catch passes the mapper's
+    // EnigmaError to errorResult, so the wire text must carry the code.
+    const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+    pair.client.setRequestHandler(ElicitRequestSchema, async (request) => {
+      if (request.params.mode !== 'url') throw new Error('expected url mode');
+      return { action: 'accept' };
+    });
+
+    const { RequestExpiredError } = await import('../../../src/request/store.js');
+    const waiterSpy = vi
+      .spyOn(RequestStore, 'waitForFulfilled')
+      .mockImplementationOnce(() => Promise.reject(new RequestExpiredError()));
+
+    try {
+      const result = await pair.client.callTool({
+        name: 'enigma_request',
+        arguments: { names: ['OPENAI_API_KEY'], reason: 'test', usage: 'interactive', scope: 'global' },
+      });
+      expect(result.isError).toBe(true);
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+      expect(text).toContain('E_REQUEST_EXPIRED');
+      expect(text).not.toContain('E_OUTCOME_UNKNOWN');
+    } finally {
+      waiterSpy.mockRestore();
+    }
+    await pair.close();
+  });
+
   it('blocking enigma_request: a used-but-swept record yields E_OUTCOME_UNKNOWN through the shared resolveRequestOutcome mapping (Issue #69 AC #5)', async () => {
     // Injects the OutcomeUnknownError rejection the sweeper would produce
     // after the 5-min used-grace period — avoiding fake-timer advances of

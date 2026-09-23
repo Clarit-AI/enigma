@@ -99,3 +99,20 @@ describe('plugin manifests', () => {
     expect(plugin.name).toBe('enigma');
   });
 });
+
+describe('Issue #69 doc pins (AC11/AC12) — focused wording pins, not an eval harness', () => {
+  it('AC11: SKILL.md documents the Monitor/status wake-on-submit pattern and the no-watcher fallback', () => {
+    const { body } = readFrontmatter(join(PLUGIN_ROOT, 'skills/enigma/SKILL.md'));
+    expect(body).toMatch(/background-watch/);
+    expect(body).toContain('GET /r/<request_id>/status');
+    expect(body).toMatch(/`\{"state":"pending"\}`/);
+    expect(body).toMatch(/call `enigma_await` immediately/);
+  });
+
+  it('AC12: docs/api-contracts.md documents GET /r/:id/status and E_OUTCOME_UNKNOWN', () => {
+    const apiContracts = readFileSync(join(REPO_ROOT, 'docs/api-contracts.md'), 'utf8');
+    expect(apiContracts).toContain('GET /r/:id/status');
+    expect(apiContracts).toContain('E_OUTCOME_UNKNOWN');
+    expect(apiContracts).toContain('E_REQUEST_EXPIRED');
+  });
+});

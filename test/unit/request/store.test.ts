@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { OutcomeUnknownError, RequestStore } from '../../../src/request/store.js';
+import { OutcomeUnknownError, RequestExpiredError, RequestStore } from '../../../src/request/store.js';
 
 describe('RequestStore', () => {
   beforeEach(() => {
@@ -122,8 +122,8 @@ describe('RequestStore', () => {
     await expect(RequestStore.waitForFulfilled(record.id)).resolves.toBe('fulfilled');
   });
 
-  it('waitForFulfilled rejects for an unknown id', async () => {
-    await expect(RequestStore.waitForFulfilled('deadbeefdeadbeefdeadbeefdeadbeef')).rejects.toThrow();
+  it('waitForFulfilled rejects for an unknown id with RequestExpiredError (Kimi QA AC5: typed, so the shared mapper can key E_REQUEST_EXPIRED off it)', async () => {
+    await expect(RequestStore.waitForFulfilled('deadbeefdeadbeefdeadbeefdeadbeef')).rejects.toBeInstanceOf(RequestExpiredError);
   });
 
   it('fulfill records per-name outcomes, readable via get, and defaults results to [] (used by a reveal, which has none)', () => {
@@ -361,7 +361,7 @@ describe('RequestStore', () => {
     it('tryMarkUsed on an expired id rejects an outstanding waiter immediately, not only on the sweeper\'s next tick (PR #78 review, finding 2 — the in-flight-POST hang)', async () => {
       const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 1000 });
       const waiter = RequestStore.waitForFulfilled(record.id);
-      const assertion = expect(waiter).rejects.toThrow(/request expired/);
+      const assertion = expect(waiter).rejects.toBeInstanceOf(RequestExpiredError);
 
       // Simulates the TTL elapsing in the window between the web layer's
       // initial get(id) lookup and its later tryMarkUsed(id) call — before
@@ -376,7 +376,7 @@ describe('RequestStore', () => {
     it('get on an expired unused id rejects an outstanding waiter too, via the same expireRecord path', async () => {
       const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 1000 });
       const waiter = RequestStore.waitForFulfilled(record.id);
-      const assertion = expect(waiter).rejects.toThrow(/request expired/);
+      const assertion = expect(waiter).rejects.toBeInstanceOf(RequestExpiredError);
 
       vi.advanceTimersByTime(1001);
       expect(RequestStore.get(record.id)).toBeUndefined();
@@ -504,13 +504,15 @@ describe('RequestStore', () => {
       expect(expiry).toBe(record.expiresAt);
     });
 
-    it('never-used expiry still rejects with the generic "request expired" — never with OutcomeUnknownError (AC #5)', async () => {
+    it('never-used expiry rejects with typed RequestExpiredError carrying the "request expired" message — never with OutcomeUnknownError (AC #5, Kimi QA AC5)', async () => {
       const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 1000 });
       const waiter = RequestStore.waitForFulfilled(record.id);
-      const assertion = expect(waiter).rejects.toThrow(/request expired/);
+      const typeAssertion = expect(waiter).rejects.toBeInstanceOf(RequestExpiredError);
+      const messageAssertion = expect(waiter).rejects.toThrow(/request expired/);
 
       vi.advanceTimersByTime(61_000);
-      await assertion;
+      await typeAssertion;
+      await messageAssertion;
     });
   });
 });

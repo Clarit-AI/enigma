@@ -193,7 +193,14 @@ describe('RequestNameResult.reason surfaces are tracked systematically (Issue #3
     }
   });
 
-  it('an unreadable non-fixture surface file throws — it cannot be silently omitted as "no surface" (PR #78 review negative path)', () => {
+  // chmod 0o000 only blocks reads for a non-root owner on POSIX; Windows
+  // ignores the read bit. Root/Windows guard (PR #78 batch): the vanish
+  // case above still covers the read-error-propagates property on every
+  // platform, so skipping this stronger unreadable-file variant there
+  // costs no coverage of the actual contract.
+  it.skipIf(process.platform === 'win32' || (typeof process.getuid === 'function' && process.getuid() === 0))(
+    'an unreadable non-fixture surface file throws — it cannot be silently omitted as "no surface" (PR #78 review negative path)',
+    () => {
     // The lead's exact concern: a newly added file that DOES reference
     // RequestNameResult but cannot be read. A broad catch around the read
     // would return false for it and quietly drop it from the inventory,
@@ -220,7 +227,8 @@ describe('RequestNameResult.reason surfaces are tracked systematically (Issue #3
       chmodSync(target, 0o644);
       rmSync(dir, { recursive: true, force: true });
     }
-  });
+    },
+  );
 
   it('fixture-named entries are excluded by NAME before any read (the narrow exclusion, PR #78 review)', () => {
     // Positive control for the exclusion being name-based and fixture-scoped:

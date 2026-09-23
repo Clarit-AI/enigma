@@ -218,22 +218,43 @@ describe('enigma_await', () => {
     }
   });
 
-  it('a never-used expiry still rejects with the generic "request expired" — never with E_OUTCOME_UNKNOWN', async () => {
+  it('a never-used expiry maps to structured E_REQUEST_EXPIRED in the shared mapper — never E_OUTCOME_UNKNOWN (Kimi QA AC5)', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    const { RequestExpiredError } = await import('../../../src/request/store.js');
+    const { resolveRequestOutcome } = await import('../../../src/mcp/request-outcome.js');
+
+    // The store rejects a never-used expiry with the typed
+    // RequestExpiredError; the shared mapper must turn it into a
+    // structured EnigmaError carrying E_REQUEST_EXPIRED so every
+    // blocking caller (enigma_await, blocking enigma_request,
+    // URL-mode enigma_import) returns the same named code instead of
+    // rethrowing an untyped error as an unhandled tool failure.
+    const waiterSpy = vi
+      .spyOn(RequestStore, 'waitForFulfilled')
+      .mockImplementationOnce(() => Promise.reject(new RequestExpiredError()));
+
+    try {
+      await expect(resolveRequestOutcome(record.id, process.cwd())).rejects.toMatchObject({
+        code: 'E_REQUEST_EXPIRED',
+        message: expect.stringContaining(record.id),
+      });
+    } finally {
+      waiterSpy.mockRestore();
+    }
+  });
+
+  it('an unexpected rejection is NOT misclassified as E_REQUEST_EXPIRED — the shared mapper rethrows it unchanged (Kimi QA AC5: no blanket catch)', async () => {
     const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
     const { resolveRequestOutcome } = await import('../../../src/mcp/request-outcome.js');
     const { EnigmaError } = await import('../../../src/core/errors.js');
 
-    // Inject the plain Error('request expired') rejection the sweeper
-    // produces for an unused-but-expired record — the helper must pass
-    // it through unchanged, so the await tool's catch maps it to
-    // E_REQUEST_EXPIRED (the code reserved for never-used expiry).
     const waiterSpy = vi
       .spyOn(RequestStore, 'waitForFulfilled')
-      .mockImplementationOnce(() => Promise.reject(new Error('request expired')));
+      .mockImplementationOnce(() => Promise.reject(new Error('boom')));
 
     try {
       const promise = resolveRequestOutcome(record.id, process.cwd());
-      await expect(promise).rejects.toThrow(/request expired/);
+      await expect(promise).rejects.toThrow(/boom/);
       await expect(promise).rejects.not.toBeInstanceOf(EnigmaError);
     } finally {
       waiterSpy.mockRestore();
