@@ -111,6 +111,14 @@ const SURFACES: Surface[] = [
 function walkTsFiles(dir: string): string[] {
   const out: string[] = [];
   for (const entry of readdirSync(dir, { withFileTypes: true })) {
+    // leak-fence's security fixtures (test/security/leak-fence.test.ts) are
+    // written into real src/ paths mid-run — the fence scans the real tree, so
+    // they must live there — and deleted in that file's afterEach. Under full
+    // parallel `npm test` this walk can observe one half-created or watch it
+    // vanish before the readFileSync below (ENOENT), which is exactly the
+    // flake this skip closes: those fixtures are ephemeral test artifacts,
+    // never RequestNameResult surfaces to register.
+    if (entry.name.startsWith('__leak-fence-fixture-')) continue;
     const full = join(dir, entry.name);
     if (entry.isDirectory()) out.push(...walkTsFiles(full));
     else if (entry.isFile() && entry.name.endsWith('.ts')) out.push(full);
@@ -121,7 +129,18 @@ function walkTsFiles(dir: string): string[] {
 describe('RequestNameResult.reason surfaces are tracked systematically (Issue #38)', () => {
   it('every src/ file referencing RequestNameResult is registered in SURFACES', () => {
     const referencing = walkTsFiles(join(REPO_ROOT, 'src'))
-      .filter((f) => TYPE_REFERENCE.test(readFileSync(f, 'utf8')))
+      .filter((f) => {
+        // A file can still vanish between readdirSync and this read when
+        // leak-fence fixtures are cleaned up concurrently (see walkTsFiles);
+        // a file that no longer exists is not an unregistered surface.
+        let text: string;
+        try {
+          text = readFileSync(f, 'utf8');
+        } catch {
+          return false;
+        }
+        return TYPE_REFERENCE.test(text);
+      })
       .map((f) => relative(REPO_ROOT, f))
       .sort();
     const registered = SURFACES.map((s) => s.file).sort();
