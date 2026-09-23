@@ -20,6 +20,8 @@ Every tool result is text and contains names, depository ids, scopes, and status
 
 Errors: `isError: true`, text `E_CODE: message` (no values). `E_EXISTS` when `rotate` is not set for an existing name.
 
+Extra names (Issue #71): the request form lets the human add names the agent did not ask for (`+ Add secret` rows, or a pasted `.env` blob — §2). The outcome text of both `enigma_request` (URL mode) and `enigma_await` lists them after the requested names, and every line for such a name — stored or failed — ends `— added by user` (`Stored DIRECT_URL in keychain (project) — added by user`), so an extra is never mistaken for a name the agent requested. A name the human typed or pasted that fails `validateName` is never named anywhere: at most a count line, `2 invalid names skipped`. A name repeated across the requested names, the added rows and the blob is refused per name (`E_VALUE_AMBIGUOUS`), never resolved by guessing which value wins.
+
 `confirmCreateVault` (Issue #28) is the explicit, one-time user confirmation to create a depository's backing collection when it doesn't exist yet — currently only 1Password's `Enigma` vault. It is never defaulted to true anywhere. `enigma_request`'s `ui:"native"` path consumes it directly: an unconfirmed `E_VAULT_MISSING` is asked about via form-mode elicitation (a yes/no confirmation is not a credential, so form mode is permitted here — same reasoning as `enigma_remove`'s confirmation) before falling back to a client without form-elicitation support. The URL-mode path doesn't need the field itself — its actual write happens on the human's web form (`POST /r/:id`, §2), which asks for the same confirmation there. `enigma add` (§3) exposes the identical confirmation as `--confirm-create-vault`.
 
 ## 2. Local HTTP server (`127.0.0.1:<ephemeral>`)
@@ -27,10 +29,10 @@ Errors: `isError: true`, text `E_CODE: message` (no values). `E_EXISTS` when `ro
 | Route | Purpose | Notes |
 |---|---|---|
 | `GET /r/:id` | request form | 404 unknown/expired, 410 used |
-| `POST /r/:id` | submit values | body `application/x-www-form-urlencoded` or JSON: `{ values: { NAME: string }, depository, scope }`; atomic single-use; 200 done page; 410 on replay; 413 over 64 KB |
+| `POST /r/:id` | submit values | body `application/x-www-form-urlencoded` or JSON: `{ values: { NAME: string }, depository, scope }`; form-encoded bodies may also carry `extra_name_N`/`extra_value_N` row pairs and one `dotenv_blob` field (Issue #71: parsed server-side on submit with the same `parseDotEnv` import uses; extras share the form's depository, scope and rotate choice; JSON bodies carry no extras); atomic single-use; 200 done page; 400 re-rendered form when declared + extra names exceed 25 (the id is not consumed, so it can be resubmitted); 410 on replay; 413 over 64 KB |
 | `GET /v/:id` | reveal page shell (no value) | 404/410 as above |
 | `POST /v/:id/reveal` | returns the value once, burns the id | JSON `{ name, value }`; only route that ever carries a value; never logged |
-| `GET /static/*` | css/js | CSP `script-src 'self'` |
+| `GET /static/*` | css/js (`reveal.js`, `request-done.js`, `request-form.js` — the request form's `+ Add secret` behaviour) | CSP `script-src 'self'` |
 | `GET /healthz` | liveness | `{ ok: true }` |
 
 Headers on every response: `Content-Security-Policy`, `X-Frame-Options: DENY`, `Referrer-Policy: no-referrer`, `Cache-Control: no-store`.
