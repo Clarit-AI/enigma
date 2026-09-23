@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { startServer, stopServer } from '../../../src/web/server.js';
+import { __peekServerStateForTests, startServer, stopServer } from '../../../src/web/server.js';
 import { RequestStore } from '../../../src/request/store.js';
 
 function sleep(ms: number): Promise<void> {
@@ -9,6 +9,7 @@ function sleep(ms: number): Promise<void> {
 describe('startServer', () => {
   afterEach(async () => {
     await stopServer();
+    RequestStore.__resetForTests();
   });
 
   it('binds to 127.0.0.1 on an ephemeral port', async () => {
@@ -132,22 +133,66 @@ describe('startServer', () => {
       }
     });
 
-    it('boundary: at now === expiresAt the timer re-arms with a positive delay (does not spin) and closes once now exceeds expiresAt', async () => {
+    it('boundary: at now === expiresAt the timer re-arms with a positive delay (does not spin) and closes once now exceeds expiresAt (PR #78 review, finding 1)', async () => {
       vi.useFakeTimers();
       try {
         const first = await startServer({ idleTimeoutMs: 100 });
-        // TTL 200ms. At t=100 the timer fires. earliestOpenExpiry(100) =
-        // 200 (strict <), so re-arm with (200-100+1) = 101ms. At t=201
-        // earliestOpenExpiry(201) === undefined (now >= expiresAt), close.
-        RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 200 });
+        // TTL equals the idle timeout so the idle timer's first fire lands
+        // exactly at now === expiresAt — the boundary the Tech Lead ruled
+        // on: open := !isExpired(record, now), i.e. now <= expiresAt still
+        // works. No startServer()/fetch() call happens before that first
+        // fire — either would call resetIdleTimer and mask whether
+        // onIdleTimer's own re-arm logic actually ran.
+        RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 100 });
 
+        // t=100: the timer fires exactly at now === expiresAt. The record
+        // is still open at that instant, so onIdleTimer re-arms rather than
+        // closing — observed via the side-effect-free peek hook, not a
+        // startServer()/fetch() call.
         await vi.advanceTimersByTimeAsync(100);
-        const samePort = await startServer({ idleTimeoutMs: 100 });
-        expect(samePort.port).toBe(first.port);
+        expect(__peekServerStateForTests()?.port).toBe(first.port);
 
-        await vi.advanceTimersByTimeAsync(105);
-        const afterClose = await startServer({ idleTimeoutMs: 100 });
-        expect(afterClose.port).not.toBe(first.port);
+        // The re-arm delay at that instant is (expiresAt - now + 1) = 1ms,
+        // floored to MIN_REARM_DELAY_MS = 1000ms, so the next fire is at
+        // t=1100. By then now (1100) > expiresAt (100): the record is no
+        // longer open and the server closes.
+        await vi.advanceTimersByTimeAsync(1000);
+        expect(__peekServerStateForTests()).toBeUndefined();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('AC6: production defaults (10 min idle / 15 min TTL) — the server stays up past the idle window on the ORIGINAL port while a request is open, then closes once past expiry (PR #78 review, finding 3)', async () => {
+      vi.useFakeTimers();
+      try {
+        // No idleTimeoutMs/ttlMs override: exercises the real production
+        // defaults (DEFAULT_IDLE_TIMEOUT_MS = 10 min, REQUEST_TTL_MS = 15
+        // min), not a scaled-down stand-in.
+        const first = await startServer();
+        const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+
+        // Past the 10-minute idle window, with no startServer() call in
+        // between resetting the timer — proves onIdleTimer's own re-arm
+        // logic, driven by earliestOpenExpiry, is what keeps it up.
+        await vi.advanceTimersByTimeAsync(10 * 60 * 1000 + 1000);
+        expect(__peekServerStateForTests()?.port).toBe(first.port);
+
+        // Fetch both routes on the ORIGINAL origin/port to prove liveness
+        // through the real HTTP surface, not just the peek hook.
+        const formResp = await fetch(`${first.origin}/r/${record.id}`);
+        expect(formResp.status).toBe(200);
+        const statusResp = await fetch(`${first.origin}/r/${record.id}/status`);
+        expect(statusResp.status).toBe(200);
+        await expect(statusResp.json()).resolves.toEqual({ state: 'pending' });
+
+        // Those two fetches reset the idle timer to a fresh 10-minute
+        // window (the existing per-request-reset behavior), so advance
+        // generously past both the request's 15-minute TTL AND a further
+        // full idle window from that reset point to guarantee the close
+        // fires regardless of exactly when the last reset landed.
+        await vi.advanceTimersByTimeAsync(15 * 60 * 1000 + 10 * 60 * 1000);
+        expect(__peekServerStateForTests()).toBeUndefined();
       } finally {
         vi.useRealTimers();
       }

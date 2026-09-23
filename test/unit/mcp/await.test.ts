@@ -64,6 +64,29 @@ describe('enigma_await', () => {
     await pair.close();
   });
 
+  it('a waiter already attached rejects promptly with E_REQUEST_EXPIRED once tryMarkUsed discovers the record expired mid-flight, rather than hanging (PR #78 review, finding 2 — the in-flight-POST hang)', async () => {
+    // Simulates the exact race the review found: the web layer's initial
+    // RequestStore.get(id) succeeds (so the record still existed when
+    // enigma_await attached its waiter below), but the TTL elapses before
+    // handleRequestFormPost reaches tryMarkUsed — body parsing and
+    // depository detection both happen in between. Mutating expiresAt
+    // directly on the returned record (the same object the store holds)
+    // reaches the exact same state real elapsed time would, without a slow
+    // or brittle fake-timer advance.
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    const pair = await connectWithCapabilities({});
+
+    const callPromise = pair.client.callTool({ name: 'enigma_await', arguments: { request_id: record.id } });
+
+    record.expiresAt = Date.now() - 1;
+    RequestStore.tryMarkUsed(record.id);
+
+    const result = await callPromise;
+    expect(result.isError).toBe(true);
+    expect((result.content as Array<{ text: string }>)[0]?.text).toContain('E_REQUEST_EXPIRED');
+    await pair.close();
+  });
+
   it('blocks until the record is fulfilled, then reports the same "Stored NAME in <depository> (<scope>)" shape as enigma_request', async () => {
     const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
     const pair = await connectWithCapabilities({});
