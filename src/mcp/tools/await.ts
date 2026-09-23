@@ -34,7 +34,13 @@ export function registerAwaitTool(server: McpServer): void {
         const remoteNote = takeRemoteNote(args.request_id);
         const text = remoteNote ? `${outcome.text}\n${remoteNote}` : outcome.text;
         return textResult(text, outcome.isError);
-      } catch {
+      } catch (err) {
+        // resolveRequestOutcome maps used-but-swept → E_OUTCOME_UNKNOWN
+        // (Issue #69 AC #5); let its EnigmaError pass through. Any other
+        // rejection from waitForFulfilled is a never-used expiry and stays
+        // E_REQUEST_EXPIRED — the one code the legacy call shape reserved
+        // for it.
+        if (err instanceof EnigmaError) return errorResult(err);
         return errorResult(
           new EnigmaError({ code: 'E_REQUEST_EXPIRED', message: `request ${args.request_id} expired before it was fulfilled` }),
         );

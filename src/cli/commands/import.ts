@@ -11,6 +11,7 @@ import type { ParsedDotEnvEntry } from '../../storage/dotenv-file.js';
 import { commitImport } from '../../storage/import-commit.js';
 import type { ImportCommitFailure } from '../../storage/import-commit.js';
 import type { DepositoryId } from '../../storage/interfaces.js';
+import { OutcomeUnknownError } from '../../request/store.js';
 import { startServer } from '../../web/server.js';
 
 const USAGE = 'enigma import [PATH] [--depository ID] [--rotate] [--json]';
@@ -79,8 +80,18 @@ async function runBrowserFlow(
   // instead of exiting (Issue #13 review, round 4, finding 1).
   try {
     await RequestStore.waitForFulfilled(record.id);
-  } catch {
+  } catch (err) {
     await handle.close();
+    // Issue #69 AC #5: distinguish a record that was used (the human opened
+    // and submitted the form) but never produced results — the names may
+    // already be stored — from one that was never used at all (a plain
+    // expiry). The MCP tools map this to `E_OUTCOME_UNKNOWN`; the CLI uses
+    // its own note here because it reports to a human via stdout, not to
+    // the model.
+    const note =
+      err instanceof OutcomeUnknownError
+        ? 'Import outcome unknown: the page was used but no result was recorded. Some secrets may already be stored — run `enigma list` to check before retrying.'
+        : 'Import link expired before it was completed.';
     return report(
       {
         imported: [],
@@ -93,7 +104,7 @@ async function runBrowserFlow(
       },
       opts.json,
       opts.cwd,
-      'Import link expired before it was completed.',
+      note,
     );
   }
   await handle.close();

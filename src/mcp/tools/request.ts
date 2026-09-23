@@ -246,11 +246,20 @@ export function registerRequestTool(server: McpServer): void {
         return textResult(`Request cancelled for ${args.names.join(', ')}`, true);
       }
 
-      const outcome = await resolveRequestOutcome(record.id, cwd);
-      await sendElicitationComplete(server.server, record.id);
-      const settledNote = takeRemoteNote(record.id);
-      const text = settledNote ? `${outcome.text}\n${settledNote}` : outcome.text;
-      return textResult(text, outcome.isError);
+      try {
+        const outcome = await resolveRequestOutcome(record.id, cwd);
+        await sendElicitationComplete(server.server, record.id);
+        const settledNote = takeRemoteNote(record.id);
+        const text = settledNote ? `${outcome.text}\n${settledNote}` : outcome.text;
+        return textResult(text, outcome.isError);
+      } catch (err) {
+        // resolveRequestOutcome already maps used-but-swept → E_OUTCOME_UNKNOWN
+        // (Issue #69 AC #5); let its EnigmaError pass through. Anything else
+        // is unexpected and surfaces as-is rather than silently mapping to a
+        // request-specific code that doesn't fit a system error.
+        if (err instanceof EnigmaError) return errorResult(err);
+        throw err;
+      }
     },
   );
 }
