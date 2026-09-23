@@ -75,7 +75,11 @@ const SURFACES: Surface[] = [
   // never opts.value.
   {
     file: 'src/web/routes/request-form.ts',
-    reasonAssignments: ['reason: err instanceof EnigmaError ? err.message : undefined,'],
+    // Issue #71 adds the first entry: a refused name (duplicate across
+    // declared/rows/blob, or an ambiguous blob line) carries only
+    // ParsedDotEnvEntry.ambiguousReason — the same static, value-free text
+    // import already uses — or undefined. The second is Issue #61's, unchanged.
+    reasonAssignments: ['reason: planned.refusal.reason,', 'reason: err instanceof EnigmaError ? err.message : undefined,'],
     sentinelTest: 'test/unit/web/routes/request-form.test.ts',
   },
   // Constructs RequestNameResult for the native/elicitation request paths
