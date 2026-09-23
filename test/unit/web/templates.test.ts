@@ -35,6 +35,12 @@ describe('templates', () => {
     expect(importFormHtml).toContain('max-width: 800px');
   });
 
+  it('the request form loads its "+ Add secret" script from the external static file, never inline (Issue #71, CSP script-src \'self\')', () => {
+    expect(requestFormHtml).toContain('<script src="/static/request-form.js"></script>');
+    expect(requestFormHtml).toContain('id="add-secret"');
+    expect(requestFormHtml).toContain('<template id="extra-row-template">');
+  });
+
   it('no template contains an inline <script> block', () => {
     for (const html of Object.values(TEMPLATES)) {
       expect(html).not.toMatch(/<script>[\s\S]*?[^\s][\s\S]*?<\/script>/);
