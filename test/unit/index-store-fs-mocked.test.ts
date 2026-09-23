@@ -23,6 +23,16 @@ let renameShouldThrowENOENTFor: string | undefined;
  * actually captures into the tombstone is the fresh one.
  */
 let stealLiveLockOnRename: { lockPath: string; freshBody: string } | undefined;
+/**
+ * Set together with `afterRenameHook`: when a renameSync FROM `afterRenameFrom`
+ * completes successfully, the hook runs once (then both are cleared). This is
+ * the deterministic injection point for a SECOND breaker racing in the window
+ * between "first breaker moved the stale lock to its tombstone" and "first
+ * breaker re-opens the lock path" — the only moment a concurrent acquirer can
+ * steal the open slot.
+ */
+let afterRenameFrom: string | undefined;
+let afterRenameHook: (() => void) | undefined;
 const renameCalls: Array<[unknown, unknown]> = [];
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -43,14 +53,21 @@ vi.mock('node:fs', async (importOriginal) => {
         actual.writeFileSync(from as never, freshBody, { mode: 0o600 });
       }
       renameCalls.push([from, to]);
-      if (renameShouldThrowENOENTFor !== undefined && from === renameShouldThrowENOENTFor) {
-        renameShouldThrowENOENTFor = undefined; // only the losing attempt
-        const err = new Error('simulated: another breaker already moved this') as NodeJS.ErrnoException;
-        err.code = 'ENOENT';
-        throw err;
-      }
-      return actual.renameSync(from as never, to as never);
-    },
+        if (renameShouldThrowENOENTFor !== undefined && from === renameShouldThrowENOENTFor) {
+          renameShouldThrowENOENTFor = undefined; // only the losing attempt
+          const err = new Error('simulated: another breaker already moved this') as NodeJS.ErrnoException;
+          err.code = 'ENOENT';
+          throw err;
+        }
+        const result = actual.renameSync(from as never, to as never);
+        if (afterRenameFrom !== undefined && from === afterRenameFrom) {
+          const hook = afterRenameHook;
+          afterRenameFrom = undefined;
+          afterRenameHook = undefined;
+          hook?.();
+        }
+        return result;
+      },
   };
 });
 
@@ -80,6 +97,8 @@ describe('index-store mutateIndex lock — fs-failure and race injection (Issue 
     writeFileSyncShouldThrowOnce = false;
     renameShouldThrowENOENTFor = undefined;
     stealLiveLockOnRename = undefined;
+    afterRenameFrom = undefined;
+    afterRenameHook = undefined;
     renameCalls.length = 0;
   });
 
@@ -152,5 +171,79 @@ describe('index-store mutateIndex lock — fs-failure and race injection (Issue 
     // left alone — we never unlinked or overwrote the real owner's lock.
     expect(existsSync(lockPath)).toBe(true);
     expect(readFileSync(lockPath, 'utf8')).toBe(freshBody);
+  });
+
+  it('two breakers on one stale lock: at most one holds it at a time (Issue #66, PR #77 review)', () => {
+    const lockPath = indexLockPath();
+    mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
+    const staleToken = 'deadbeefdeadbeefdeadbeefdeadbeef';
+    writeFileSync(lockPath, `${staleToken}\n1\n${Date.now() - LOCK_STALE_MS - 5_000}\n`, { mode: 0o600 });
+
+    const entry = (name: string) => ({
+      name,
+      scope: 'global' as const,
+      depository: 'encrypted' as const,
+      ref: `global/${name}`,
+      createdAt: '2026-01-01T00:00:00.000Z',
+      updatedAt: '2026-01-01T00:00:00.000Z',
+    });
+    const order: string[] = [];
+    let concurrentHolders = 0;
+    let maxConcurrentHolders = 0;
+    let thirdDeltaRan = false;
+
+    // Shrink the live-lock retry budget so a blocked acquirer times out in
+    // milliseconds rather than the production ~500 ms.
+    __setLockTimingForTesting({ staleMs: LOCK_STALE_MS, retryIntervalMs: 1, maxAttempts: 3 });
+
+    // Breaker B runs inside breaker A's stale-break window: the hook fires
+    // right after A's tombstone rename has moved the stale lock aside — the
+    // exact moment a second breaker can win the open slot. This is the only
+    // way to interleave two fully-synchronous acquire paths deterministically.
+    afterRenameFrom = lockPath;
+    afterRenameHook = () => {
+      mutateIndex((cur) => {
+        concurrentHolders += 1;
+        maxConcurrentHolders = Math.max(maxConcurrentHolders, concurrentHolders);
+        order.push('B');
+        // B must hold a fresh lock of its own — never the stale one it broke.
+        const heldToken = readFileSync(lockPath, 'utf8').split('\n')[0];
+        expect(heldToken).not.toBe(staleToken);
+        // While B holds, a third acquirer must NOT enter its critical section.
+        let thirdErr: unknown;
+        try {
+          mutateIndex((inner) => {
+            thirdDeltaRan = true;
+            return inner;
+          });
+        } catch (err) {
+          thirdErr = err;
+        }
+        expect(thirdErr).toBeInstanceOf(EnigmaError);
+        expect((thirdErr as EnigmaError).code).toBe('E_LOCK_TIMEOUT');
+        concurrentHolders -= 1;
+        return upsertIndexEntry(cur, entry('NAME_B'));
+      });
+    };
+
+    // Breaker A: breaks the same stale lock, re-acquires after B is done,
+    // and its re-read must see B's committed entry (no lost update).
+    mutateIndex((cur) => {
+      concurrentHolders += 1;
+      maxConcurrentHolders = Math.max(maxConcurrentHolders, concurrentHolders);
+      order.push('A');
+      const heldToken = readFileSync(lockPath, 'utf8').split('\n')[0];
+      expect(heldToken).not.toBe(staleToken);
+      concurrentHolders -= 1;
+      return upsertIndexEntry(cur, entry('NAME_A'));
+    });
+
+    // B ran in A's break window and A ran after; never two holders at once.
+    expect(order).toEqual(['B', 'A']);
+    expect(thirdDeltaRan).toBe(false);
+    expect(maxConcurrentHolders).toBe(1);
+    // Both writers' deltas landed — A's locked re-read saw B's entry.
+    expect(readIndex().entries.map((e) => e.name).sort()).toEqual(['NAME_A', 'NAME_B']);
+    expect(existsSync(lockPath)).toBe(false);
   });
 });
