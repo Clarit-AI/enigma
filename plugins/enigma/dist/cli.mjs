@@ -188,6 +188,9 @@ function keyPath() {
 function secretsPath() {
   return join(enigmaHome(), "secrets.enc");
 }
+function indexLockPath() {
+  return join(enigmaHome(), "index.lock");
+}
 
 // src/core/secure-file.ts
 import { mkdirSync, appendFileSync, chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
@@ -298,6 +301,9 @@ function appendAuditEvent(event) {
 }
 
 // src/core/index-store.ts
+import { chmodSync as chmodSync2, closeSync, mkdirSync as mkdirSync2, openSync, renameSync as renameSync2, statSync, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import { dirname as dirname3 } from "node:path";
+import { randomBytes as randomBytes2 } from "node:crypto";
 var EMPTY_INDEX = { version: 1, entries: [] };
 function buildRef(name, scope, projectId2) {
   return scope === "global" ? `global/${name}` : `${projectId2}/${name}`;
@@ -352,10 +358,93 @@ function listIndexEntries(index, opts = {}) {
     return { ...entry, shadowed: Boolean(shadowedBy) };
   });
 }
+var LOCK_STALE_MS = 3e4;
+var LOCK_RETRY_INTERVAL_MS = 10;
+var LOCK_MAX_ATTEMPTS = 50;
+var SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
+function syncSleep(ms) {
+  if (ms <= 0) return;
+  Atomics.wait(SLEEP_BUFFER, 0, 0, ms);
+}
+function acquireIndexLock() {
+  const lockPath = indexLockPath();
+  const dir = dirname3(lockPath);
+  try {
+    mkdirSync2(dir, { recursive: true, mode: 448 });
+    chmodSync2(dir, 448);
+  } catch {
+  }
+  for (let attempt = 0; attempt < LOCK_MAX_ATTEMPTS; attempt++) {
+    let fd;
+    try {
+      fd = openSync(lockPath, "wx", 384);
+      writeFileSync2(fd, `${process.pid}
+${Date.now()}
+`);
+      closeSync(fd);
+      fd = void 0;
+      return {
+        path: lockPath,
+        release: () => {
+          try {
+            unlinkSync(lockPath);
+          } catch {
+          }
+        }
+      };
+    } catch (err) {
+      if (fd !== void 0) {
+        try {
+          closeSync(fd);
+        } catch {
+        }
+      }
+      const code = err.code;
+      if (code !== "EEXIST") throw err;
+      let stat;
+      try {
+        stat = statSync(lockPath);
+      } catch (statErr) {
+        if (statErr.code === "ENOENT") continue;
+        throw statErr;
+      }
+      const ageMs = Date.now() - stat.mtimeMs;
+      if (ageMs > LOCK_STALE_MS) {
+        const tombstone = `${lockPath}.stale-${process.pid}-${randomBytes2(4).toString("hex")}`;
+        try {
+          renameSync2(lockPath, tombstone);
+        } catch (renameErr) {
+          if (renameErr.code === "EEXIST") continue;
+          throw renameErr;
+        }
+        try {
+          unlinkSync(tombstone);
+        } catch {
+        }
+        continue;
+      }
+      syncSleep(LOCK_RETRY_INTERVAL_MS);
+    }
+  }
+  throw new EnigmaError({
+    code: "E_LOCK_TIMEOUT",
+    message: `Could not acquire ${lockPath} within ${LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS} ms; another process holds the index lock.`
+  });
+}
+function mutateIndex(delta) {
+  const lock = acquireIndexLock();
+  try {
+    const current = readIndex();
+    const next = delta(current);
+    writeIndex(next);
+  } finally {
+    lock.release();
+  }
+}
 
 // src/storage/depositories/encrypted.ts
-import { createCipheriv, createDecipheriv, randomBytes as randomBytes2 } from "node:crypto";
-import { existsSync as existsSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { createCipheriv, createDecipheriv, randomBytes as randomBytes3 } from "node:crypto";
+import { existsSync as existsSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync3 } from "node:fs";
 var ALGORITHM = "aes-256-gcm";
 var KEY_BYTES = 32;
 var IV_BYTES = 12;
@@ -370,8 +459,8 @@ function readKey() {
 function getOrCreateKey() {
   const existing = readKey();
   if (existing) return existing;
-  const key = randomBytes2(KEY_BYTES);
-  writeFileSync2(keyPath(), key.toString("base64"), { mode: FILE_MODE2 });
+  const key = randomBytes3(KEY_BYTES);
+  writeFileSync3(keyPath(), key.toString("base64"), { mode: FILE_MODE2 });
   return key;
 }
 function readSecretsFile() {
@@ -381,7 +470,7 @@ function writeSecretsFile(file) {
   writeJsonFileAtomic(secretsPath(), file);
 }
 function encryptValue(value, key) {
-  const iv = randomBytes2(IV_BYTES);
+  const iv = randomBytes3(IV_BYTES);
   const cipher = createCipheriv(ALGORITHM, key, iv);
   const ct = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
@@ -445,7 +534,7 @@ var encryptedDepositoryModule = {
 };
 
 // src/storage/depositories/env.ts
-import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync4 } from "node:fs";
 import { join as join3 } from "node:path";
 var BEGIN_MARKER = "# enigma:begin";
 var END_MARKER = "# enigma:end";
@@ -552,7 +641,7 @@ function createEnvDepository(ctx) {
     promptProfile: "none",
     // ref is the bare NAME for env — the file itself is located via DepositoryContext.projectPath.
     async set(ref, value) {
-      writeFileSync3(envFilePath, upsertManagedBlock(readEnvFile(), ref, value), { mode: FILE_MODE3 });
+      writeFileSync4(envFilePath, upsertManagedBlock(readEnvFile(), ref, value), { mode: FILE_MODE3 });
       return ref;
     },
     async resolve(ref) {
@@ -564,7 +653,7 @@ function createEnvDepository(ctx) {
     },
     async delete(ref) {
       const content = readEnvFile();
-      if (content) writeFileSync3(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE3 });
+      if (content) writeFileSync4(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE3 });
     },
     async has(ref) {
       return extractManagedValue(readEnvFile(), ref) !== void 0;
@@ -1251,7 +1340,22 @@ async function setSecret(opts) {
     createdAt: existing?.createdAt ?? now,
     updatedAt: now
   };
-  writeIndex(upsertIndexEntry(index, entry));
+  try {
+    mutateIndex((current) => {
+      const currentExisting = findIndexEntry(current, opts.name, opts.scope, pid);
+      if (currentExisting && !opts.rotate) {
+        throw new EnigmaError({
+          code: "E_EXISTS",
+          message: `${opts.name} already exists in ${opts.scope} scope; pass rotate to overwrite`,
+          secretName: opts.name
+        });
+      }
+      return upsertIndexEntry(current, entry);
+    });
+  } catch (err) {
+    auditRefusal(err, op);
+    throw err;
+  }
   appendAuditEvent({ op, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: true, error: null });
   const warnings = opts.depository === "env" && projectPath ? checkEnvGitignore(projectPath) : [];
   return { rotated: Boolean(existing), warnings };
@@ -1264,7 +1368,7 @@ function listSecrets(opts = {}) {
 async function deleteSecret(name, opts) {
   const pid = opts.cwd ? projectId(opts.cwd) : void 0;
   const index = readIndex();
-  const { index: updated, removed } = removeIndexEntry(index, name, opts.scope, pid);
+  const { removed } = removeIndexEntry(index, name, opts.scope, pid);
   const depository = createDepository(removed.depository, { projectPath: projectPathFor(removed, opts.cwd) });
   try {
     await depository.delete(removed.ref);
@@ -1272,7 +1376,18 @@ async function deleteSecret(name, opts) {
     appendAuditEvent({ op: "remove", name, scope: removed.scope, depository: removed.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
     throw err;
   }
-  writeIndex(updated);
+  try {
+    mutateIndex((current) => {
+      const currentRemoved = resolveIndexEntry(current, name, opts.scope, pid);
+      if (!currentRemoved) {
+        throw new EnigmaError({ code: "E_NOT_FOUND", message: `${name} not found`, secretName: name });
+      }
+      return { ...current, entries: current.entries.filter((e) => e !== currentRemoved) };
+    });
+  } catch (err) {
+    appendAuditEvent({ op: "remove", name, scope: removed.scope, depository: removed.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+    throw err;
+  }
   appendAuditEvent({ op: "remove", name, scope: removed.scope, depository: removed.depository, actor: opts.actor, ok: true, error: null });
 }
 async function resolveSecret(name, opts) {
@@ -1483,7 +1598,7 @@ function renderOutcome(results, cwd) {
 }
 
 // src/request/store.ts
-import { randomBytes as randomBytes3 } from "node:crypto";
+import { randomBytes as randomBytes4 } from "node:crypto";
 var REQUEST_TTL_MS = 15 * 60 * 1e3;
 var REVEAL_TTL_MS = 5 * 60 * 1e3;
 var SWEEP_INTERVAL_MS = 60 * 1e3;
@@ -1540,7 +1655,7 @@ var RequestStore = {
     } else if (opts.names.length < 1 || opts.names.length > 10) {
       throw new Error("a request must cover between 1 and 10 secret names");
     }
-    const id = randomBytes3(16).toString("hex");
+    const id = randomBytes4(16).toString("hex");
     const now = Date.now();
     const record = {
       id,
@@ -1840,19 +1955,19 @@ function removeDotEnvEntries(content, names, opts = {}) {
 }
 
 // src/storage/import-commit.ts
-import { randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync7, readFileSync as readFileSync4, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { randomBytes as randomBytes5 } from "node:crypto";
+import { existsSync as existsSync7, readFileSync as readFileSync4, renameSync as renameSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync5 } from "node:fs";
 var FILE_MODE4 = 384;
 function writeFileAtomic(path, content, mode) {
-  const tmpPath = `${path}.${randomBytes4(6).toString("hex")}.tmp`;
+  const tmpPath = `${path}.${randomBytes5(6).toString("hex")}.tmp`;
   try {
-    writeFileSync4(tmpPath, content, { mode });
-    renameSync2(tmpPath, path);
+    writeFileSync5(tmpPath, content, { mode });
+    renameSync3(tmpPath, path);
     return { ok: true };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     try {
-      if (existsSync7(tmpPath)) unlinkSync(tmpPath);
+      if (existsSync7(tmpPath)) unlinkSync2(tmpPath);
       return { ok: false, error };
     } catch {
       return { ok: false, error, leftoverPath: tmpPath };
@@ -4709,9 +4824,9 @@ async function cmdImport(argv) {
 }
 
 // src/cli/commands/install.ts
-import { existsSync as existsSync9, mkdirSync as mkdirSync2, readFileSync as readFileSync6, renameSync as renameSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync9, mkdirSync as mkdirSync3, readFileSync as readFileSync6, renameSync as renameSync4, writeFileSync as writeFileSync6 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname3, join as join5 } from "node:path";
+import { dirname as dirname4, join as join5 } from "node:path";
 var MARKETPLACE_NAME = "clarit-enigma";
 var REPO = "Clarit-AI/enigma";
 var PLUGIN_ENTRY = `enigma@${MARKETPLACE_NAME}`;
@@ -4775,9 +4890,9 @@ function errorReason(err) {
   return err instanceof Error ? err.message : String(err);
 }
 function writeSettingsAtomic(path, settings, style) {
-  const dir = dirname3(path);
+  const dir = dirname4(path);
   try {
-    mkdirSync2(dir, { recursive: true });
+    mkdirSync3(dir, { recursive: true });
   } catch (err) {
     throw new EnigmaError({
       code: "E_CLAUDE_SETTINGS_UNWRITABLE",
@@ -4788,8 +4903,8 @@ function writeSettingsAtomic(path, settings, style) {
   const lfBody = JSON.stringify(settings, null, style.indent);
   const body = style.eol === "\r\n" ? lfBody.replace(/\n/g, "\r\n") : lfBody;
   try {
-    writeFileSync5(tmpPath, style.trailingNewline ? `${body}${style.eol}` : body, "utf8");
-    renameSync3(tmpPath, path);
+    writeFileSync6(tmpPath, style.trailingNewline ? `${body}${style.eol}` : body, "utf8");
+    renameSync4(tmpPath, path);
   } catch (err) {
     throw new EnigmaError({
       code: "E_CLAUDE_SETTINGS_UNWRITABLE",
