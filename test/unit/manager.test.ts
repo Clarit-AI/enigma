@@ -409,4 +409,80 @@ describe('storage manager', () => {
     const finalNames = listSecrets({ scope: 'global' }).map((e) => e.name).sort();
     expect(finalNames).toEqual(['NAME_Y']);
   });
+
+  it('PR #77 review: deleteSecret with an omitted scope removes exactly the GLOBAL entry it resolved before the depository await, even when a same-name PROJECT set commits during that await', async () => {
+    // Seed the global entry via 1password so its `op item delete` can be
+    // held open — the exact interleaving the review describes.
+    await setSecret({ name: 'NAME_SHARED', value: SENTINEL, scope: 'global', depository: '1password', actor: 'cli' });
+
+    let releaseDelete: () => void = () => {};
+    const deleteHeld = new Promise<void>((resolve) => { releaseDelete = resolve; });
+
+    respondToOp = (call) => {
+      if (call.args[0] === 'item' && call.args[1] === 'delete') {
+        return deleteHeld.then(() => ({ stdout: '' }));
+      }
+      return { stdout: '' };
+    };
+
+    // Scope OMITTED: at the moment `deleteSecret` resolves which entry to
+    // remove, only the global entry exists, so D1.5 shadowing is a
+    // non-issue and it unambiguously resolves the global entry — then
+    // parks on `depository.delete`.
+    const deletePromise = deleteSecret('NAME_SHARED', { cwd: tmpProject, actor: 'cli' });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // While the delete is parked, commit a same-name PROJECT set. Under
+    // the pre-fix code (a fresh `resolveIndexEntry(current, name,
+    // opts.scope, pid)` re-applying D1.5 *inside* the lock), this new
+    // project entry is what the delta would find and wrongly remove,
+    // leaving the already-deleted global entry dangling in the index.
+    await setSecret({ name: 'NAME_SHARED', value: SENTINEL, scope: 'project', cwd: tmpProject, depository: 'encrypted', actor: 'cli' });
+
+    releaseDelete();
+    await deletePromise;
+
+    // The global entry (whose depository value was actually deleted) is
+    // gone; the unrelated project entry created during the await survives
+    // untouched, and nothing is left dangling.
+    const globalNames = listSecrets({ scope: 'global' }).map((e) => e.name);
+    const projectNames = listSecrets({ scope: 'project', cwd: tmpProject }).map((e) => e.name);
+    expect(globalNames).toEqual([]);
+    expect(projectNames).toEqual(['NAME_SHARED']);
+    expect(listSecrets({ scope: 'all' })).toHaveLength(1);
+  });
+
+  it('deleteSecret refuses (E_NOT_FOUND) rather than removing a different entry when the originally-resolved entry changed ref during the depository await', async () => {
+    // Seed a global entry via 1password, held on delete.
+    await setSecret({ name: 'NAME_CHANGED', value: SENTINEL, scope: 'global', depository: '1password', actor: 'cli' });
+
+    let releaseDelete: () => void = () => {};
+    const deleteHeld = new Promise<void>((resolve) => { releaseDelete = resolve; });
+    respondToOp = (call) => {
+      if (call.args[0] === 'item' && call.args[1] === 'delete') {
+        return deleteHeld.then(() => ({ stdout: '' }));
+      }
+      if (call.args[0] === 'item' && call.args[1] === 'create') {
+        return { stdout: JSON.stringify({ id: 'opitemid_rotated', title: 'NAME_CHANGED', category: 'API_CREDENTIAL' }) };
+      }
+      return { stdout: '' };
+    };
+
+    const deletePromise = deleteSecret('NAME_CHANGED', { scope: 'global', actor: 'cli' });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Same name+scope re-set (rotate: true, since the pre-lock existence
+    // check would otherwise refuse before ever reaching the depository)
+    // while the delete is parked: the entry's `ref` now points at a
+    // different depository item, so it is a DIFFERENT logical entry than
+    // the one whose value was just deleted, even though name/scope/
+    // projectId still match.
+    await setSecret({ name: 'NAME_CHANGED', value: SENTINEL, scope: 'global', depository: '1password', rotate: true, actor: 'cli' });
+
+    releaseDelete();
+    await expect(deletePromise).rejects.toMatchObject({ code: 'E_NOT_FOUND' });
+
+    // The refusal must not have touched the new entry.
+    expect(listSecrets({ scope: 'global' }).map((e) => e.name)).toEqual(['NAME_CHANGED']);
+  });
 });

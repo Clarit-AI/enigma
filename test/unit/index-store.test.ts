@@ -5,7 +5,6 @@ import {
   readFileSync,
   rmSync,
   statSync,
-  utimesSync,
   writeFileSync,
 } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -206,19 +205,40 @@ describe('index-store mutateIndex lock (Issue #66)', () => {
     });
 
     expect(observedDuringDelta).not.toBeNull();
-    // Two lines: pid + createdAtMs (a trailing \n yields a third empty entry
-    // on split — verify the non-empty parts explicitly).
+    // Three lines: token + pid + createdAtMs (a trailing \n yields a fourth
+    // empty entry on split — verify the non-empty parts explicitly).
     const lines = observedDuringDelta!.split('\n').filter((line) => line.length > 0);
-    expect(lines).toHaveLength(2);
-    expect(Number.isFinite(Number(lines[0]))).toBe(true);
+    expect(lines).toHaveLength(3);
+    // token: 32-char hex from randomBytes(16).
+    expect(lines[0]).toMatch(/^[0-9a-f]{32}$/);
     expect(Number.isFinite(Number(lines[1]))).toBe(true);
-    expect(Number(lines[0])).toBe(process.pid);
+    expect(Number.isFinite(Number(lines[2]))).toBe(true);
+    expect(Number(lines[1])).toBe(process.pid);
 
     // Lock file mode is 0600 (observed inside the critical section, before release).
     expect(observedMode).toBe(0o600);
 
     // Lock file is released after mutateIndex returns.
     expect(existsSync(indexLockPath())).toBe(false);
+  });
+
+  it('release() only unlinks the lock if it still carries our token — a lock a stale-break winner replaced under us is left alone (Issue #66 review)', () => {
+    const lockPath = indexLockPath();
+    let replacementBody = '';
+    mutateIndex((cur) => {
+      // Simulate a stale-break winner replacing our lock file with its own
+      // (different-token) lock while we still believe we hold it. In
+      // practice a *live* holder's lock can't be broken by anyone else —
+      // the stale check requires it to look stale first — but this is
+      // exactly the invariant the token check exists to protect: release()
+      // must never remove a lock it does not own, however it got there.
+      replacementBody = `deadbeefdeadbeefdeadbeefdeadbeef\n424242\n${Date.now()}\n`;
+      writeFileSync(lockPath, replacementBody, { mode: 0o600 });
+      return upsertIndexEntry(cur, makeEntry());
+    });
+
+    expect(existsSync(lockPath)).toBe(true);
+    expect(readFileSync(lockPath, 'utf8')).toBe(replacementBody);
   });
 
   it('releases the lock in finally even when the delta throws', () => {
@@ -247,12 +267,14 @@ describe('index-store mutateIndex lock (Issue #66)', () => {
   });
 
   it('breaks a stale lock left by a crashed process and re-acquires (Issue #66, AC #3)', () => {
-    // Plant a lock file whose mtime is well past the stale threshold.
+    // Plant a lock file whose recorded createdAtMs is well past the stale
+    // threshold. Staleness is judged from the lock body's own content, not
+    // filesystem mtime (see acquireIndexLock), so the body's third field is
+    // what makes this lock look crashed-and-abandoned.
     const lockPath = indexLockPath();
     mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
-    writeFileSync(lockPath, '99999\n1\n', { mode: 0o600 });
-    const staleAt = (Date.now() - LOCK_STALE_MS - 5_000) / 1000;
-    utimesSync(lockPath, staleAt, staleAt);
+    const staleCreatedAtMs = Date.now() - LOCK_STALE_MS - 5_000;
+    writeFileSync(lockPath, `deadbeefdeadbeefdeadbeefdeadbeef\n99999\n${staleCreatedAtMs}\n`, { mode: 0o600 });
 
     mutateIndex((cur) => upsertIndexEntry(cur, makeEntry()));
 
@@ -265,10 +287,8 @@ describe('index-store mutateIndex lock (Issue #66)', () => {
   it('does NOT break a fresh lock held by a live process (waits then times out)', () => {
     const lockPath = indexLockPath();
     mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
-    writeFileSync(lockPath, '99999\n1\n', { mode: 0o600 });
-    // Fresh (just-now) mtime — must NOT be broken.
-    const now = Date.now() / 1000;
-    utimesSync(lockPath, now, now);
+    // Fresh (just-now) createdAtMs — must NOT be broken.
+    writeFileSync(lockPath, `deadbeefdeadbeefdeadbeefdeadbeef\n99999\n${Date.now()}\n`, { mode: 0o600 });
 
     __setLockTimingForTesting({ staleMs: 60_000, retryIntervalMs: 5, maxAttempts: 3 });
 
@@ -288,9 +308,7 @@ describe('index-store mutateIndex lock (Issue #66)', () => {
   it('throws E_LOCK_TIMEOUT after the bounded retry window, naming the lock file (Issue #66, AC #2)', () => {
     const lockPath = indexLockPath();
     mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
-    writeFileSync(lockPath, '99999\n1\n', { mode: 0o600 });
-    const now = Date.now() / 1000;
-    utimesSync(lockPath, now, now);
+    writeFileSync(lockPath, `deadbeefdeadbeefdeadbeefdeadbeef\n99999\n${Date.now()}\n`, { mode: 0o600 });
 
     __setLockTimingForTesting({ staleMs: 60_000, retryIntervalMs: 5, maxAttempts: 3 });
 
@@ -311,11 +329,15 @@ describe('index-store mutateIndex lock (Issue #66)', () => {
     expect(names).toEqual(['A', 'B']);
   });
 
-  it('race: two mutateIndex calls for different names, each holding the lock — both entries survive (Issue #66, AC #6)', () => {
-    // Simulate the AC's race: caller A's pre-check saw an empty index, caller B's
-    // pre-check saw an empty index, B's "depository write" completes first, then
-    // both call mutateIndex. Each mutateIndex re-reads inside its lock, so B's
-    // entry is visible to A's delta and vice-versa; both names survive.
+  it('sequential simulation (NOT proof of interprocess exclusion — see manager.test.ts AC #6): two mutateIndex calls for different names, each re-reading inside its own lock, both entries survive', () => {
+    // This is a SEQUENTIAL simulation of the AC's race, run entirely within
+    // one process/one call stack — it proves mutateIndex's re-read-inside-
+    // the-lock contract, not that two REAL concurrent processes actually
+    // exclude each other (this test suite has no way to run genuinely
+    // concurrent processes). The real lost-update regression coverage for
+    // AC #6 lives at the `setSecret` level in manager.test.ts, which
+    // exercises the actual async interleaving via a deferred depository
+    // write (QA Low 5, PR #77 review).
     mutateIndex((cur) => upsertIndexEntry(cur, makeEntry({ name: 'NAME_A' })));
     mutateIndex((cur) => {
       // Inside A's second critical section, simulate "B already wrote NAME_B".
@@ -329,7 +351,11 @@ describe('index-store mutateIndex lock (Issue #66)', () => {
     expect(names).toEqual(['NAME_A', 'NAME_B']);
   });
 
-  it('race: a remove interleaved with a set of a different name — both effects persist (Issue #66, AC #7)', () => {
+  it('sequential simulation (NOT proof of interprocess exclusion — see manager.test.ts AC #7): a remove interleaved with a set of a different name, both effects persist', () => {
+    // Same caveat as the AC #6 test above: a sequential simulation of the
+    // interleaving, not real interprocess concurrency. The real lost-update
+    // coverage for AC #7 lives at the `deleteSecret`/`setSecret` level in
+    // manager.test.ts (QA Low 5, PR #77 review).
     // Seed NAME_A, then mutate twice: first remove NAME_A, then set NAME_B.
     mutateIndex((cur) => upsertIndexEntry(cur, makeEntry({ name: 'NAME_A' })));
 
