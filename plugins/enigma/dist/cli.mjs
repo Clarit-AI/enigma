@@ -310,13 +310,23 @@ function gitEntryKind(entryPath) {
     return "missing";
   }
 }
+function statErrorKind(err) {
+  const code = err.code;
+  return code === "ENOENT" || code === "ENOTDIR" ? "absent" : "error";
+}
 function pathStat(p) {
   try {
     statSync(p);
     return "exists";
   } catch (err) {
-    const code = err.code;
-    return code === "ENOENT" || code === "ENOTDIR" ? "absent" : "error";
+    return statErrorKind(err);
+  }
+}
+function directoryStat(p) {
+  try {
+    return statSync(p).isDirectory() ? "directory" : "error";
+  } catch (err) {
+    return statErrorKind(err);
   }
 }
 function safeRealpath(p, fallback) {
@@ -348,7 +358,7 @@ function findRepoIdentityPath(cwd) {
       const pointer = parseGitdirPointer(raw);
       if (pointer === null) return fallback;
       const gitdir = resolveGitPointer(worktreeRoot, pointer);
-      if (pathStat(gitdir) !== "exists") return fallback;
+      if (directoryStat(gitdir) !== "directory") return fallback;
       const commondirFile = join3(gitdir, "commondir");
       const commondirState = pathStat(commondirFile);
       if (commondirState === "exists") {
@@ -356,7 +366,9 @@ function findRepoIdentityPath(cwd) {
         if (content === null) return fallback;
         const cdp = parseCommondirPointer(content);
         if (cdp === null) return fallback;
-        commonDir = resolveGitPointer(gitdir, cdp);
+        const commondirTarget = resolveGitPointer(gitdir, cdp);
+        if (directoryStat(commondirTarget) !== "directory") return fallback;
+        commonDir = commondirTarget;
       } else if (commondirState === "absent") {
         commonDir = gitdir;
       } else {

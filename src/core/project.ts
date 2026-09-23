@@ -90,13 +90,35 @@ function gitEntryKind(entryPath: string): 'directory' | 'file' | 'missing' {
  * a non-traversable directory as an absent one — the exact bug a chmod
  * 000 on `<gitdir>` was triggering for `commondir` lookups.
  */
+function statErrorKind(err: unknown): 'absent' | 'error' {
+  const code = (err as NodeJS.ErrnoException).code;
+  return code === 'ENOENT' || code === 'ENOTDIR' ? 'absent' : 'error';
+}
+
 function pathStat(p: string): 'exists' | 'absent' | 'error' {
   try {
     statSync(p);
     return 'exists';
   } catch (err) {
-    const code = (err as NodeJS.ErrnoException).code;
-    return code === 'ENOENT' || code === 'ENOTDIR' ? 'absent' : 'error';
+    return statErrorKind(err);
+  }
+}
+
+/**
+ * Like `pathStat`, but additionally requires `p` to be a directory
+ * (`statSync` follows symlinks, so a symlink to a real directory still
+ * counts). A `gitdir:` or `commondir` pointer can resolve to any path on
+ * disk, including an existing regular file; treating "exists" alone as
+ * good enough would let that file's own realpath become the project
+ * identity. A non-directory is folded into `'error'` (not a new variant)
+ * because callers already treat "error" as "cannot use this as a
+ * gitdir/common-dir, fall back" — the same action a wrong type requires.
+ */
+function directoryStat(p: string): 'directory' | 'absent' | 'error' {
+  try {
+    return statSync(p).isDirectory() ? 'directory' : 'error';
+  } catch (err) {
+    return statErrorKind(err);
   }
 }
 
@@ -138,7 +160,11 @@ function readFileSafe(filePath: string): string | null {
  *     Stat errors are inspected for `err.code`: only `ENOENT`/`ENOTDIR`
  *     count as "file is absent, use gitdir"; EACCES/EPERM/etc. fall back
  *     to `realpath(worktreeRoot)` rather than silently misclassify a
- *     non-traversable gitdir as "no commondir here". Never throws.
+ *     non-traversable gitdir as "no commondir here". The resolved gitdir
+ *     and, when present, the resolved commondir target must each be a
+ *     directory (symlinks to a real directory count) — a `gitdir:` or
+ *     `commondir` pointer that resolves to an existing regular file falls
+ *     back too, rather than hashing that file's own realpath. Never throws.
  */
 export function findRepoIdentityPath(cwd: string): string {
   const worktreeRoot = findProjectPath(cwd);
@@ -157,7 +183,7 @@ export function findRepoIdentityPath(cwd: string): string {
       const pointer = parseGitdirPointer(raw);
       if (pointer === null) return fallback;
       const gitdir = resolveGitPointer(worktreeRoot, pointer);
-      if (pathStat(gitdir) !== 'exists') return fallback;
+      if (directoryStat(gitdir) !== 'directory') return fallback;
 
       const commondirFile = join(gitdir, 'commondir');
       const commondirState = pathStat(commondirFile);
@@ -168,7 +194,9 @@ export function findRepoIdentityPath(cwd: string): string {
         if (content === null) return fallback;
         const cdp = parseCommondirPointer(content);
         if (cdp === null) return fallback;
-        commonDir = resolveGitPointer(gitdir, cdp);
+        const commondirTarget = resolveGitPointer(gitdir, cdp);
+        if (directoryStat(commondirTarget) !== 'directory') return fallback;
+        commonDir = commondirTarget;
       } else if (commondirState === 'absent') {
         commonDir = gitdir;
       } else {

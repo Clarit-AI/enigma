@@ -552,6 +552,61 @@ describe('findRepoIdentityPath (Issue #67)', () => {
     }
   });
 
+  // PR #76 review (round 5): a `gitdir:` pointer that resolves to an
+  // existing *regular file* used to pass the old `pathStat(gitdir) !==
+  // 'exists'` check (statSync succeeds on files too), then
+  // `join(gitdir, 'commondir')` produced ENOTDIR — classified as "absent"
+  // — so the resolver picked commonDir = gitdir (the file) and hashed the
+  // file's own realpath as the project identity. The fix requires the
+  // resolved gitdir to actually be a directory (symlinks to a real
+  // directory still count, since statSync follows them).
+  it('gitdir pointer resolves to a regular file, not a directory → falls back to worktree root', () => {
+    const wt = realTmpDir('enigma-identity-gitdir-is-file-');
+    try {
+      const bogusGitdir = join(wt, 'not-a-gitdir.txt');
+      writeFileSync(bogusGitdir, 'this is a regular file, not a gitdir\n');
+      writeFileSync(join(wt, '.git'), `gitdir: ${bogusGitdir}\n`);
+
+      // Before the fix: findRepoIdentityPath(wt) returned realpath(bogusGitdir)
+      // (a file's identity, not the worktree's). After the fix: fallback.
+      expect(findRepoIdentityPath(wt)).toBe(realpathSync(wt));
+      expect(projectId(wt)).toBe(
+        createHash('sha256').update(realpathSync(wt)).digest('hex').slice(0, PROJECT_ID_LENGTH),
+      );
+    } finally {
+      rmSync(wt, { recursive: true, force: true });
+    }
+  });
+
+  it('commondir pointer resolves to a regular file, not a directory → falls back to worktree root', () => {
+    const main = realTmpDir('enigma-identity-commondir-is-file-');
+    try {
+      const gitdir = join(main, '.git', 'worktrees', 'wt');
+      mkdirSync(gitdir, { recursive: true });
+      const bogusCommon = join(main, 'not-a-commondir-target.txt');
+      writeFileSync(bogusCommon, 'this is a regular file, not a common dir\n');
+      // commondir's pointer resolves to a regular file. Absolute, so the
+      // fixture can't silently miss its target via a wrong '../' count.
+      writeFileSync(join(gitdir, 'commondir'), `${bogusCommon}\n`);
+
+      const wt = realTmpDir('enigma-identity-commondir-is-file-wt-');
+      try {
+        writeFileSync(join(wt, '.git'), `gitdir: ${gitdir}\n`);
+
+        // Before the fix: findRepoIdentityPath(wt) returned realpath(bogusCommon)
+        // (a file's identity). After the fix: fallback to realpath(wt).
+        expect(findRepoIdentityPath(wt)).toBe(realpathSync(wt));
+        expect(projectId(wt)).toBe(
+          createHash('sha256').update(realpathSync(wt)).digest('hex').slice(0, PROJECT_ID_LENGTH),
+        );
+      } finally {
+        rmSync(wt, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(main, { recursive: true, force: true });
+    }
+  });
+
   it('does not throw for any input — every error path returns a string', () => {
     // Spot-check a few obviously broken inputs.
     expect(() => findRepoIdentityPath('')).not.toThrow();
