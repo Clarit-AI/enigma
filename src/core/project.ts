@@ -48,7 +48,7 @@ export function parseGitdirPointer(content: string): string | null {
 /**
  * Parses the contents of a `commondir` file. Returns the trimmed path, or
  * `null` if the file is empty or whitespace-only. A missing or unreadable
- * file is the caller's problem to detect first (with `existsSync`).
+ * file is the caller's problem to detect first (with `pathStat`).
  */
 export function parseCommondirPointer(content: string): string | null {
   const firstLine = content.split(/\r?\n/, 1)[0];
@@ -78,6 +78,25 @@ function gitEntryKind(entryPath: string): 'directory' | 'file' | 'missing' {
     return 'missing';
   } catch {
     return 'missing';
+  }
+}
+
+/**
+ * Three-valued stat: distinguishes "path is genuinely absent" (ENOENT or
+ * ENOTDIR, treated as "doesn't exist — caller may fall through to its
+ * absent-path branch") from "stat failed for some other reason" (EACCES,
+ * EPERM, …, treated as "caller must fall back because we cannot tell").
+ * `existsSync` collapses both into `false`, which silently misclassifies
+ * a non-traversable directory as an absent one — the exact bug a chmod
+ * 000 on `<gitdir>` was triggering for `commondir` lookups.
+ */
+function pathStat(p: string): 'exists' | 'absent' | 'error' {
+  try {
+    statSync(p);
+    return 'exists';
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === 'ENOENT' || code === 'ENOTDIR' ? 'absent' : 'error';
   }
 }
 
@@ -116,7 +135,10 @@ function readFileSafe(filePath: string): string | null {
  *     failure (NOT a "use gitdir" success): git itself never writes an
  *     empty commondir, so its presence in that state means something is
  *     wrong with the worktree, not that commondir is intentionally absent.
- *     Never throws.
+ *     Stat errors are inspected for `err.code`: only `ENOENT`/`ENOTDIR`
+ *     count as "file is absent, use gitdir"; EACCES/EPERM/etc. fall back
+ *     to `realpath(worktreeRoot)` rather than silently misclassify a
+ *     non-traversable gitdir as "no commondir here". Never throws.
  */
 export function findRepoIdentityPath(cwd: string): string {
   const worktreeRoot = findProjectPath(cwd);
@@ -135,10 +157,11 @@ export function findRepoIdentityPath(cwd: string): string {
       const pointer = parseGitdirPointer(raw);
       if (pointer === null) return fallback;
       const gitdir = resolveGitPointer(worktreeRoot, pointer);
-      if (!existsSync(gitdir)) return fallback;
+      if (pathStat(gitdir) !== 'exists') return fallback;
 
       const commondirFile = join(gitdir, 'commondir');
-      if (existsSync(commondirFile)) {
+      const commondirState = pathStat(commondirFile);
+      if (commondirState === 'exists') {
         // Present: must be readable AND parse to a non-empty pointer, or
         // we fall back. Distinguishes from "absent" (common dir = gitdir).
         const content = readFileSafe(commondirFile);
@@ -146,8 +169,14 @@ export function findRepoIdentityPath(cwd: string): string {
         const cdp = parseCommondirPointer(content);
         if (cdp === null) return fallback;
         commonDir = resolveGitPointer(gitdir, cdp);
-      } else {
+      } else if (commondirState === 'absent') {
         commonDir = gitdir;
+      } else {
+        // EACCES / EPERM / … — we can't tell whether commondir is absent
+        // or merely unreadable (e.g. gitdir itself is chmod 000). Falling
+        // back to realpath(worktreeRoot) per the issue's step 4 is the
+        // safe choice: it never silently hashes a per-worktree gitdir.
+        return fallback;
       }
     } else {
       return fallback;

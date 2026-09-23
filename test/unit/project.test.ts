@@ -463,13 +463,14 @@ describe('findRepoIdentityPath (Issue #67)', () => {
     }
   });
 
-  it('commondir present but unreadable (EACCES) → falls back, not the gitdir (skipped as root)', () => {
-    // macOS root (uid 0) bypasses chmod 000; chmod's permission bits are
-    // bypassed entirely on Linux for root. Skip rather than fake-pass when
-    // the test wouldn't actually exercise the EACCES path.
-    const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
-    if (isRoot) return;
+  // POSIX-permission tests: skip on root (uid 0 bypasses chmod's bits) and
+  // on Windows (chmodSync does not alter the ACL there). Using skipIf
+  // shows them as skipped, not silently passed with zero assertions.
+  const skipPermissionTests = (typeof process.getuid === 'function' && process.getuid() === 0) || process.platform === 'win32';
 
+  it.skipIf(skipPermissionTests)('commondir present but unreadable (EACCES) → falls back, not the gitdir', () => {
+    // POSIX: chmod 000 blocks reads for non-root and produces EACCES on
+    // stat/readFileSync — the pathStat 'error' branch should fall back.
     const main = realTmpDir('enigma-identity-eacces-cd-main-');
     try {
       mkdirSync(join(main, '.git', 'worktrees', 'wt'), { recursive: true });
@@ -494,10 +495,7 @@ describe('findRepoIdentityPath (Issue #67)', () => {
     }
   });
 
-  it('unreadable .git file (EACCES) → falls back without throwing (skipped as root)', () => {
-    const isRoot = typeof process.getuid === 'function' && process.getuid() === 0;
-    if (isRoot) return;
-
+  it.skipIf(skipPermissionTests)('unreadable .git file (EACCES) → falls back without throwing', () => {
     const gitFile = join(tmpRoot, '.git');
     writeFileSync(gitFile, 'gitdir: /tmp/whatever\n');
     chmodSync(gitFile, 0o000);
@@ -506,6 +504,51 @@ describe('findRepoIdentityPath (Issue #67)', () => {
       expect(findRepoIdentityPath(tmpRoot)).toBe(tmpRoot);
     } finally {
       chmodSync(gitFile, 0o644);
+    }
+  });
+
+  // PR #76 review (round 4): existsSync collapsed ENOENT and EACCES into a
+  // single 'false' return, so a chmod-000 gitdir caused the commondir
+  // lookup to fall through to the per-worktree gitdir and silently hash
+  // a per-worktree id. pathStat distinguishes them now: ENOENT/ENOTDIR
+  // means absent, anything else means fallback. This test exercises the
+  // specifically-reported scenario.
+  it.skipIf(skipPermissionTests)('non-traversable gitdir (chmod 000) hides commondir → falls back to worktree root', () => {
+    const main = realTmpDir('enigma-identity-no-traverse-main-');
+    try {
+      const gitdir = join(main, '.git', 'worktrees', 'wt');
+      mkdirSync(gitdir, { recursive: true });
+      // commondir is REAL and has the right pointer; the bug under test
+      // is that existsSync(gitdir + '/commondir') returns false because
+      // gitdir itself denies traversal, so the resolver used to pick
+      // commonDir = gitdir and hash the per-worktree gitdir. pathStat
+      // must now see EACCES (not ENOENT) and route to the fallback.
+      writeFileSync(join(gitdir, 'commondir'), '../..\n');
+      chmodSync(gitdir, 0o000);
+
+      const wt = realTmpDir('enigma-identity-no-traverse-wt-');
+      try {
+        writeFileSync(join(wt, '.git'), `gitdir: ${gitdir}\n`);
+        try {
+          // Before the fix: findRepoIdentityPath(wt) returned the
+          // per-worktree gitdir → projectId(wt) hashed the gitdir,
+          // ≠ projectId(main). After the fix: fallback to realpath(wt).
+          expect(findRepoIdentityPath(wt)).toBe(wt);
+          expect(projectId(wt)).toBe(
+            createHash('sha256')
+              .update(nodePath.resolve(wt))
+              .digest('hex')
+              .slice(0, PROJECT_ID_LENGTH),
+          );
+        } finally {
+          // Restore so rmSync can clean up.
+          chmodSync(gitdir, 0o755);
+        }
+      } finally {
+        rmSync(wt, { recursive: true, force: true });
+      }
+    } finally {
+      rmSync(main, { recursive: true, force: true });
     }
   });
 

@@ -310,6 +310,15 @@ function gitEntryKind(entryPath) {
     return "missing";
   }
 }
+function pathStat(p) {
+  try {
+    statSync(p);
+    return "exists";
+  } catch (err) {
+    const code = err.code;
+    return code === "ENOENT" || code === "ENOTDIR" ? "absent" : "error";
+  }
+}
 function safeRealpath(p, fallback) {
   try {
     return realpathSync(p);
@@ -339,16 +348,19 @@ function findRepoIdentityPath(cwd) {
       const pointer = parseGitdirPointer(raw);
       if (pointer === null) return fallback;
       const gitdir = resolveGitPointer(worktreeRoot, pointer);
-      if (!existsSync2(gitdir)) return fallback;
+      if (pathStat(gitdir) !== "exists") return fallback;
       const commondirFile = join3(gitdir, "commondir");
-      if (existsSync2(commondirFile)) {
+      const commondirState = pathStat(commondirFile);
+      if (commondirState === "exists") {
         const content = readFileSafe(commondirFile);
         if (content === null) return fallback;
         const cdp = parseCommondirPointer(content);
         if (cdp === null) return fallback;
         commonDir = resolveGitPointer(gitdir, cdp);
-      } else {
+      } else if (commondirState === "absent") {
         commonDir = gitdir;
+      } else {
+        return fallback;
       }
     } else {
       return fallback;
