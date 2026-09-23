@@ -150,17 +150,77 @@ describe('RequestStore', () => {
       ]);
 
       const pending = RequestStore.listUnconsumedFulfilled();
-      expect(pending).toEqual([{ id: record.id, names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'] }]);
+      expect(pending).toEqual([
+        { id: record.id, stored: ['OPENAI_API_KEY', 'GITHUB_TOKEN'], failed: [], unknown: [] },
+      ]);
     });
 
-    it('listUnconsumedFulfilled never returns a value or per-name result, only id and names', () => {
-      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    it('splits per-name outcomes into `stored`, `failed`, and `unknown` — mirrors `renderOutcome`\'s bucketing so the recovery signal can label each without exposing error text (ADR-001)', () => {
+      const record = RequestStore.create({
+        kind: 'request',
+        names: ['OPENAI_API_KEY', 'GITHUB_TOKEN', 'STRIPE_KEY'],
+      });
       RequestStore.tryMarkUsed(record.id);
-      RequestStore.fulfill(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
+      RequestStore.fulfill(record.id, [
+        { name: 'OPENAI_API_KEY', ok: true },
+        { name: 'GITHUB_TOKEN', ok: false, errorCode: 'E_VALUE_AMBIGUOUS', reason: 'flagged at parse time' },
+        { name: 'STRIPE_KEY', ok: true },
+      ]);
 
       const [entry] = RequestStore.listUnconsumedFulfilled();
-      expect(entry).toEqual({ id: record.id, names: ['OPENAI_API_KEY'] });
-      expect(Object.keys(entry!)).toEqual(['id', 'names']);
+      expect(entry).toEqual({
+        id: record.id,
+        stored: ['OPENAI_API_KEY', 'STRIPE_KEY'],
+        failed: ['GITHUB_TOKEN'],
+        unknown: [],
+      });
+      expect(Object.keys(entry!).sort()).toEqual(['failed', 'id', 'stored', 'unknown']);
+    });
+
+    it('routes E_OUTCOME_UNKNOWN to the `unknown` bucket, NOT to `failed` (Issue #40 — an unknown outcome is not a confirmed failure)', () => {
+      const record = RequestStore.create({
+        kind: 'request',
+        names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'],
+      });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [
+        { name: 'OPENAI_API_KEY', ok: true },
+        { name: 'GITHUB_TOKEN', ok: false, errorCode: 'E_OUTCOME_UNKNOWN' },
+      ]);
+
+      const [entry] = RequestStore.listUnconsumedFulfilled();
+      expect(entry?.unknown).toEqual(['GITHUB_TOKEN']);
+      expect(entry?.failed).toEqual([]);
+      expect(entry?.stored).toEqual(['OPENAI_API_KEY']);
+    });
+
+    it('renders all three buckets correctly when one record mixes stored, failed, and unknown', () => {
+      const record = RequestStore.create({
+        kind: 'request',
+        names: ['A_OK', 'B_FAIL', 'C_UNKNOWN', 'D_OK'],
+      });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [
+        { name: 'A_OK', ok: true },
+        { name: 'B_FAIL', ok: false, errorCode: 'E_VALUE_AMBIGUOUS', reason: 'static-text-only' },
+        { name: 'C_UNKNOWN', ok: false, errorCode: 'E_OUTCOME_UNKNOWN' },
+        { name: 'D_OK', ok: true },
+      ]);
+
+      const [entry] = RequestStore.listUnconsumedFulfilled();
+      expect(entry?.stored).toEqual(['A_OK', 'D_OK']);
+      expect(entry?.failed).toEqual(['B_FAIL']);
+      expect(entry?.unknown).toEqual(['C_UNKNOWN']);
+    });
+
+    it('a record whose `results` is empty (the default for `fulfill(id)`) does NOT appear — there are no names to re-await', () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id); // defaults to results: []
+
+      expect(RequestStore.listUnconsumedFulfilled()).toEqual([]);
+      expect(RequestStore.get(record.id)?.results).toEqual([]); // record still exists, just not surfaced
+      void record;
     });
 
     it('reading listUnconsumedFulfilled repeatedly does not itself mark anything consumed (the signal cannot erase itself)', () => {
@@ -223,12 +283,46 @@ describe('RequestStore', () => {
       RequestStore.tryMarkUsed(record.id);
       RequestStore.fulfill(record.id, [{ name: 'OPENAI_API_KEY', ok: true }]);
 
-      expect(RequestStore.listUnconsumedFulfilled()).toEqual([{ id: record.id, names: ['OPENAI_API_KEY'] }]);
+      expect(RequestStore.listUnconsumedFulfilled()).toEqual([
+        { id: record.id, stored: ['OPENAI_API_KEY'], failed: [], unknown: [] },
+      ]);
     });
 
     it('a record that is not yet fulfilled (no results) does not appear', () => {
       RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
       expect(RequestStore.listUnconsumedFulfilled()).toEqual([]);
+    });
+
+    // Forward contract for Issue #71 (extensible request form). The two
+    // tests below pin behaviors that today's POST loop in src/web/routes/
+    // does NOT exercise — every code path there emits one result per
+    // declared name, so a "subset" results shape or a name added at
+    // submit time can't happen yet. They exist to lock the store-layer
+    // contract before #71 lands, so the recovery signal stays correct
+    // when the POST loop is changed.
+    it('[forward #71] includes names added by the human at submit time — names in `results` not in `record.names` must appear in the signal', () => {
+      const record = RequestStore.create({ kind: 'request', names: ['A'] });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [
+        { name: 'A', ok: true },
+        { name: 'HUMAN_ADDED', ok: true },
+      ]);
+
+      const [entry] = RequestStore.listUnconsumedFulfilled();
+      expect(entry?.stored).toEqual(['A', 'HUMAN_ADDED']);
+    });
+
+    it('[forward #71] preserves the results ordering within each bucket — the recovery signal must match the per-name order `results` carries', () => {
+      const record = RequestStore.create({ kind: 'request', names: ['A', 'B', 'C'] });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [
+        { name: 'C', ok: true },
+        { name: 'A', ok: true },
+        { name: 'B', ok: true },
+      ]);
+
+      const [entry] = RequestStore.listUnconsumedFulfilled();
+      expect(entry?.stored).toEqual(['C', 'A', 'B']);
     });
 
     it('an expired/swept record is gone from the store entirely, so it cannot appear as unconsumed-fulfilled', () => {

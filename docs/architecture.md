@@ -25,7 +25,7 @@ Decision ids reference [PRD.md](../PRD.md).
 ## ADR-004 — Hooks are the enforcement layer MCP cannot provide (D3.3–D3.4)
 - PreToolUse read-guard denies reads of `.env*`, Enigma's config directory, `env`/`printenv`, `echo $NAME` for known names, `enigma get|env`, `security find-generic-password`, `op read`.
 - PostToolUse tripwire scans tool output for values from `encrypted` and `env` by default (keychain opt-in, 1Password never, to respect prompt profiles), writes audit op `leak`, and returns a `systemMessage`. Claude Code has no output-rewrite hook, so the tripwire warns rather than redacts.
-- SessionStart injects names only into context; nothing is written to `CLAUDE_ENV_FILE`.
+- SessionStart injects registered names (plus sticky default / manifest gaps) into context; nothing is written to `CLAUDE_ENV_FILE`. SessionStart is intentionally separate from the request store: it runs as a short-lived subprocess, so it cannot see in-memory state held by the MCP server, and the recovery signal for a fulfilled-but-unconsumed request/import is exposed only via `enigma_doctor` (the MCP process, where the store is live). The names it returns for a partial-failure record are the names in `record.results` (what the web POST handler actually processed), not `record.names` (what the agent originally requested) — Issue #68.
 
 ## ADR-005 — Local HTTP server design (D2.2, D2.6–D2.8)
 - `node:http` on `127.0.0.1` ephemeral port inside the MCP process; idle shutdown after 10 min.

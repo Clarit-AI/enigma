@@ -14,7 +14,7 @@ Every tool result is text and contains names, depository ids, scopes, and status
 | `enigma_reveal` | `{ name: string, scope?: …, method?: "page"\|"clipboard" }` | `"Reveal link opened; expires in 5 min"` or `"Copied to clipboard; clears in 60 s"` |
 | `enigma_remove` | `{ name: string, scope?: … }` | form-mode boolean confirmation, then `"Removed NAME from <depository>"`; `E_AMBIGUOUS_SCOPE` when both scopes hold the name and none was given |
 | `enigma_import` | `{ path?: string (default ".env"), depository?: DepositoryId, rotate?: boolean }` | names imported, file rewritten summary |
-| `enigma_doctor` | `{}` | platform, available depositories with prompt profiles, `op` status, tunnel binaries, manifest gaps, config paths |
+| `enigma_doctor` | `{}` | platform, available depositories with prompt profiles, `op` status, tunnel binaries, manifest gaps, config paths, and (when at least one `enigma_request`/`enigma_import` form has been submitted but its outcome has never been returned to the model) a "Pending unconfirmed requests:" block of one line per id in the form `id (stored: A, B; failed: C; outcome unknown: D) — call enigma_await(id)` — names only, never values, error codes, or reason text (ADR-001); the three static labels `stored:`, `failed:`, and `outcome unknown:` mirror `renderOutcome`'s three-way split in §4 / `src/mcp/result-text.ts` — an `E_OUTCOME_UNKNOWN` name is NEVER labelled `failed:` (the Issue #40 ruling: an unknown outcome is not a confirmed failure). Only the buckets that are non-empty for a given record are emitted. Records whose `results` is empty (or whose bucketed lists are all empty) are omitted (nothing to re-await) |
 
 `DepositoryId = "env" | "encrypted" | "keychain" | "secret-service" | "1password"`.
 
@@ -90,7 +90,7 @@ Each `NAME` line is one dotenv-compatible entry, `ref` is the bare `NAME` (no sc
 
 ## 5. Hook contracts (`dist/hooks.mjs <event>`)
 
-- `SessionStart`: stdout JSON `{ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "<names only>" } }`.
+- `SessionStart`: stdout JSON `{ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "<names only>" } }` — registered secret names, the project's sticky default depository (if any), and `.enigma.json` manifest gaps. Never the recovery signal for a fulfilled-but-unconsumed request/import: that lives only in `enigma_doctor` (§1), because `RequestStore` is in-memory inside the MCP server process and this hook runs in a separate short-lived subprocess whose store is always empty (Issue #68).
 - `PreToolUse`: on a deny, stdout `{ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "…use enigma_request / enigma run…" } }`, exit 0; when a safe rewrite can be expressed instead of an outright deny (e.g. adding a `.env*` glob exclusion to a recursive `Grep` so it can't walk into a secret file), stdout `{ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "…", updatedInput: { …tool's own input, with the fix applied… } } }`, exit 0; otherwise exit 0 with no output.
 - `PostToolUse`: on a hit, stdout `{ systemMessage: "LEAK: value of NAME appeared in tool output; rotate it via enigma_request rotate:true" }` (one such line per matched name); always exit 0; 5-s self-timeout; outputs > 1 MB skipped; a candidate value under 6 characters is never compared (a short substring produces far more false positives than true positives — a heuristic, not a security boundary).
 
