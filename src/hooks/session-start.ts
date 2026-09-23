@@ -3,14 +3,14 @@
 // Never a value; never writes CLAUDE_ENV_FILE; every read here is a synchronous
 // local file read, so this stays well under the 2 s budget.
 //
-// Issue #68: this hook used to also call `RequestStore.listUnconsumedFulfilled()`
-// for the recovery-signal "pending unconfirmed request" line. The request store
-// lives in memory inside the MCP server process; this hook runs in a separate
-// short-lived subprocess, so its store is always empty and that branch was dead
-// code that claimed a capability it did not have. The recovery signal lives
-// only in `enigma_doctor` now (the MCP process, where the store is real) —
-// see `src/mcp/tools/doctor.ts` and the matching `RequestStore.listUnconsumedFulfilled`
-// entry.
+// Issue #68: this hook used to also surface the "outcome you may not have
+// seen" recovery-signal line by reading from the in-memory request store.
+// The request store lives in memory inside the MCP server process; this
+// hook runs in a separate short-lived subprocess, so its store is always
+// empty and that branch was dead code that claimed a capability it did
+// not have. The recovery signal lives only in `enigma_doctor` now (the
+// MCP process, where the store is real) — see `src/mcp/tools/doctor.ts`
+// and the matching recovery-signal helper in `src/request/store.ts`.
 import { loadConfig, loadProjectManifest } from '../core/config.js';
 import { computeManifestGaps } from '../core/manifest-gaps.js';
 import { findProjectPath } from '../core/project.js';

@@ -104,7 +104,10 @@ describe('enigma_doctor', () => {
     const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
 
     expect(text).toContain('Pending unconfirmed requests:');
-    expect(text).toContain(`${record.id} (names: OPENAI_API_KEY, GITHUB_TOKEN) — call enigma_await(${record.id})`);
+    expect(text).toContain(`${record.id} (stored: OPENAI_API_KEY, GITHUB_TOKEN) — call enigma_await(${record.id})`);
+    // No failed names in this fixture; the static "failed:" label must
+    // not appear at all (no failed names to label).
+    expect(text).not.toMatch(/failed:/);
     await pair.close();
   });
 
@@ -147,20 +150,15 @@ describe('enigma_doctor', () => {
     await pair.close();
   });
 
-  it('reports names from `results`, not from `record.names` (Issue #68) — the recovery signal names what was actually processed', async () => {
-    // Partial-failure shape: the agent asked for THREE names, the web
-    // POST handler processed only TWO of them (one stored, one refused)
-    // and never attempted the third. The signal must list only what was
-    // actually processed — `results` is the source of truth, not the
-    // original request's `names`.
+  it('labels a failed name with the static "failed:" prefix and never with errorCode or reason text (Issue #68 review)', async () => {
     const record = RequestStore.create({
       kind: 'request',
-      names: ['OPENAI_API_KEY', 'GITHUB_TOKEN', 'STRIPE_KEY'],
+      names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'],
     });
     RequestStore.tryMarkUsed(record.id);
     RequestStore.fulfill(record.id, [
       { name: 'OPENAI_API_KEY', ok: true },
-      { name: 'GITHUB_TOKEN', ok: false, errorCode: 'E_VALUE_AMBIGUOUS' },
+      { name: 'GITHUB_TOKEN', ok: false, errorCode: 'E_VALUE_AMBIGUOUS', reason: 'flagged at parse time' },
     ]);
 
     const pair = await connectWithCapabilities({});
@@ -168,12 +166,32 @@ describe('enigma_doctor', () => {
     const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
 
     expect(text).toContain('Pending unconfirmed requests:');
-    expect(text).toContain(`${record.id} (names: OPENAI_API_KEY, GITHUB_TOKEN) — call enigma_await(${record.id})`);
-    // The third name was never processed; it must not appear in the
-    // recovery signal, and neither may any value-bearing error text
-    // (ADR-001).
-    expect(text).not.toContain('STRIPE_KEY');
+    // The failed label is the STATIC word "failed:" — the per-name
+    // errorCode/reason text must never appear (ADR-001), and the stored
+    // name must appear under "stored:" with no "failed" co-mingling.
+    const line = text
+      .split('\n')
+      .find((l) => l.includes(record.id));
+    expect(line).toBeDefined();
+    expect(line!).toContain(`${record.id} (stored: OPENAI_API_KEY; failed: GITHUB_TOKEN) — call enigma_await(${record.id})`);
     expect(text).not.toContain('E_VALUE_AMBIGUOUS');
+    expect(text).not.toContain('flagged at parse time');
+
+    await pair.close();
+  });
+
+  it('omits records whose `results` is empty (Issue #68 review) — nothing to re-await, nothing to render', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    RequestStore.tryMarkUsed(record.id);
+    RequestStore.fulfill(record.id); // defaults to results: []
+
+    const pair = await connectWithCapabilities({});
+    const result = await pair.client.callTool({ name: 'enigma_doctor', arguments: {} });
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+    expect(text).not.toContain('Pending unconfirmed requests');
+    expect(text).not.toContain(record.id);
+    expect(text).not.toContain('OPENAI_API_KEY');
 
     await pair.close();
   });

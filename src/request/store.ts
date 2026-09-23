@@ -287,32 +287,38 @@ export const RequestStore = {
    * design — the revealed value goes only to the human), so a fulfilled
    * reveal has nothing pending for the agent to re-await.
    *
-   * Returns names from `record.results` (the names actually processed by the
-   * web POST handler), not `record.names` (the names the agent originally
-   * requested). Issue #68: those already differ when a write fails partway
-   * through, and will diverge further when the extensible request form
-   * (Issue #71) lets the human add or remove names. The recovery signal has
-   * to name what was actually processed, not what the agent asked for —
-   * "call enigma_await(id)" only makes sense if the names listed are the
-   * ones whose outcome the agent will receive.
-   *
-   * Returns names and ids only, never values, per-name `errorCode`, or
-   * `reason` text (ADR-001) — this is purely "there is an outcome you may
-   * not have seen; call enigma_await(id)", not the outcome itself. Reading
-   * this list never marks anything consumed, so calling it repeatedly
-   * (e.g. from enigma_doctor) cannot make the signal disappear on its own.
-   * Bounded by the same in-memory TTL/used-grace sweep as every other
-   * record; no new persistence. Lives in the MCP server process only —
-   * SessionStart runs in a separate short-lived subprocess and never
-   * reaches this code (see Issue #68 for the dead-code removal).
+   * Each entry carries the names split into `stored` (ok === true) and
+   * `failed` (ok === false), so the recovery signal can label a failed
+   * write as such — `call enigma_await(id)` followed by a "failed: C" label
+   * tells the agent not to retry blindly — without ever exposing the
+   * per-name `errorCode` or `reason` text (ADR-001). Names come from
+   * `record.results[*].name` (what the web POST handler actually
+   * processed), not `record.names` (what the agent originally requested):
+   * Issue #68, forward-contract for the extensible request form (#71) that
+   * lets the human add or remove names at submit time. A record whose
+   * `results` is empty is omitted — there are no names to re-await, so the
+   * signal has nothing to say about it. Reading this list never marks
+   * anything consumed, so calling it repeatedly (e.g. from enigma_doctor)
+   * cannot make the signal disappear on its own. Bounded by the same
+   * in-memory TTL/used-grace sweep as every other record; no new
+   * persistence. Lives in the MCP server process only — SessionStart runs
+   * in a separate short-lived subprocess and never reaches this code (see
+   * Issue #68 for the dead-code removal).
    */
-  listUnconsumedFulfilled(): Array<{ id: string; names: string[] }> {
-    const out: Array<{ id: string; names: string[] }> = [];
+  listUnconsumedFulfilled(): Array<{ id: string; stored: string[]; failed: string[] }> {
+    const out: Array<{ id: string; stored: string[]; failed: string[] }> = [];
     for (const record of records.values()) {
       if (record.kind === 'reveal') continue;
       if (record.results === undefined) continue;
       if (record.outcomeConsumedAt !== undefined) continue;
-      out.push({ id: record.id, names: record.results.map((r) => r.name) });
+      const stored: string[] = [];
+      const failed: string[] = [];
+      for (const r of record.results) {
+        if (r.ok) stored.push(r.name);
+        else failed.push(r.name);
+      }
+      if (stored.length === 0 && failed.length === 0) continue;
+      out.push({ id: record.id, stored, failed });
     }
     return out;
   },
