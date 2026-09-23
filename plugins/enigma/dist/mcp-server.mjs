@@ -42809,7 +42809,17 @@ function appendAuditEvent(event) {
 }
 
 // src/core/index-store.ts
-import { chmodSync as chmodSync2, closeSync, mkdirSync as mkdirSync2, openSync, renameSync as renameSync2, statSync, unlinkSync, writeFileSync as writeFileSync2 } from "node:fs";
+import {
+  chmodSync as chmodSync2,
+  closeSync,
+  linkSync,
+  mkdirSync as mkdirSync2,
+  openSync,
+  readFileSync as readFileSync2,
+  renameSync as renameSync2,
+  unlinkSync,
+  writeFileSync as writeFileSync2
+} from "node:fs";
 import { dirname as dirname3 } from "node:path";
 import { randomBytes as randomBytes3 } from "node:crypto";
 var EMPTY_INDEX = { version: 1, entries: [] };
@@ -42874,65 +42884,124 @@ function syncSleep(ms) {
   if (ms <= 0) return;
   Atomics.wait(SLEEP_BUFFER, 0, 0, ms);
 }
-function acquireIndexLock() {
-  const lockPath = indexLockPath();
+function ensureLockDir(lockPath) {
   const dir = dirname3(lockPath);
   try {
     mkdirSync2(dir, { recursive: true, mode: 448 });
     chmodSync2(dir, 448);
   } catch {
   }
+}
+function readLockBody(lockPath) {
+  try {
+    const raw = readFileSync2(lockPath, "utf8");
+    const lines = raw.split("\n");
+    const token = lines[0] ?? "";
+    const pid = lines[1] ?? "";
+    const createdAtMs = Number(lines[2] ?? Number.NaN);
+    if (!token || !Number.isFinite(createdAtMs)) return void 0;
+    return { token, pid, createdAtMs };
+  } catch {
+    return void 0;
+  }
+}
+function wrapAcquireError(err, lockPath) {
+  const cause = err instanceof Error ? err.constructor.name : String(err);
+  return new EnigmaError({
+    code: "E_LOCK_TIMEOUT",
+    message: `Failed to acquire ${lockPath}: ${cause}`
+  });
+}
+function acquireIndexLock() {
+  const lockPath = indexLockPath();
+  ensureLockDir(lockPath);
   for (let attempt = 0; attempt < LOCK_MAX_ATTEMPTS; attempt++) {
     let fd;
     try {
       fd = openSync(lockPath, "wx", 384);
-      writeFileSync2(fd, `${process.pid}
+    } catch (err) {
+      if (!(err instanceof Error) || err.code !== "EEXIST") {
+        throw wrapAcquireError(err, lockPath);
+      }
+    }
+    if (fd !== void 0) {
+      const token = randomBytes3(16).toString("hex");
+      let bodyWritten = false;
+      try {
+        writeFileSync2(fd, `${token}
+${process.pid}
 ${Date.now()}
 `);
-      closeSync(fd);
-      fd = void 0;
+        bodyWritten = true;
+        closeSync(fd);
+      } catch (err) {
+        if (!bodyWritten) {
+          try {
+            closeSync(fd);
+          } catch {
+          }
+        }
+        try {
+          unlinkSync(lockPath);
+        } catch {
+        }
+        throw wrapAcquireError(err, lockPath);
+      }
       return {
         path: lockPath,
         release: () => {
           try {
-            unlinkSync(lockPath);
+            const current = readLockBody(lockPath);
+            if (current && current.token === token) {
+              try {
+                unlinkSync(lockPath);
+              } catch {
+              }
+            }
           } catch {
           }
         }
       };
+    }
+    let body;
+    try {
+      body = readLockBody(lockPath);
     } catch (err) {
-      if (fd !== void 0) {
-        try {
-          closeSync(fd);
-        } catch {
-        }
-      }
-      const code = err.code;
-      if (code !== "EEXIST") throw err;
-      let stat;
+      throw wrapAcquireError(err, lockPath);
+    }
+    if (!body) {
+      continue;
+    }
+    const ageMs = Date.now() - body.createdAtMs;
+    if (ageMs > LOCK_STALE_MS) {
+      const tombstone = `${lockPath}.stale-${process.pid}-${randomBytes3(4).toString("hex")}`;
       try {
-        stat = statSync(lockPath);
-      } catch (statErr) {
-        if (statErr.code === "ENOENT") continue;
-        throw statErr;
+        renameSync2(lockPath, tombstone);
+      } catch (renameErr) {
+        const code = renameErr.code;
+        if (code === "ENOENT" || code === "EEXIST") continue;
+        throw wrapAcquireError(renameErr, lockPath);
       }
-      const ageMs = Date.now() - stat.mtimeMs;
-      if (ageMs > LOCK_STALE_MS) {
-        const tombstone = `${lockPath}.stale-${process.pid}-${randomBytes3(4).toString("hex")}`;
+      const tombstoneBody = readLockBody(tombstone);
+      if (tombstoneBody && Date.now() - tombstoneBody.createdAtMs <= LOCK_STALE_MS) {
         try {
-          renameSync2(lockPath, tombstone);
-        } catch (renameErr) {
-          if (renameErr.code === "EEXIST") continue;
-          throw renameErr;
+          linkSync(tombstone, lockPath);
+        } catch {
         }
         try {
           unlinkSync(tombstone);
         } catch {
         }
+        syncSleep(LOCK_RETRY_INTERVAL_MS);
         continue;
       }
-      syncSleep(LOCK_RETRY_INTERVAL_MS);
+      try {
+        unlinkSync(tombstone);
+      } catch {
+      }
+      continue;
     }
+    syncSleep(LOCK_RETRY_INTERVAL_MS);
   }
   throw new EnigmaError({
     code: "E_LOCK_TIMEOUT",
@@ -42952,7 +43021,7 @@ function mutateIndex(delta) {
 
 // src/storage/depositories/encrypted.ts
 import { createCipheriv, createDecipheriv, randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
 var ALGORITHM = "aes-256-gcm";
 var KEY_BYTES = 32;
 var IV_BYTES = 12;
@@ -42960,7 +43029,7 @@ var FILE_MODE2 = 384;
 var EMPTY_SECRETS_FILE = { version: 1, entries: {} };
 function readKey() {
   if (!existsSync3(keyPath())) return void 0;
-  const key = Buffer.from(readFileSync2(keyPath(), "utf8"), "base64");
+  const key = Buffer.from(readFileSync3(keyPath(), "utf8"), "base64");
   if (key.length !== KEY_BYTES) readFailed();
   return key;
 }
@@ -43042,7 +43111,7 @@ var encryptedDepositoryModule = {
 };
 
 // src/storage/depositories/env.ts
-import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync4 } from "node:fs";
 import { join as join2 } from "node:path";
 var BEGIN_MARKER = "# enigma:begin";
 var END_MARKER = "# enigma:end";
@@ -43122,7 +43191,7 @@ function checkEnvGitignore(projectPath) {
   if (!existsSync4(gitignorePath)) {
     return [".env is not gitignored: no .gitignore file found in this project"];
   }
-  const lines = readFileSync3(gitignorePath, "utf8").split(/\r?\n/);
+  const lines = readFileSync4(gitignorePath, "utf8").split(/\r?\n/);
   const covered = lines.some((raw) => {
     const line = raw.trim();
     if (!line || line.startsWith("#")) return false;
@@ -43143,7 +43212,7 @@ function requireProjectPath(ctx) {
 }
 function createEnvDepository(ctx) {
   const envFilePath = join2(requireProjectPath(ctx), ".env");
-  const readEnvFile = () => existsSync4(envFilePath) ? readFileSync3(envFilePath, "utf8") : "";
+  const readEnvFile = () => existsSync4(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
   return {
     id: "env",
     promptProfile: "none",
@@ -43894,8 +43963,8 @@ async function deleteSecret(name, opts) {
   }
   try {
     mutateIndex((current) => {
-      const currentRemoved = resolveIndexEntry(current, name, opts.scope, pid);
-      if (!currentRemoved) {
+      const currentRemoved = findIndexEntry(current, removed.name, removed.scope, removed.projectId);
+      if (!currentRemoved || currentRemoved.ref !== removed.ref) {
         throw new EnigmaError({ code: "E_NOT_FOUND", message: `${name} not found`, secretName: name });
       }
       return { ...current, entries: current.entries.filter((e) => e !== currentRemoved) };
@@ -44148,7 +44217,7 @@ function registerDoctorTool(server) {
 }
 
 // src/mcp/tools/import.ts
-import { existsSync as existsSync8, readFileSync as readFileSync5 } from "node:fs";
+import { existsSync as existsSync8, readFileSync as readFileSync6 } from "node:fs";
 import { isAbsolute, join as join4 } from "node:path";
 
 // src/storage/dotenv-file.ts
@@ -44310,7 +44379,7 @@ function removeDotEnvEntries(content, names, opts = {}) {
 
 // src/storage/import-commit.ts
 import { randomBytes as randomBytes5 } from "node:crypto";
-import { existsSync as existsSync7, readFileSync as readFileSync4, renameSync as renameSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync5, renameSync as renameSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync5 } from "node:fs";
 var FILE_MODE4 = 384;
 function writeFileAtomic(path, content, mode) {
   const tmpPath = `${path}.${randomBytes5(6).toString("hex")}.tmp`;
@@ -44378,7 +44447,7 @@ async function commitImport(opts) {
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
-  const currentContent = existsSync7(opts.envFilePath) ? readFileSync4(opts.envFilePath, "utf8") : "";
+  const currentContent = existsSync7(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
   const valueByName = new Map(opts.entries.map((e) => [e.name, e.value]));
   const currentValueByName = new Map(parseDotEnv(currentContent).entries.map((e) => [e.name, e.value]));
   const toRemove = [];
@@ -47042,7 +47111,7 @@ function registerImportTool(server) {
       if (!existsSync8(absPath)) {
         return errorResult(new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` }));
       }
-      const content = readFileSync5(absPath, "utf8");
+      const content = readFileSync6(absPath, "utf8");
       const parsed = parseDotEnv(content);
       if (parsed.entries.length === 0) {
         return textResult(
