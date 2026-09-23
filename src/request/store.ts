@@ -280,20 +280,31 @@ export const RequestStore = {
   /**
    * Enumerates fulfilled 'request'/'import' records (results are in) whose
    * outcome has never been read via `consumeOutcome` — Issue #62's recovery
-   * signal for an `enigma_await`/`enigma_request` call that was interrupted
-   * before the agent ever saw the outcome text, even though the secret was
-   * stored correctly by the independent web layer. 'reveal' records are
-   * excluded: `enigma_reveal` never blocks on `resolveRequestOutcome` (by
+   * signal for an `enigma_await`/`enigma_request`/`enigma_import` call that
+   * was interrupted before the agent ever saw the outcome text, even though
+   * the secret was stored correctly by the independent web layer. 'reveal'
+   * records are excluded: `enigma_reveal` never blocks on `resolveRequestOutcome` (by
    * design — the revealed value goes only to the human), so a fulfilled
    * reveal has nothing pending for the agent to re-await.
    *
-   * Returns names and ids only, never values or per-name results (ADR-001)
-   * — this is purely "there is an outcome you may not have seen; call
-   * enigma_await(id)", not the outcome itself. Reading this list never
-   * marks anything consumed, so calling it repeatedly (e.g. from
-   * enigma_doctor) cannot make the signal disappear on its own. Bounded by
-   * the same in-memory TTL/used-grace sweep as every other record; no new
-   * persistence.
+   * Returns names from `record.results` (the names actually processed by the
+   * web POST handler), not `record.names` (the names the agent originally
+   * requested). Issue #68: those already differ when a write fails partway
+   * through, and will diverge further when the extensible request form
+   * (Issue #71) lets the human add or remove names. The recovery signal has
+   * to name what was actually processed, not what the agent asked for —
+   * "call enigma_await(id)" only makes sense if the names listed are the
+   * ones whose outcome the agent will receive.
+   *
+   * Returns names and ids only, never values, per-name `errorCode`, or
+   * `reason` text (ADR-001) — this is purely "there is an outcome you may
+   * not have seen; call enigma_await(id)", not the outcome itself. Reading
+   * this list never marks anything consumed, so calling it repeatedly
+   * (e.g. from enigma_doctor) cannot make the signal disappear on its own.
+   * Bounded by the same in-memory TTL/used-grace sweep as every other
+   * record; no new persistence. Lives in the MCP server process only —
+   * SessionStart runs in a separate short-lived subprocess and never
+   * reaches this code (see Issue #68 for the dead-code removal).
    */
   listUnconsumedFulfilled(): Array<{ id: string; names: string[] }> {
     const out: Array<{ id: string; names: string[] }> = [];
@@ -301,7 +312,7 @@ export const RequestStore = {
       if (record.kind === 'reveal') continue;
       if (record.results === undefined) continue;
       if (record.outcomeConsumedAt !== undefined) continue;
-      out.push({ id: record.id, names: [...record.names] });
+      out.push({ id: record.id, names: record.results.map((r) => r.name) });
     }
     return out;
   },

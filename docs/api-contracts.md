@@ -90,7 +90,7 @@ Each `NAME` line is one dotenv-compatible entry, `ref` is the bare `NAME` (no sc
 
 ## 5. Hook contracts (`dist/hooks.mjs <event>`)
 
-- `SessionStart`: stdout JSON `{ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "<names only>" } }`.
+- `SessionStart`: stdout JSON `{ hookSpecificOutput: { hookEventName: "SessionStart", additionalContext: "<names only>" } }` — registered secret names, the project's sticky default depository (if any), and `.enigma.json` manifest gaps. Never the recovery signal for a fulfilled-but-unconsumed request/import: that lives only in `enigma_doctor` (§1), because `RequestStore` is in-memory inside the MCP server process and this hook runs in a separate short-lived subprocess whose store is always empty (Issue #68).
 - `PreToolUse`: on a deny, stdout `{ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: "…use enigma_request / enigma run…" } }`, exit 0; when a safe rewrite can be expressed instead of an outright deny (e.g. adding a `.env*` glob exclusion to a recursive `Grep` so it can't walk into a secret file), stdout `{ hookSpecificOutput: { hookEventName: "PreToolUse", permissionDecision: "allow", permissionDecisionReason: "…", updatedInput: { …tool's own input, with the fix applied… } } }`, exit 0; otherwise exit 0 with no output.
 - `PostToolUse`: on a hit, stdout `{ systemMessage: "LEAK: value of NAME appeared in tool output; rotate it via enigma_request rotate:true" }` (one such line per matched name); always exit 0; 5-s self-timeout; outputs > 1 MB skipped; a candidate value under 6 characters is never compared (a short substring produces far more false positives than true positives — a heuristic, not a security boundary).
 

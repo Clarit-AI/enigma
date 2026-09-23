@@ -231,6 +231,58 @@ describe('RequestStore', () => {
       expect(RequestStore.listUnconsumedFulfilled()).toEqual([]);
     });
 
+    it('reports names from `results`, not from `record.names` (Issue #68) — the recovery signal must name what was actually processed', () => {
+      // Partial-failure shape the agent could plausibly receive: the agent
+      // asked for THREE names, the web POST handler processed only TWO of
+      // them (one stored, one refused) and never attempted the third.
+      // Reporting all three would mis-name the names whose outcomes the
+      // agent will actually get back from `enigma_await(id)`; reporting
+      // only what `results` actually carries is the fix. The third name's
+      // absence is deliberate — it demonstrates that the signal is bound
+      // to `results`, not to `record.names`.
+      const record = RequestStore.create({
+        kind: 'request',
+        names: ['OPENAI_API_KEY', 'GITHUB_TOKEN', 'STRIPE_KEY'],
+      });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [
+        { name: 'OPENAI_API_KEY', ok: true },
+        { name: 'GITHUB_TOKEN', ok: false, errorCode: 'E_VALUE_AMBIGUOUS', reason: 'flagged at parse time' },
+      ]);
+
+      const [entry] = RequestStore.listUnconsumedFulfilled();
+      expect(entry).toEqual({ id: record.id, names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'] });
+    });
+
+    it('preserves the results ordering in the listed names (Issue #68) — the recovery signal must match the per-name order `results` carries', () => {
+      const record = RequestStore.create({ kind: 'request', names: ['A', 'B', 'C'] });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [
+        { name: 'C', ok: true },
+        { name: 'A', ok: true },
+        { name: 'B', ok: true },
+      ]);
+
+      const [entry] = RequestStore.listUnconsumedFulfilled();
+      expect(entry?.names).toEqual(['C', 'A', 'B']);
+    });
+
+    it('forwards names the extensible request form added at submit time (Issue #68 / #71) — names in `results` not in `record.names` must appear in the signal', () => {
+      // When the extensible request form (#71) lets the human add names,
+      // the web POST handler will populate `results` with names that were
+      // never in `record.names`. The recovery signal must include those
+      // names too — they're part of the outcome the agent has to learn.
+      const record = RequestStore.create({ kind: 'request', names: ['A'] });
+      RequestStore.tryMarkUsed(record.id);
+      RequestStore.fulfill(record.id, [
+        { name: 'A', ok: true },
+        { name: 'HUMAN_ADDED', ok: true },
+      ]);
+
+      const [entry] = RequestStore.listUnconsumedFulfilled();
+      expect(entry?.names).toEqual(['A', 'HUMAN_ADDED']);
+    });
+
     it('an expired/swept record is gone from the store entirely, so it cannot appear as unconsumed-fulfilled', () => {
       vi.useFakeTimers();
       const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 1000 });

@@ -2,10 +2,18 @@
 // agent knows to call enigma_request instead of asking the user to paste a value.
 // Never a value; never writes CLAUDE_ENV_FILE; every read here is a synchronous
 // local file read, so this stays well under the 2 s budget.
+//
+// Issue #68: this hook used to also call `RequestStore.listUnconsumedFulfilled()`
+// for the recovery-signal "pending unconfirmed request" line. The request store
+// lives in memory inside the MCP server process; this hook runs in a separate
+// short-lived subprocess, so its store is always empty and that branch was dead
+// code that claimed a capability it did not have. The recovery signal lives
+// only in `enigma_doctor` now (the MCP process, where the store is real) —
+// see `src/mcp/tools/doctor.ts` and the matching `RequestStore.listUnconsumedFulfilled`
+// entry.
 import { loadConfig, loadProjectManifest } from '../core/config.js';
 import { computeManifestGaps } from '../core/manifest-gaps.js';
 import { findProjectPath } from '../core/project.js';
-import { RequestStore } from '../request/store.js';
 import type { SessionStartInput, SessionStartOutput } from './types.js';
 
 export function runSessionStart(input: SessionStartInput): SessionStartOutput {
@@ -26,19 +34,6 @@ export function runSessionStart(input: SessionStartInput): SessionStartOutput {
   if (gaps.length > 0) {
     lines.push(
       `Enigma: manifest (.enigma.json) declares ${gaps.join(', ')} but no value is stored yet — call enigma_request to collect them.`,
-    );
-  }
-
-  // Issue #62: same recovery signal as enigma_doctor, surfaced at session
-  // start too — a request/import whose outcome was never returned to a
-  // model (e.g. the enigma_await call that would have reported it was
-  // interrupted), even though the secret was already stored by the
-  // independent web layer. Names and ids only, never values.
-  const pendingRequests = RequestStore.listUnconsumedFulfilled();
-  if (pendingRequests.length > 0) {
-    const summary = pendingRequests.map((r) => `${r.id} (names: ${r.names.join(', ')})`).join('; ');
-    lines.push(
-      `Enigma: pending unconfirmed request(s) whose outcome you may not have seen — ${summary} — call enigma_await(request_id) to check.`,
     );
   }
 

@@ -146,4 +146,35 @@ describe('enigma_doctor', () => {
     expect(text).not.toContain('Pending unconfirmed requests');
     await pair.close();
   });
+
+  it('reports names from `results`, not from `record.names` (Issue #68) — the recovery signal names what was actually processed', async () => {
+    // Partial-failure shape: the agent asked for THREE names, the web
+    // POST handler processed only TWO of them (one stored, one refused)
+    // and never attempted the third. The signal must list only what was
+    // actually processed — `results` is the source of truth, not the
+    // original request's `names`.
+    const record = RequestStore.create({
+      kind: 'request',
+      names: ['OPENAI_API_KEY', 'GITHUB_TOKEN', 'STRIPE_KEY'],
+    });
+    RequestStore.tryMarkUsed(record.id);
+    RequestStore.fulfill(record.id, [
+      { name: 'OPENAI_API_KEY', ok: true },
+      { name: 'GITHUB_TOKEN', ok: false, errorCode: 'E_VALUE_AMBIGUOUS' },
+    ]);
+
+    const pair = await connectWithCapabilities({});
+    const result = await pair.client.callTool({ name: 'enigma_doctor', arguments: {} });
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+    expect(text).toContain('Pending unconfirmed requests:');
+    expect(text).toContain(`${record.id} (names: OPENAI_API_KEY, GITHUB_TOKEN) — call enigma_await(${record.id})`);
+    // The third name was never processed; it must not appear in the
+    // recovery signal, and neither may any value-bearing error text
+    // (ADR-001).
+    expect(text).not.toContain('STRIPE_KEY');
+    expect(text).not.toContain('E_VALUE_AMBIGUOUS');
+
+    await pair.close();
+  });
 });
