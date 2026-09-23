@@ -1,5 +1,5 @@
 import { EnigmaError } from '../core/errors.js';
-import { OutcomeUnknownError, RequestStore } from '../request/store.js';
+import { OutcomeUnknownError, RequestExpiredError, RequestStore } from '../request/store.js';
 import { renderOutcome } from './result-text.js';
 import type { Outcome } from './result-text.js';
 
@@ -19,9 +19,14 @@ import type { Outcome } from './result-text.js';
  * mapped to `E_OUTCOME_UNKNOWN` here, in one place, so every tool-level
  * caller stays thin. Names only, never a value: the message names the
  * declared names and tells the agent to run `enigma list` to verify.
- * `E_REQUEST_EXPIRED` stays reserved for a record that was never used,
- * which `waitForFulfilled` rejects with a plain `Error('request expired')`
- * and which tool-level callers continue to map to `E_REQUEST_EXPIRED`.
+ * `E_REQUEST_EXPIRED` stays reserved for a record that was never used —
+ * typed `RequestExpiredError` (PR #78 batch, Kimi QA AC5), which this
+ * mapper also turns into a structured `EnigmaError` right here: the one
+ * place every tool-level caller (enigma_await, blocking `enigma_request`,
+ * URL-mode `enigma_import`) gets the same code for the same store state, so
+ * a blocking request no longer surfaces a never-used expiry as an unhandled
+ * tool rejection. Any other rejection is a genuine unexpected error and is
+ * rethrown unchanged — never blanket-mapped to a request-specific code.
  */
 export async function resolveRequestOutcome(id: string, cwd: string): Promise<Outcome> {
   try {
@@ -31,6 +36,12 @@ export async function resolveRequestOutcome(id: string, cwd: string): Promise<Ou
       throw new EnigmaError({
         code: 'E_OUTCOME_UNKNOWN',
         message: `request ${id} was swept before its outcome was recorded; ${err.names.join(', ')} may already be stored — run \`enigma list\` to check before retrying`,
+      });
+    }
+    if (err instanceof RequestExpiredError) {
+      throw new EnigmaError({
+        code: 'E_REQUEST_EXPIRED',
+        message: `request ${id} is unknown or has expired`,
       });
     }
     throw err;

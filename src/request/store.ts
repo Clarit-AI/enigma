@@ -130,9 +130,9 @@ function isExpired(record: RequestRecord, now: number): boolean {
 /**
  * The single place a never-used record is removed from the map for having
  * expired (PR #78 review, finding 2): deletes it AND rejects any waiter
- * already attached via `waitForFulfilled` with a plain expiry `Error`, the
- * same rejection the sweeper has always produced for this case (tool-level
- * callers map it to `E_REQUEST_EXPIRED`). Every such deletion path — the
+ * already attached via `waitForFulfilled` with a `RequestExpiredError`, the
+ * same rejection the sweeper has always produced for this case (the shared
+ * mapper in `src/mcp/request-outcome.ts` turns it into `E_REQUEST_EXPIRED`). Every such deletion path — the
  * sweeper, `get`, and `tryMarkUsed` — routes through this helper, so a
  * waiter attached via `enigma_await`/blocking `enigma_request` (or the
  * tunnel-teardown listeners in remote/index.ts) is rejected the instant any
@@ -143,13 +143,14 @@ function isExpired(record: RequestRecord, now: number): boolean {
  * `tryMarkUsed(id)` call left an `enigma_await` caller hanging forever.
  * Never used for a used-but-swept-without-results record — that keeps its
  * own `OutcomeUnknownError` rejection, written directly in `sweep` below,
- * since it is a different outcome (Issue #69 AC #5) than a plain expiry.
+ * since it is a different outcome (Issue #69 AC #5) than a plain expiry
+ * (`RequestExpiredError`).
  */
 function expireRecord(id: string): void {
   records.delete(id);
   const waiter = waiters.get(id);
   if (waiter) {
-    waiter.reject(new Error('request expired'));
+    waiter.reject(new RequestExpiredError());
     waiters.delete(id);
   }
 }
@@ -161,11 +162,32 @@ function startSweeper(): void {
 }
 
 /**
+ * A request id that can never be fulfilled because it was never used and is
+ * gone — either it expired unused (rejected by `expireRecord`, on every
+ * deletion path that discovers the expiry) or it is unknown to the store
+ * (rejected by `waitForFulfilled` itself). Both mean the same thing to every
+ * caller: `E_REQUEST_EXPIRED` (Issue #69 AC #5 — reserved for a record that
+ * was never used). Typed (PR #78 batch, Kimi QA AC5) so the shared mapper in
+ * `src/mcp/request-outcome.ts` can map it stably — the previous plain
+ * `Error('request expired')` could not be told apart from a genuine bug, and
+ * blocking `enigma_request`/`enigma_import` rethrown it as an unhandled
+ * tool error instead of returning `E_REQUEST_EXPIRED`. Never carries a name
+ * or value.
+ */
+export class RequestExpiredError extends Error {
+  constructor(message = 'request expired') {
+    super(message);
+    this.name = 'RequestExpiredError';
+    Object.setPrototypeOf(this, RequestExpiredError.prototype);
+  }
+}
+
+/**
  * A request whose single-use token was already consumed (the human submitted
  * the form, `tryMarkUsed` returned a record), but whose per-name `results`
  * were never recorded — `fulfill` never ran for it. Distinct from
- * `new Error('request expired')`, which `sweep` only ever throws for a
- * record that was never used in the first place. `await.ts`/`request.ts` map
+ * `RequestExpiredError`, which is only ever produced for a record that was
+ * never used in the first place. `await.ts`/`request.ts` map
  * this to `E_OUTCOME_UNKNOWN` (the names MAY already be stored — the
  * web layer's independent write loop in `request-form.ts` could have
  * completed some names before crashing); `E_REQUEST_EXPIRED` stays reserved
@@ -278,8 +300,9 @@ export const RequestStore = {
    * delete the record silently and leave `enigma_await` waiting forever.
    * The `usedAt` check runs FIRST: a used record is never a single-use
    * candidate anyway, and routing a used-but-expired record through
-   * `expireRecord` would reject its in-flight write's waiter with the plain
-   * expiry error — the wrong code. That record belongs to the sweeper's
+   * `expireRecord` would reject its in-flight write's waiter with the
+   * never-used expiry error (`RequestExpiredError`) — the wrong code. That
+   * record belongs to the sweeper's
    * used-grace path, which produces `OutcomeUnknownError` when `results`
    * never landed (a submitted write may have partially completed).
    */
@@ -325,7 +348,7 @@ export const RequestStore = {
    */
   waitForFulfilled(id: string): Promise<'fulfilled'> {
     const record = records.get(id);
-    if (!record) return Promise.reject(new Error('request not found'));
+    if (!record) return Promise.reject(new RequestExpiredError('request not found'));
     if (record.results !== undefined) return Promise.resolve('fulfilled');
 
     let waiter = waiters.get(id);
