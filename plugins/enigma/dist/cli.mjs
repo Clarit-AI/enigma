@@ -269,8 +269,9 @@ function validateName(name) {
 
 // src/core/project.ts
 import { createHash } from "node:crypto";
-import { existsSync as existsSync2 } from "node:fs";
-import { dirname as dirname2, resolve } from "node:path";
+import { existsSync as existsSync2, readFileSync as readFileSync2, realpathSync, statSync } from "node:fs";
+import { basename, dirname as dirname2, join as join3, resolve } from "node:path";
+import * as nodePath from "node:path";
 var PROJECT_ID_LENGTH = 16;
 function findProjectPath(cwd) {
   let dir = resolve(cwd);
@@ -281,9 +282,86 @@ function findProjectPath(cwd) {
     dir = parent;
   }
 }
+var platformPath = nodePath;
+function parseGitdirPointer(content) {
+  const firstLine = content.split(/\r?\n/, 1)[0];
+  if (firstLine === void 0) return null;
+  const match = /^gitdir:(\s*)(.+?)\s*$/.exec(firstLine);
+  if (!match) return null;
+  return match[2] || null;
+}
+function parseCommondirPointer(content) {
+  const firstLine = content.split(/\r?\n/, 1)[0];
+  if (firstLine === void 0) return null;
+  const trimmed = firstLine.trim();
+  return trimmed || null;
+}
+function resolveGitPointer(baseDir, rawContent, pathImpl = platformPath) {
+  const trimmed = rawContent.trim();
+  return pathImpl.isAbsolute(trimmed) ? trimmed : pathImpl.resolve(baseDir, trimmed);
+}
+function gitEntryKind(entryPath) {
+  try {
+    const st = statSync(entryPath);
+    if (st.isDirectory()) return "directory";
+    if (st.isFile()) return "file";
+    return "missing";
+  } catch {
+    return "missing";
+  }
+}
+function safeRealpath(p, fallback) {
+  try {
+    return realpathSync(p);
+  } catch {
+    return fallback;
+  }
+}
+function readFirstLine(filePath) {
+  try {
+    return readFileSync2(filePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+function findRepoIdentityPath(cwd) {
+  const worktreeRoot = findProjectPath(cwd);
+  const fallback = safeRealpath(worktreeRoot, worktreeRoot);
+  try {
+    const gitEntryPath = `${worktreeRoot}/.git`;
+    const kind = gitEntryKind(gitEntryPath);
+    let commonDir;
+    if (kind === "directory") {
+      commonDir = gitEntryPath;
+    } else if (kind === "file") {
+      const raw = readFirstLine(gitEntryPath);
+      if (raw === null) return fallback;
+      const pointer = parseGitdirPointer(raw);
+      if (pointer === null) return fallback;
+      const gitdir = resolveGitPointer(worktreeRoot, pointer);
+      if (!existsSync2(gitdir)) return fallback;
+      const commondirFile = join3(gitdir, "commondir");
+      let resolvedCommon = null;
+      if (existsSync2(commondirFile)) {
+        const content = readFirstLine(commondirFile);
+        if (content !== null) {
+          const cdp = parseCommondirPointer(content);
+          if (cdp !== null) resolvedCommon = resolveGitPointer(gitdir, cdp);
+        }
+      }
+      commonDir = resolvedCommon ?? gitdir;
+    } else {
+      return fallback;
+    }
+    const resolved = safeRealpath(commonDir, fallback);
+    return basename(resolved) === ".git" ? dirname2(resolved) : resolved;
+  } catch {
+    return fallback;
+  }
+}
 function projectId(cwd) {
-  const projectPath = findProjectPath(cwd);
-  return createHash("sha256").update(projectPath).digest("hex").slice(0, PROJECT_ID_LENGTH);
+  const identityPath = findRepoIdentityPath(cwd);
+  return createHash("sha256").update(identityPath).digest("hex").slice(0, PROJECT_ID_LENGTH);
 }
 
 // src/core/audit.ts
@@ -355,7 +433,7 @@ function listIndexEntries(index, opts = {}) {
 
 // src/storage/depositories/encrypted.ts
 import { createCipheriv, createDecipheriv, randomBytes as randomBytes2 } from "node:crypto";
-import { existsSync as existsSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
 var ALGORITHM = "aes-256-gcm";
 var KEY_BYTES = 32;
 var IV_BYTES = 12;
@@ -363,7 +441,7 @@ var FILE_MODE2 = 384;
 var EMPTY_SECRETS_FILE = { version: 1, entries: {} };
 function readKey() {
   if (!existsSync3(keyPath())) return void 0;
-  const key = Buffer.from(readFileSync2(keyPath(), "utf8"), "base64");
+  const key = Buffer.from(readFileSync3(keyPath(), "utf8"), "base64");
   if (key.length !== KEY_BYTES) readFailed();
   return key;
 }
@@ -445,8 +523,8 @@ var encryptedDepositoryModule = {
 };
 
 // src/storage/depositories/env.ts
-import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import { join as join3 } from "node:path";
+import { existsSync as existsSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join4 } from "node:path";
 var BEGIN_MARKER = "# enigma:begin";
 var END_MARKER = "# enigma:end";
 var FILE_MODE3 = 384;
@@ -521,11 +599,11 @@ function removeManagedValue(content, name) {
   return newLines.join(eol);
 }
 function checkEnvGitignore(projectPath) {
-  const gitignorePath = join3(projectPath, ".gitignore");
+  const gitignorePath = join4(projectPath, ".gitignore");
   if (!existsSync4(gitignorePath)) {
     return [".env is not gitignored: no .gitignore file found in this project"];
   }
-  const lines = readFileSync3(gitignorePath, "utf8").split(/\r?\n/);
+  const lines = readFileSync4(gitignorePath, "utf8").split(/\r?\n/);
   const covered = lines.some((raw) => {
     const line = raw.trim();
     if (!line || line.startsWith("#")) return false;
@@ -545,8 +623,8 @@ function requireProjectPath(ctx) {
   return ctx.projectPath;
 }
 function createEnvDepository(ctx) {
-  const envFilePath = join3(requireProjectPath(ctx), ".env");
-  const readEnvFile = () => existsSync4(envFilePath) ? readFileSync3(envFilePath, "utf8") : "";
+  const envFilePath = join4(requireProjectPath(ctx), ".env");
+  const readEnvFile = () => existsSync4(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
   return {
     id: "env",
     promptProfile: "none",
@@ -920,7 +998,7 @@ var macosKeychainDepositoryModule = {
 
 // src/storage/depositories/onepassword.ts
 import { execFile as execFile3 } from "node:child_process";
-import { basename } from "node:path";
+import { basename as basename2 } from "node:path";
 var OP_BIN = "op";
 var VAULT = "Enigma";
 var MIN_MAJOR_VERSION = 2;
@@ -1026,7 +1104,7 @@ function buildTitle(ref, ctx) {
   const name = nameFromRef(ref);
   const isGlobal = ref === name || ref.startsWith("global/");
   if (isGlobal || !ctx.projectPath) return name;
-  return `${name} \xB7 ${basename(ctx.projectPath)}`;
+  return `${name} \xB7 ${basename2(ctx.projectPath)}`;
 }
 function itemTemplate(title, value) {
   return JSON.stringify({
@@ -1451,8 +1529,8 @@ async function cmdGet(argv) {
 }
 
 // src/cli/commands/import.ts
-import { existsSync as existsSync8, readFileSync as readFileSync5 } from "node:fs";
-import { isAbsolute, join as join4 } from "node:path";
+import { existsSync as existsSync8, readFileSync as readFileSync6 } from "node:fs";
+import { isAbsolute, join as join5 } from "node:path";
 
 // src/mcp/result-text.ts
 function findJustWrittenEntry(name, cwd) {
@@ -1841,7 +1919,7 @@ function removeDotEnvEntries(content, names, opts = {}) {
 
 // src/storage/import-commit.ts
 import { randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync7, readFileSync as readFileSync4, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync5, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 var FILE_MODE4 = 384;
 function writeFileAtomic(path, content, mode) {
   const tmpPath = `${path}.${randomBytes4(6).toString("hex")}.tmp`;
@@ -1909,7 +1987,7 @@ async function commitImport(opts) {
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
-  const currentContent = existsSync7(opts.envFilePath) ? readFileSync4(opts.envFilePath, "utf8") : "";
+  const currentContent = existsSync7(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
   const valueByName = new Map(opts.entries.map((e) => [e.name, e.value]));
   const currentValueByName = new Map(parseDotEnv(currentContent).entries.map((e) => [e.name, e.value]));
   const toRemove = [];
@@ -4657,11 +4735,11 @@ async function cmdImport(argv) {
   if (positionals.length > 1) throw new UsageError(USAGE3);
   const cwd = process.cwd();
   const projectPath = findProjectPath(cwd);
-  const absPath = isAbsolute(pathArg) ? pathArg : join4(cwd, pathArg);
+  const absPath = isAbsolute(pathArg) ? pathArg : join5(cwd, pathArg);
   if (!existsSync8(absPath)) {
     throw new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` });
   }
-  const content = readFileSync5(absPath, "utf8");
+  const content = readFileSync6(absPath, "utf8");
   const parsed = parseDotEnv(content);
   if (parsed.entries.length === 0) {
     return report(
@@ -4709,15 +4787,15 @@ async function cmdImport(argv) {
 }
 
 // src/cli/commands/install.ts
-import { existsSync as existsSync9, mkdirSync as mkdirSync2, readFileSync as readFileSync6, renameSync as renameSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync9, mkdirSync as mkdirSync2, readFileSync as readFileSync7, renameSync as renameSync3, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname3, join as join5 } from "node:path";
+import { dirname as dirname3, join as join6 } from "node:path";
 var MARKETPLACE_NAME = "clarit-enigma";
 var REPO = "Clarit-AI/enigma";
 var PLUGIN_ENTRY = `enigma@${MARKETPLACE_NAME}`;
 function claudeSettingsPath() {
-  const configDir = process.env.CLAUDE_CONFIG_DIR || join5(homedir2(), ".claude");
-  return join5(configDir, "settings.json");
+  const configDir = process.env.CLAUDE_CONFIG_DIR || join6(homedir2(), ".claude");
+  return join6(configDir, "settings.json");
 }
 var DEFAULT_STYLE = { indent: "  ", trailingNewline: true, eol: "\n" };
 function detectStyle(raw) {
@@ -4732,7 +4810,7 @@ function readSettings(path) {
   if (!existsSync9(path)) return { settings: {}, style: DEFAULT_STYLE };
   let raw;
   try {
-    raw = readFileSync6(path, "utf8");
+    raw = readFileSync7(path, "utf8");
   } catch (err) {
     throw new EnigmaError({
       code: "E_CLAUDE_SETTINGS_UNWRITABLE",

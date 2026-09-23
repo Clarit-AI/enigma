@@ -133,8 +133,9 @@ function loadProjectManifest(projectPath) {
 
 // src/core/project.ts
 import { createHash } from "node:crypto";
-import { existsSync as existsSync2 } from "node:fs";
-import { dirname as dirname2, resolve } from "node:path";
+import { existsSync as existsSync2, readFileSync as readFileSync2, realpathSync, statSync } from "node:fs";
+import { basename, dirname as dirname2, join as join3, resolve } from "node:path";
+import * as nodePath from "node:path";
 var PROJECT_ID_LENGTH = 16;
 function findProjectPath(cwd) {
   let dir = resolve(cwd);
@@ -145,9 +146,86 @@ function findProjectPath(cwd) {
     dir = parent;
   }
 }
+var platformPath = nodePath;
+function parseGitdirPointer(content) {
+  const firstLine = content.split(/\r?\n/, 1)[0];
+  if (firstLine === void 0) return null;
+  const match = /^gitdir:(\s*)(.+?)\s*$/.exec(firstLine);
+  if (!match) return null;
+  return match[2] || null;
+}
+function parseCommondirPointer(content) {
+  const firstLine = content.split(/\r?\n/, 1)[0];
+  if (firstLine === void 0) return null;
+  const trimmed = firstLine.trim();
+  return trimmed || null;
+}
+function resolveGitPointer(baseDir, rawContent, pathImpl = platformPath) {
+  const trimmed = rawContent.trim();
+  return pathImpl.isAbsolute(trimmed) ? trimmed : pathImpl.resolve(baseDir, trimmed);
+}
+function gitEntryKind(entryPath) {
+  try {
+    const st = statSync(entryPath);
+    if (st.isDirectory()) return "directory";
+    if (st.isFile()) return "file";
+    return "missing";
+  } catch {
+    return "missing";
+  }
+}
+function safeRealpath(p, fallback) {
+  try {
+    return realpathSync(p);
+  } catch {
+    return fallback;
+  }
+}
+function readFirstLine(filePath) {
+  try {
+    return readFileSync2(filePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+function findRepoIdentityPath(cwd) {
+  const worktreeRoot = findProjectPath(cwd);
+  const fallback = safeRealpath(worktreeRoot, worktreeRoot);
+  try {
+    const gitEntryPath = `${worktreeRoot}/.git`;
+    const kind = gitEntryKind(gitEntryPath);
+    let commonDir;
+    if (kind === "directory") {
+      commonDir = gitEntryPath;
+    } else if (kind === "file") {
+      const raw = readFirstLine(gitEntryPath);
+      if (raw === null) return fallback;
+      const pointer = parseGitdirPointer(raw);
+      if (pointer === null) return fallback;
+      const gitdir = resolveGitPointer(worktreeRoot, pointer);
+      if (!existsSync2(gitdir)) return fallback;
+      const commondirFile = join3(gitdir, "commondir");
+      let resolvedCommon = null;
+      if (existsSync2(commondirFile)) {
+        const content = readFirstLine(commondirFile);
+        if (content !== null) {
+          const cdp = parseCommondirPointer(content);
+          if (cdp !== null) resolvedCommon = resolveGitPointer(gitdir, cdp);
+        }
+      }
+      commonDir = resolvedCommon ?? gitdir;
+    } else {
+      return fallback;
+    }
+    const resolved = safeRealpath(commonDir, fallback);
+    return basename(resolved) === ".git" ? dirname2(resolved) : resolved;
+  } catch {
+    return fallback;
+  }
+}
 function projectId(cwd) {
-  const projectPath = findProjectPath(cwd);
-  return createHash("sha256").update(projectPath).digest("hex").slice(0, PROJECT_ID_LENGTH);
+  const identityPath = findRepoIdentityPath(cwd);
+  return createHash("sha256").update(identityPath).digest("hex").slice(0, PROJECT_ID_LENGTH);
 }
 
 // src/core/audit.ts
@@ -180,7 +258,7 @@ function listIndexEntries(index, opts = {}) {
 
 // src/storage/depositories/encrypted.ts
 import { createCipheriv, createDecipheriv, randomBytes as randomBytes2 } from "node:crypto";
-import { existsSync as existsSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
 var ALGORITHM = "aes-256-gcm";
 var KEY_BYTES = 32;
 var IV_BYTES = 12;
@@ -188,7 +266,7 @@ var FILE_MODE2 = 384;
 var EMPTY_SECRETS_FILE = { version: 1, entries: {} };
 function readKey() {
   if (!existsSync3(keyPath())) return void 0;
-  const key = Buffer.from(readFileSync2(keyPath(), "utf8"), "base64");
+  const key = Buffer.from(readFileSync3(keyPath(), "utf8"), "base64");
   if (key.length !== KEY_BYTES) readFailed();
   return key;
 }
@@ -270,8 +348,8 @@ var encryptedDepositoryModule = {
 };
 
 // src/storage/depositories/env.ts
-import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import { join as join3 } from "node:path";
+import { existsSync as existsSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join4 } from "node:path";
 var BEGIN_MARKER = "# enigma:begin";
 var END_MARKER = "# enigma:end";
 var FILE_MODE3 = 384;
@@ -355,8 +433,8 @@ function requireProjectPath(ctx) {
   return ctx.projectPath;
 }
 function createEnvDepository(ctx) {
-  const envFilePath = join3(requireProjectPath(ctx), ".env");
-  const readEnvFile = () => existsSync4(envFilePath) ? readFileSync3(envFilePath, "utf8") : "";
+  const envFilePath = join4(requireProjectPath(ctx), ".env");
+  const readEnvFile = () => existsSync4(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
   return {
     id: "env",
     promptProfile: "none",
@@ -730,7 +808,7 @@ var macosKeychainDepositoryModule = {
 
 // src/storage/depositories/onepassword.ts
 import { execFile as execFile3 } from "node:child_process";
-import { basename } from "node:path";
+import { basename as basename2 } from "node:path";
 var OP_BIN = "op";
 var VAULT = "Enigma";
 var MIN_MAJOR_VERSION = 2;
@@ -826,7 +904,7 @@ function buildTitle(ref, ctx) {
   const name = nameFromRef(ref);
   const isGlobal = ref === name || ref.startsWith("global/");
   if (isGlobal || !ctx.projectPath) return name;
-  return `${name} \xB7 ${basename(ctx.projectPath)}`;
+  return `${name} \xB7 ${basename2(ctx.projectPath)}`;
 }
 function itemTemplate(title, value) {
   return JSON.stringify({
@@ -1227,8 +1305,8 @@ function runSessionStart(input) {
 }
 
 // src/hooks/read-guard.ts
-import { basename as basename2, resolve as resolve2, sep } from "node:path";
-import { existsSync as existsSync6, statSync } from "node:fs";
+import { basename as basename3, resolve as resolve2, sep } from "node:path";
+import { existsSync as existsSync6, statSync as statSync2 } from "node:fs";
 var DOTENV_EXEMPT = /* @__PURE__ */ new Set([".env.example"]);
 var BARE_ENV_DUMP_COMMANDS = /* @__PURE__ */ new Set(["env", "printenv"]);
 var NON_READING_BASH_VERBS = /* @__PURE__ */ new Set(["rm", "mv", "touch", "chmod", "stat", "ls", "find", "test"]);
@@ -1240,7 +1318,7 @@ function isDotEnvBasename(name) {
   return name === ".env" || name.startsWith(".env.");
 }
 function targetsDotEnv(pathLike) {
-  return isDotEnvBasename(basename2(pathLike.trim()));
+  return isDotEnvBasename(basename3(pathLike.trim()));
 }
 function targetsEnigmaConfig(pathLike, cwd) {
   const home = resolve2(enigmaHome());
@@ -1449,7 +1527,7 @@ function isKnownNonDirectoryPath(pathLike, cwd) {
   if (!pathLike) return false;
   try {
     const resolved = resolve2(cwd, pathLike.trim());
-    return existsSync6(resolved) && !statSync(resolved).isDirectory();
+    return existsSync6(resolved) && !statSync2(resolved).isDirectory();
   } catch {
     return false;
   }
