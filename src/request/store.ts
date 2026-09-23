@@ -130,9 +130,9 @@ function isExpired(record: RequestRecord, now: number): boolean {
 /**
  * The single place a never-used record is removed from the map for having
  * expired (PR #78 review, finding 2): deletes it AND rejects any waiter
- * already attached via `waitForFulfilled` with a plain expiry `Error`, the
- * same rejection the sweeper has always produced for this case (tool-level
- * callers map it to `E_REQUEST_EXPIRED`). Every such deletion path — the
+ * already attached via `waitForFulfilled` with a `RequestExpiredError`, the
+ * same rejection the sweeper has always produced for this case (the shared
+ * mapper in `src/mcp/request-outcome.ts` turns it into `E_REQUEST_EXPIRED`). Every such deletion path — the
  * sweeper, `get`, and `tryMarkUsed` — routes through this helper, so a
  * waiter attached via `enigma_await`/blocking `enigma_request` (or the
  * tunnel-teardown listeners in remote/index.ts) is rejected the instant any
@@ -143,13 +143,14 @@ function isExpired(record: RequestRecord, now: number): boolean {
  * `tryMarkUsed(id)` call left an `enigma_await` caller hanging forever.
  * Never used for a used-but-swept-without-results record — that keeps its
  * own `OutcomeUnknownError` rejection, written directly in `sweep` below,
- * since it is a different outcome (Issue #69 AC #5) than a plain expiry.
+ * since it is a different outcome (Issue #69 AC #5) than a plain expiry
+ * (`RequestExpiredError`).
  */
 function expireRecord(id: string): void {
   records.delete(id);
   const waiter = waiters.get(id);
   if (waiter) {
-    waiter.reject(new Error('request expired'));
+    waiter.reject(new RequestExpiredError());
     waiters.delete(id);
   }
 }
@@ -161,11 +162,32 @@ function startSweeper(): void {
 }
 
 /**
+ * A request id that can never be fulfilled because it was never used and is
+ * gone — either it expired unused (rejected by `expireRecord`, on every
+ * deletion path that discovers the expiry) or it is unknown to the store
+ * (rejected by `waitForFulfilled` itself). Both mean the same thing to every
+ * caller: `E_REQUEST_EXPIRED` (Issue #69 AC #5 — reserved for a record that
+ * was never used). Typed (PR #78 batch, Kimi QA AC5) so the shared mapper in
+ * `src/mcp/request-outcome.ts` can map it stably — the previous plain
+ * `Error('request expired')` could not be told apart from a genuine bug, and
+ * blocking `enigma_request`/`enigma_import` rethrown it as an unhandled
+ * tool error instead of returning `E_REQUEST_EXPIRED`. Never carries a name
+ * or value.
+ */
+export class RequestExpiredError extends Error {
+  constructor(message = 'request expired') {
+    super(message);
+    this.name = 'RequestExpiredError';
+    Object.setPrototypeOf(this, RequestExpiredError.prototype);
+  }
+}
+
+/**
  * A request whose single-use token was already consumed (the human submitted
  * the form, `tryMarkUsed` returned a record), but whose per-name `results`
  * were never recorded — `fulfill` never ran for it. Distinct from
- * `new Error('request expired')`, which `sweep` only ever throws for a
- * record that was never used in the first place. `await.ts`/`request.ts` map
+ * `RequestExpiredError`, which is only ever produced for a record that was
+ * never used in the first place. `await.ts`/`request.ts` map
  * this to `E_OUTCOME_UNKNOWN` (the names MAY already be stored — the
  * web layer's independent write loop in `request-form.ts` could have
  * completed some names before crashing); `E_REQUEST_EXPIRED` stays reserved
@@ -278,8 +300,9 @@ export const RequestStore = {
    * delete the record silently and leave `enigma_await` waiting forever.
    * The `usedAt` check runs FIRST: a used record is never a single-use
    * candidate anyway, and routing a used-but-expired record through
-   * `expireRecord` would reject its in-flight write's waiter with the plain
-   * expiry error — the wrong code. That record belongs to the sweeper's
+   * `expireRecord` would reject its in-flight write's waiter with the
+   * never-used expiry error (`RequestExpiredError`) — the wrong code. That
+   * record belongs to the sweeper's
    * used-grace path, which produces `OutcomeUnknownError` when `results`
    * never landed (a submitted write may have partially completed).
    */
@@ -325,7 +348,7 @@ export const RequestStore = {
    */
   waitForFulfilled(id: string): Promise<'fulfilled'> {
     const record = records.get(id);
-    if (!record) return Promise.reject(new Error('request not found'));
+    if (!record) return Promise.reject(new RequestExpiredError('request not found'));
     if (record.results !== undefined) return Promise.resolve('fulfilled');
 
     let waiter = waiters.get(id);
@@ -358,28 +381,57 @@ export const RequestStore = {
   /**
    * Enumerates fulfilled 'request'/'import' records (results are in) whose
    * outcome has never been read via `consumeOutcome` — Issue #62's recovery
-   * signal for an `enigma_await`/`enigma_request` call that was interrupted
-   * before the agent ever saw the outcome text, even though the secret was
-   * stored correctly by the independent web layer. 'reveal' records are
-   * excluded: `enigma_reveal` never blocks on `resolveRequestOutcome` (by
+   * signal for an `enigma_await`/`enigma_request`/`enigma_import` call that
+   * was interrupted before the agent ever saw the outcome text, even though
+   * the secret was stored correctly by the independent web layer. 'reveal'
+   * records are excluded: `enigma_reveal` never blocks on `resolveRequestOutcome` (by
    * design — the revealed value goes only to the human), so a fulfilled
    * reveal has nothing pending for the agent to re-await.
    *
-   * Returns names and ids only, never values or per-name results (ADR-001)
-   * — this is purely "there is an outcome you may not have seen; call
-   * enigma_await(id)", not the outcome itself. Reading this list never
-   * marks anything consumed, so calling it repeatedly (e.g. from
-   * enigma_doctor) cannot make the signal disappear on its own. Bounded by
-   * the same in-memory TTL/used-grace sweep as every other record; no new
-   * persistence.
+   * Each entry carries the names split into three static buckets, mirroring
+   * the bucketing `renderOutcome` (src/mcp/result-text.ts) uses for the
+   * `enigma_request` / `enigma_await` / `enigma_import` result text:
+   *   - `stored`  — ok === true
+   *   - `failed`  — ok === false AND errorCode !== 'E_OUTCOME_UNKNOWN'
+   *                 (a confirmed refusal: E_VALUE_AMBIGUOUS, E_EXISTS, …)
+   *   - `unknown` — ok === false AND errorCode === 'E_OUTCOME_UNKNOWN'
+   *                 (commitImport crashed after its own internal storage
+   *                 loop — names may genuinely be stored; the agent must
+   *                 check before retrying)
+   * The `errorCode` is read HERE only to choose the bucket — it is never
+   * returned, never logged, never rendered (ADR-001). The recovery signal
+   * surfaces only names and the bucket they fell into.
+   *
+   * Names come from `record.results[*].name` (what the web POST handler
+   * actually processed), not `record.names` (what the agent originally
+   * requested): Issue #68, forward-contract for the extensible request form
+   * (#71) that lets the human add or remove names at submit time. A record
+   * whose `results` is empty, or whose bucketed lists are all empty, is
+   * omitted — there are no names to re-await, so the signal has nothing
+   * to say about it. Reading this list never marks anything consumed, so
+   * calling it repeatedly (e.g. from enigma_doctor) cannot make the
+   * signal disappear on its own. Bounded by the same in-memory
+   * TTL/used-grace sweep as every other record; no new persistence. Lives
+   * in the MCP server process only — SessionStart runs in a separate
+   * short-lived subprocess and never reaches this code (see Issue #68 for
+   * the dead-code removal).
    */
-  listUnconsumedFulfilled(): Array<{ id: string; names: string[] }> {
-    const out: Array<{ id: string; names: string[] }> = [];
+  listUnconsumedFulfilled(): Array<{ id: string; stored: string[]; failed: string[]; unknown: string[] }> {
+    const out: Array<{ id: string; stored: string[]; failed: string[]; unknown: string[] }> = [];
     for (const record of records.values()) {
       if (record.kind === 'reveal') continue;
       if (record.results === undefined) continue;
       if (record.outcomeConsumedAt !== undefined) continue;
-      out.push({ id: record.id, names: [...record.names] });
+      const stored: string[] = [];
+      const failed: string[] = [];
+      const unknown: string[] = [];
+      for (const r of record.results) {
+        if (r.ok) stored.push(r.name);
+        else if (r.errorCode === 'E_OUTCOME_UNKNOWN') unknown.push(r.name);
+        else failed.push(r.name);
+      }
+      if (stored.length === 0 && failed.length === 0 && unknown.length === 0) continue;
+      out.push({ id: record.id, stored, failed, unknown });
     }
     return out;
   },

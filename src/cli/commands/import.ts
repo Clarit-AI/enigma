@@ -11,7 +11,7 @@ import type { ParsedDotEnvEntry } from '../../storage/dotenv-file.js';
 import { commitImport } from '../../storage/import-commit.js';
 import type { ImportCommitFailure } from '../../storage/import-commit.js';
 import type { DepositoryId } from '../../storage/interfaces.js';
-import { OutcomeUnknownError } from '../../request/store.js';
+import { OutcomeUnknownError, RequestExpiredError } from '../../request/store.js';
 import { startServer } from '../../web/server.js';
 
 const USAGE = 'enigma import [PATH] [--depository ID] [--rotate] [--json]';
@@ -88,10 +88,15 @@ async function runBrowserFlow(
     // expiry). The MCP tools map this to `E_OUTCOME_UNKNOWN`; the CLI uses
     // its own note here because it reports to a human via stdout, not to
     // the model.
+    // Never-used expiry is typed (Kimi QA AC5): RequestExpiredError means
+    // the link died unused — "expired". Anything else is unexpected and
+    // must NOT be misreported as an expiry (the old blanket else did).
     const note =
       err instanceof OutcomeUnknownError
         ? 'Import outcome unknown: the page was used but no result was recorded. Some secrets may already be stored — run `enigma list` to check before retrying.'
-        : 'Import link expired before it was completed.';
+        : err instanceof RequestExpiredError
+          ? 'Import link expired before it was completed.'
+          : 'Import failed unexpectedly before it was completed.';
     return report(
       {
         imported: [],

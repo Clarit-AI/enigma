@@ -269,8 +269,9 @@ function validateName(name) {
 
 // src/core/project.ts
 import { createHash } from "node:crypto";
-import { existsSync as existsSync2 } from "node:fs";
-import { dirname as dirname2, resolve } from "node:path";
+import { existsSync as existsSync2, readFileSync as readFileSync2, realpathSync, statSync } from "node:fs";
+import { basename, dirname as dirname2, join as join3, resolve } from "node:path";
+import * as nodePath from "node:path";
 var PROJECT_ID_LENGTH = 16;
 function findProjectPath(cwd) {
   let dir = resolve(cwd);
@@ -281,9 +282,110 @@ function findProjectPath(cwd) {
     dir = parent;
   }
 }
+var platformPath = nodePath;
+function parseGitdirPointer(content) {
+  const firstLine = content.split(/\r?\n/, 1)[0];
+  if (firstLine === void 0) return null;
+  const match = /^gitdir:(\s*)(\S.*?)?\s*$/.exec(firstLine);
+  if (!match) return null;
+  return match[2] ?? null;
+}
+function parseCommondirPointer(content) {
+  const firstLine = content.split(/\r?\n/, 1)[0];
+  if (firstLine === void 0) return null;
+  const trimmed = firstLine.trim();
+  return trimmed || null;
+}
+function resolveGitPointer(baseDir, rawContent, pathImpl = platformPath) {
+  const trimmed = rawContent.trim();
+  return pathImpl.isAbsolute(trimmed) ? trimmed : pathImpl.resolve(baseDir, trimmed);
+}
+function gitEntryKind(entryPath) {
+  try {
+    const st = statSync(entryPath);
+    if (st.isDirectory()) return "directory";
+    if (st.isFile()) return "file";
+    return "missing";
+  } catch {
+    return "missing";
+  }
+}
+function statErrorKind(err) {
+  const code = err.code;
+  return code === "ENOENT" || code === "ENOTDIR" ? "absent" : "error";
+}
+function pathStat(p) {
+  try {
+    statSync(p);
+    return "exists";
+  } catch (err) {
+    return statErrorKind(err);
+  }
+}
+function directoryStat(p) {
+  try {
+    return statSync(p).isDirectory() ? "directory" : "error";
+  } catch (err) {
+    return statErrorKind(err);
+  }
+}
+function safeRealpath(p, fallback) {
+  try {
+    return realpathSync(p);
+  } catch {
+    return fallback;
+  }
+}
+function readFileSafe(filePath) {
+  try {
+    return readFileSync2(filePath, "utf8");
+  } catch {
+    return null;
+  }
+}
+function findRepoIdentityPath(cwd) {
+  const worktreeRoot = findProjectPath(cwd);
+  const fallback = safeRealpath(worktreeRoot, worktreeRoot);
+  try {
+    const gitEntryPath = `${worktreeRoot}/.git`;
+    const kind = gitEntryKind(gitEntryPath);
+    let commonDir;
+    if (kind === "directory") {
+      commonDir = gitEntryPath;
+    } else if (kind === "file") {
+      const raw = readFileSafe(gitEntryPath);
+      if (raw === null) return fallback;
+      const pointer = parseGitdirPointer(raw);
+      if (pointer === null) return fallback;
+      const gitdir = resolveGitPointer(worktreeRoot, pointer);
+      if (directoryStat(gitdir) !== "directory") return fallback;
+      const commondirFile = join3(gitdir, "commondir");
+      const commondirState = pathStat(commondirFile);
+      if (commondirState === "exists") {
+        const content = readFileSafe(commondirFile);
+        if (content === null) return fallback;
+        const cdp = parseCommondirPointer(content);
+        if (cdp === null) return fallback;
+        const commondirTarget = resolveGitPointer(gitdir, cdp);
+        if (directoryStat(commondirTarget) !== "directory") return fallback;
+        commonDir = commondirTarget;
+      } else if (commondirState === "absent") {
+        commonDir = gitdir;
+      } else {
+        return fallback;
+      }
+    } else {
+      return fallback;
+    }
+    const resolved = safeRealpath(commonDir, fallback);
+    return basename(resolved) === ".git" ? dirname2(resolved) : resolved;
+  } catch {
+    return fallback;
+  }
+}
 function projectId(cwd) {
-  const projectPath = findProjectPath(cwd);
-  return createHash("sha256").update(projectPath).digest("hex").slice(0, PROJECT_ID_LENGTH);
+  const identityPath = findRepoIdentityPath(cwd);
+  return createHash("sha256").update(identityPath).digest("hex").slice(0, PROJECT_ID_LENGTH);
 }
 
 // src/core/audit.ts
@@ -355,7 +457,7 @@ function listIndexEntries(index, opts = {}) {
 
 // src/storage/depositories/encrypted.ts
 import { createCipheriv, createDecipheriv, randomBytes as randomBytes2 } from "node:crypto";
-import { existsSync as existsSync3, readFileSync as readFileSync2, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
 var ALGORITHM = "aes-256-gcm";
 var KEY_BYTES = 32;
 var IV_BYTES = 12;
@@ -363,7 +465,7 @@ var FILE_MODE2 = 384;
 var EMPTY_SECRETS_FILE = { version: 1, entries: {} };
 function readKey() {
   if (!existsSync3(keyPath())) return void 0;
-  const key = Buffer.from(readFileSync2(keyPath(), "utf8"), "base64");
+  const key = Buffer.from(readFileSync3(keyPath(), "utf8"), "base64");
   if (key.length !== KEY_BYTES) readFailed();
   return key;
 }
@@ -445,8 +547,8 @@ var encryptedDepositoryModule = {
 };
 
 // src/storage/depositories/env.ts
-import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync3 } from "node:fs";
-import { join as join3 } from "node:path";
+import { existsSync as existsSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { join as join4 } from "node:path";
 var BEGIN_MARKER = "# enigma:begin";
 var END_MARKER = "# enigma:end";
 var FILE_MODE3 = 384;
@@ -521,11 +623,11 @@ function removeManagedValue(content, name) {
   return newLines.join(eol);
 }
 function checkEnvGitignore(projectPath) {
-  const gitignorePath = join3(projectPath, ".gitignore");
+  const gitignorePath = join4(projectPath, ".gitignore");
   if (!existsSync4(gitignorePath)) {
     return [".env is not gitignored: no .gitignore file found in this project"];
   }
-  const lines = readFileSync3(gitignorePath, "utf8").split(/\r?\n/);
+  const lines = readFileSync4(gitignorePath, "utf8").split(/\r?\n/);
   const covered = lines.some((raw) => {
     const line = raw.trim();
     if (!line || line.startsWith("#")) return false;
@@ -545,8 +647,8 @@ function requireProjectPath(ctx) {
   return ctx.projectPath;
 }
 function createEnvDepository(ctx) {
-  const envFilePath = join3(requireProjectPath(ctx), ".env");
-  const readEnvFile = () => existsSync4(envFilePath) ? readFileSync3(envFilePath, "utf8") : "";
+  const envFilePath = join4(requireProjectPath(ctx), ".env");
+  const readEnvFile = () => existsSync4(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
   return {
     id: "env",
     promptProfile: "none",
@@ -920,7 +1022,7 @@ var macosKeychainDepositoryModule = {
 
 // src/storage/depositories/onepassword.ts
 import { execFile as execFile3 } from "node:child_process";
-import { basename } from "node:path";
+import { basename as basename2 } from "node:path";
 var OP_BIN = "op";
 var VAULT = "Enigma";
 var MIN_MAJOR_VERSION = 2;
@@ -1026,7 +1128,7 @@ function buildTitle(ref, ctx) {
   const name = nameFromRef(ref);
   const isGlobal = ref === name || ref.startsWith("global/");
   if (isGlobal || !ctx.projectPath) return name;
-  return `${name} \xB7 ${basename(ctx.projectPath)}`;
+  return `${name} \xB7 ${basename2(ctx.projectPath)}`;
 }
 function itemTemplate(title, value) {
   return JSON.stringify({
@@ -1451,8 +1553,8 @@ async function cmdGet(argv) {
 }
 
 // src/cli/commands/import.ts
-import { existsSync as existsSync8, readFileSync as readFileSync5 } from "node:fs";
-import { isAbsolute, join as join4 } from "node:path";
+import { existsSync as existsSync8, readFileSync as readFileSync6 } from "node:fs";
+import { isAbsolute, join as join5 } from "node:path";
 
 // src/mcp/result-text.ts
 function findJustWrittenEntry(name, cwd) {
@@ -1510,7 +1612,7 @@ function expireRecord(id) {
   records.delete(id);
   const waiter = waiters.get(id);
   if (waiter) {
-    waiter.reject(new Error("request expired"));
+    waiter.reject(new RequestExpiredError());
     waiters.delete(id);
   }
 }
@@ -1519,6 +1621,13 @@ function startSweeper() {
   sweepTimer = setInterval(sweep, SWEEP_INTERVAL_MS);
   sweepTimer.unref();
 }
+var RequestExpiredError = class _RequestExpiredError extends Error {
+  constructor(message = "request expired") {
+    super(message);
+    this.name = "RequestExpiredError";
+    Object.setPrototypeOf(this, _RequestExpiredError.prototype);
+  }
+};
 var OutcomeUnknownError = class _OutcomeUnknownError extends Error {
   names;
   constructor(names) {
@@ -1616,8 +1725,9 @@ var RequestStore = {
    * delete the record silently and leave `enigma_await` waiting forever.
    * The `usedAt` check runs FIRST: a used record is never a single-use
    * candidate anyway, and routing a used-but-expired record through
-   * `expireRecord` would reject its in-flight write's waiter with the plain
-   * expiry error — the wrong code. That record belongs to the sweeper's
+   * `expireRecord` would reject its in-flight write's waiter with the
+   * never-used expiry error (`RequestExpiredError`) — the wrong code. That
+   * record belongs to the sweeper's
    * used-grace path, which produces `OutcomeUnknownError` when `results`
    * never landed (a submitted write may have partially completed).
    */
@@ -1659,7 +1769,7 @@ var RequestStore = {
    */
   waitForFulfilled(id) {
     const record = records.get(id);
-    if (!record) return Promise.reject(new Error("request not found"));
+    if (!record) return Promise.reject(new RequestExpiredError("request not found"));
     if (record.results !== void 0) return Promise.resolve("fulfilled");
     let waiter = waiters.get(id);
     if (!waiter) {
@@ -1689,20 +1799,40 @@ var RequestStore = {
   /**
    * Enumerates fulfilled 'request'/'import' records (results are in) whose
    * outcome has never been read via `consumeOutcome` — Issue #62's recovery
-   * signal for an `enigma_await`/`enigma_request` call that was interrupted
-   * before the agent ever saw the outcome text, even though the secret was
-   * stored correctly by the independent web layer. 'reveal' records are
-   * excluded: `enigma_reveal` never blocks on `resolveRequestOutcome` (by
+   * signal for an `enigma_await`/`enigma_request`/`enigma_import` call that
+   * was interrupted before the agent ever saw the outcome text, even though
+   * the secret was stored correctly by the independent web layer. 'reveal'
+   * records are excluded: `enigma_reveal` never blocks on `resolveRequestOutcome` (by
    * design — the revealed value goes only to the human), so a fulfilled
    * reveal has nothing pending for the agent to re-await.
    *
-   * Returns names and ids only, never values or per-name results (ADR-001)
-   * — this is purely "there is an outcome you may not have seen; call
-   * enigma_await(id)", not the outcome itself. Reading this list never
-   * marks anything consumed, so calling it repeatedly (e.g. from
-   * enigma_doctor) cannot make the signal disappear on its own. Bounded by
-   * the same in-memory TTL/used-grace sweep as every other record; no new
-   * persistence.
+   * Each entry carries the names split into three static buckets, mirroring
+   * the bucketing `renderOutcome` (src/mcp/result-text.ts) uses for the
+   * `enigma_request` / `enigma_await` / `enigma_import` result text:
+   *   - `stored`  — ok === true
+   *   - `failed`  — ok === false AND errorCode !== 'E_OUTCOME_UNKNOWN'
+   *                 (a confirmed refusal: E_VALUE_AMBIGUOUS, E_EXISTS, …)
+   *   - `unknown` — ok === false AND errorCode === 'E_OUTCOME_UNKNOWN'
+   *                 (commitImport crashed after its own internal storage
+   *                 loop — names may genuinely be stored; the agent must
+   *                 check before retrying)
+   * The `errorCode` is read HERE only to choose the bucket — it is never
+   * returned, never logged, never rendered (ADR-001). The recovery signal
+   * surfaces only names and the bucket they fell into.
+   *
+   * Names come from `record.results[*].name` (what the web POST handler
+   * actually processed), not `record.names` (what the agent originally
+   * requested): Issue #68, forward-contract for the extensible request form
+   * (#71) that lets the human add or remove names at submit time. A record
+   * whose `results` is empty, or whose bucketed lists are all empty, is
+   * omitted — there are no names to re-await, so the signal has nothing
+   * to say about it. Reading this list never marks anything consumed, so
+   * calling it repeatedly (e.g. from enigma_doctor) cannot make the
+   * signal disappear on its own. Bounded by the same in-memory
+   * TTL/used-grace sweep as every other record; no new persistence. Lives
+   * in the MCP server process only — SessionStart runs in a separate
+   * short-lived subprocess and never reaches this code (see Issue #68 for
+   * the dead-code removal).
    */
   listUnconsumedFulfilled() {
     const out = [];
@@ -1710,7 +1840,16 @@ var RequestStore = {
       if (record.kind === "reveal") continue;
       if (record.results === void 0) continue;
       if (record.outcomeConsumedAt !== void 0) continue;
-      out.push({ id: record.id, names: [...record.names] });
+      const stored = [];
+      const failed = [];
+      const unknown = [];
+      for (const r of record.results) {
+        if (r.ok) stored.push(r.name);
+        else if (r.errorCode === "E_OUTCOME_UNKNOWN") unknown.push(r.name);
+        else failed.push(r.name);
+      }
+      if (stored.length === 0 && failed.length === 0 && unknown.length === 0) continue;
+      out.push({ id: record.id, stored, failed, unknown });
     }
     return out;
   },
@@ -1913,7 +2052,7 @@ function removeDotEnvEntries(content, names, opts = {}) {
 
 // src/storage/import-commit.ts
 import { randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync7, readFileSync as readFileSync4, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync7, readFileSync as readFileSync5, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 var FILE_MODE4 = 384;
 function writeFileAtomic(path, content, mode) {
   const tmpPath = `${path}.${randomBytes4(6).toString("hex")}.tmp`;
@@ -1981,7 +2120,7 @@ async function commitImport(opts) {
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
-  const currentContent = existsSync7(opts.envFilePath) ? readFileSync4(opts.envFilePath, "utf8") : "";
+  const currentContent = existsSync7(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
   const valueByName = new Map(opts.entries.map((e) => [e.name, e.value]));
   const currentValueByName = new Map(parseDotEnv(currentContent).entries.map((e) => [e.name, e.value]));
   const toRemove = [];
@@ -4714,7 +4853,7 @@ async function runBrowserFlow(entries, opts) {
     await RequestStore.waitForFulfilled(record.id);
   } catch (err) {
     await handle.close();
-    const note = err instanceof OutcomeUnknownError ? "Import outcome unknown: the page was used but no result was recorded. Some secrets may already be stored \u2014 run `enigma list` to check before retrying." : "Import link expired before it was completed.";
+    const note = err instanceof OutcomeUnknownError ? "Import outcome unknown: the page was used but no result was recorded. Some secrets may already be stored \u2014 run `enigma list` to check before retrying." : err instanceof RequestExpiredError ? "Import link expired before it was completed." : "Import failed unexpectedly before it was completed.";
     return report(
       {
         imported: [],
@@ -4758,11 +4897,11 @@ async function cmdImport(argv) {
   if (positionals.length > 1) throw new UsageError(USAGE3);
   const cwd = process.cwd();
   const projectPath = findProjectPath(cwd);
-  const absPath = isAbsolute(pathArg) ? pathArg : join4(cwd, pathArg);
+  const absPath = isAbsolute(pathArg) ? pathArg : join5(cwd, pathArg);
   if (!existsSync8(absPath)) {
     throw new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` });
   }
-  const content = readFileSync5(absPath, "utf8");
+  const content = readFileSync6(absPath, "utf8");
   const parsed = parseDotEnv(content);
   if (parsed.entries.length === 0) {
     return report(
@@ -4810,15 +4949,15 @@ async function cmdImport(argv) {
 }
 
 // src/cli/commands/install.ts
-import { existsSync as existsSync9, mkdirSync as mkdirSync2, readFileSync as readFileSync6, renameSync as renameSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync9, mkdirSync as mkdirSync2, readFileSync as readFileSync7, renameSync as renameSync3, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname3, join as join5 } from "node:path";
+import { dirname as dirname3, join as join6 } from "node:path";
 var MARKETPLACE_NAME = "clarit-enigma";
 var REPO = "Clarit-AI/enigma";
 var PLUGIN_ENTRY = `enigma@${MARKETPLACE_NAME}`;
 function claudeSettingsPath() {
-  const configDir = process.env.CLAUDE_CONFIG_DIR || join5(homedir2(), ".claude");
-  return join5(configDir, "settings.json");
+  const configDir = process.env.CLAUDE_CONFIG_DIR || join6(homedir2(), ".claude");
+  return join6(configDir, "settings.json");
 }
 var DEFAULT_STYLE = { indent: "  ", trailingNewline: true, eol: "\n" };
 function detectStyle(raw) {
@@ -4833,7 +4972,7 @@ function readSettings(path) {
   if (!existsSync9(path)) return { settings: {}, style: DEFAULT_STYLE };
   let raw;
   try {
-    raw = readFileSync6(path, "utf8");
+    raw = readFileSync7(path, "utf8");
   } catch (err) {
     throw new EnigmaError({
       code: "E_CLAUDE_SETTINGS_UNWRITABLE",

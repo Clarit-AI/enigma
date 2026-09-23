@@ -104,7 +104,11 @@ describe('enigma_doctor', () => {
     const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
 
     expect(text).toContain('Pending unconfirmed requests:');
-    expect(text).toContain(`${record.id} (names: OPENAI_API_KEY, GITHUB_TOKEN) — call enigma_await(${record.id})`);
+    expect(text).toContain(`${record.id} (stored: OPENAI_API_KEY, GITHUB_TOKEN) — call enigma_await(${record.id})`);
+    // No failed or unknown names in this fixture; the static labels must
+    // not appear at all (no names to label with them).
+    expect(text).not.toMatch(/failed:/);
+    expect(text).not.toMatch(/outcome unknown:/);
     await pair.close();
   });
 
@@ -144,6 +148,110 @@ describe('enigma_doctor', () => {
     const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
 
     expect(text).not.toContain('Pending unconfirmed requests');
+    await pair.close();
+  });
+
+  it('labels a failed name with the static "failed:" prefix and never with errorCode or reason text (Issue #68 review)', async () => {
+    const record = RequestStore.create({
+      kind: 'request',
+      names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'],
+    });
+    RequestStore.tryMarkUsed(record.id);
+    RequestStore.fulfill(record.id, [
+      { name: 'OPENAI_API_KEY', ok: true },
+      { name: 'GITHUB_TOKEN', ok: false, errorCode: 'E_VALUE_AMBIGUOUS', reason: 'flagged at parse time' },
+    ]);
+
+    const pair = await connectWithCapabilities({});
+    const result = await pair.client.callTool({ name: 'enigma_doctor', arguments: {} });
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+    expect(text).toContain('Pending unconfirmed requests:');
+    // The failed label is the STATIC word "failed:" — the per-name
+    // errorCode/reason text must never appear (ADR-001), and the stored
+    // name must appear under "stored:" with no "failed" co-mingling.
+    const line = text
+      .split('\n')
+      .find((l) => l.includes(record.id));
+    expect(line).toBeDefined();
+    expect(line!).toContain(`${record.id} (stored: OPENAI_API_KEY; failed: GITHUB_TOKEN) — call enigma_await(${record.id})`);
+    expect(text).not.toContain('E_VALUE_AMBIGUOUS');
+    expect(text).not.toContain('flagged at parse time');
+
+    await pair.close();
+  });
+
+  it('labels an E_OUTCOME_UNKNOWN name with the static "outcome unknown:" prefix and never as "failed:" (Issue #40 — an unknown outcome is not a confirmed failure)', async () => {
+    const record = RequestStore.create({
+      kind: 'request',
+      names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'],
+    });
+    RequestStore.tryMarkUsed(record.id);
+    RequestStore.fulfill(record.id, [
+      { name: 'OPENAI_API_KEY', ok: true },
+      { name: 'GITHUB_TOKEN', ok: false, errorCode: 'E_OUTCOME_UNKNOWN' },
+    ]);
+
+    const pair = await connectWithCapabilities({});
+    const result = await pair.client.callTool({ name: 'enigma_doctor', arguments: {} });
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+    const line = text.split('\n').find((l) => l.includes(record.id));
+    expect(line).toBeDefined();
+    expect(line!).toContain(`${record.id} (stored: OPENAI_API_KEY; outcome unknown: GITHUB_TOKEN) — call enigma_await(${record.id})`);
+    // Critical: the unknown name must NOT be labelled "failed:" — the
+    // Issue #40 ruling says the word "failed" is never used for an
+    // unknown outcome.
+    expect(line!).not.toMatch(/failed:\s*GITHUB_TOKEN/);
+    expect(line!).not.toMatch(/failed:.*GITHUB_TOKEN/);
+    expect(text).not.toContain('E_OUTCOME_UNKNOWN');
+    expect(text).not.toMatch(/failed:.*E_OUTCOME_UNKNOWN/s);
+
+    await pair.close();
+  });
+
+  it('renders stored + failed + outcome unknown in a single record — three buckets, three static labels', async () => {
+    const record = RequestStore.create({
+      kind: 'request',
+      names: ['A_OK', 'B_FAIL', 'C_UNKNOWN'],
+    });
+    RequestStore.tryMarkUsed(record.id);
+    RequestStore.fulfill(record.id, [
+      { name: 'A_OK', ok: true },
+      { name: 'B_FAIL', ok: false, errorCode: 'E_VALUE_AMBIGUOUS', reason: 'static-text-only' },
+      { name: 'C_UNKNOWN', ok: false, errorCode: 'E_OUTCOME_UNKNOWN' },
+    ]);
+
+    const pair = await connectWithCapabilities({});
+    const result = await pair.client.callTool({ name: 'enigma_doctor', arguments: {} });
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+    const line = text.split('\n').find((l) => l.includes(record.id));
+    expect(line).toBeDefined();
+    expect(line!).toContain(
+      `${record.id} (stored: A_OK; failed: B_FAIL; outcome unknown: C_UNKNOWN) — call enigma_await(${record.id})`,
+    );
+    // ADR-001 — no per-name errorCode or reason text reaches the model.
+    expect(text).not.toContain('E_VALUE_AMBIGUOUS');
+    expect(text).not.toContain('E_OUTCOME_UNKNOWN');
+    expect(text).not.toContain('static-text-only');
+
+    await pair.close();
+  });
+
+  it('omits records whose `results` is empty (Issue #68 review) — nothing to re-await, nothing to render', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    RequestStore.tryMarkUsed(record.id);
+    RequestStore.fulfill(record.id); // defaults to results: []
+
+    const pair = await connectWithCapabilities({});
+    const result = await pair.client.callTool({ name: 'enigma_doctor', arguments: {} });
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+    expect(text).not.toContain('Pending unconfirmed requests');
+    expect(text).not.toContain(record.id);
+    expect(text).not.toContain('OPENAI_API_KEY');
+
     await pair.close();
   });
 });

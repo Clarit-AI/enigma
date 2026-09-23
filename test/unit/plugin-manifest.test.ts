@@ -61,8 +61,8 @@ describe('plugins/enigma/skills/enigma/SKILL.md', () => {
 });
 
 describe('plugins/enigma/commands', () => {
-  const COMMANDS = ['request', 'reveal', 'list', 'doctor', 'import'];
-  const DISABLE_MODEL_INVOCATION = new Set(['reveal', 'import']);
+  const COMMANDS = ['request', 'reveal', 'list', 'doctor', 'import', 'remove'];
+  const DISABLE_MODEL_INVOCATION = new Set(['reveal', 'import', 'remove']);
 
   it.each(COMMANDS)('%s.md exists with a description', (name) => {
     const path = join(PLUGIN_ROOT, 'commands', `${name}.md`);
@@ -82,6 +82,26 @@ describe('plugins/enigma/commands', () => {
     const { frontmatter } = readFrontmatter(path);
     expect(frontmatter['disable-model-invocation']).toBeUndefined();
   });
+
+  describe('remove.md', () => {
+    const { body } = readFrontmatter(join(PLUGIN_ROOT, 'commands', 'remove.md'));
+
+    it('rejects an invalid or extra scope token instead of silently dropping it', () => {
+      expect(body).toMatch(/exactly `project` or `global`/);
+      expect(body).toMatch(/is invalid input\. Do not call the tool/);
+    });
+
+    it('requires an explicit affirmative reply before retrying with confirm: true', () => {
+      expect(body).toContain('E_CONFIRMATION_REQUIRED');
+      expect(body).toContain('confirm: true');
+      expect(body).toMatch(/declines or doesn't answer, stop/);
+    });
+
+    it('does not promise scope as part of the relayed result', () => {
+      expect(body).toMatch(/names, status, and depository/);
+      expect(body).not.toMatch(/scope, and depository/);
+    });
+  });
 });
 
 describe('plugin manifests', () => {
@@ -97,5 +117,22 @@ describe('plugin manifests', () => {
   it('plugins/enigma/.claude-plugin/plugin.json is valid JSON naming the enigma plugin', () => {
     const plugin = JSON.parse(readFileSync(join(PLUGIN_ROOT, '.claude-plugin/plugin.json'), 'utf8')) as { name: string };
     expect(plugin.name).toBe('enigma');
+  });
+});
+
+describe('Issue #69 doc pins (AC11/AC12) — focused wording pins, not an eval harness', () => {
+  it('AC11: SKILL.md documents the Monitor/status wake-on-submit pattern and the no-watcher fallback', () => {
+    const { body } = readFrontmatter(join(PLUGIN_ROOT, 'skills/enigma/SKILL.md'));
+    expect(body).toMatch(/background-watch/);
+    expect(body).toContain('GET /r/<request_id>/status');
+    expect(body).toMatch(/`\{"state":"pending"\}`/);
+    expect(body).toMatch(/call `enigma_await` immediately/);
+  });
+
+  it('AC12: docs/api-contracts.md documents GET /r/:id/status and E_OUTCOME_UNKNOWN', () => {
+    const apiContracts = readFileSync(join(REPO_ROOT, 'docs/api-contracts.md'), 'utf8');
+    expect(apiContracts).toContain('GET /r/:id/status');
+    expect(apiContracts).toContain('E_OUTCOME_UNKNOWN');
+    expect(apiContracts).toContain('E_REQUEST_EXPIRED');
   });
 });

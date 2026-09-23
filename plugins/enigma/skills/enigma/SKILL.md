@@ -19,7 +19,7 @@ Enigma exists for one reason: **a secret's value must never enter your context w
 - **To run something that needs the real value**: call `enigma run -- <command> [args...]` (via Bash, or tell the user to run it). It injects the actual values into the child process's environment; you see only the child's stdout/stderr, never the injected values.
 - **To let the user see a value themselves**: call `enigma_reveal` (or point them at `/enigma:reveal NAME`). It opens a one-time, out-of-band disclosure to the human. It is human-initiated by design — you should not invoke it on your own judgment; only when the user actually asks to see a value.
 - **To see what secrets exist** (names only, never values): `enigma_list` or `/enigma:list`.
-- **To check the local setup**: `enigma_doctor` or `/enigma:doctor` — platform, which depositories are available, 1Password CLI status, tunnel binaries.
+- **To check the local setup**: `enigma_doctor` or `/enigma:doctor` — platform, which depositories are available, 1Password CLI status, tunnel binaries, and any pending unconfirmed requests (the recovery signal for a request/import whose outcome you never received — `call enigma_await(id)` to re-fetch it; SessionStart does not surface this, because the request store lives in the MCP process).
 - **Never** `enigma get NAME`, `enigma env`, `cat .env`, `echo $NAME`, or any other direct read. If a name is already stored and you just need it applied, that's what `enigma run` is for — there is no "get" path for you, by design.
 
 ## A read-guard denial is an instruction, not an obstacle
@@ -56,6 +56,7 @@ Match this against the `usage` you pass to `enigma_request`:
 | Use a secret in a command | `enigma run -- <command>` |
 | Show a secret to the human | `enigma_reveal` (or `/enigma:reveal`, human-initiated) |
 | See what's registered | `enigma_list` (or `/enigma:list`) |
-| Check local setup/health | `enigma_doctor` (or `/enigma:doctor`) |
+| Check local setup/health | `enigma_doctor` (or `/enigma:doctor`) — also lists pending unconfirmed requests |
 | Move values out of a `.env` file | `/enigma:import` (human-initiated — it rewrites the file) |
+| Delete a secret | `enigma_remove` (or `/enigma:remove NAME [scope]`, human-initiated — destructive, cannot be undone) |
 | A tool call was denied | Read the denial message and do what it says — don't route around it |
