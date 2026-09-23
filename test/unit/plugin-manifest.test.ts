@@ -61,8 +61,8 @@ describe('plugins/enigma/skills/enigma/SKILL.md', () => {
 });
 
 describe('plugins/enigma/commands', () => {
-  const COMMANDS = ['request', 'reveal', 'list', 'doctor', 'import'];
-  const DISABLE_MODEL_INVOCATION = new Set(['reveal', 'import']);
+  const COMMANDS = ['request', 'reveal', 'list', 'doctor', 'import', 'remove'];
+  const DISABLE_MODEL_INVOCATION = new Set(['reveal', 'import', 'remove']);
 
   it.each(COMMANDS)('%s.md exists with a description', (name) => {
     const path = join(PLUGIN_ROOT, 'commands', `${name}.md`);
