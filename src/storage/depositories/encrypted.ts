@@ -103,6 +103,27 @@ function createEncryptedDepository(): Depository {
       }
     },
 
+    // Issue #70: compare-and-delete in one synchronous read-modify-write. If
+    // the key's content can't be verified against the captured displaced
+    // copy (missing key material, absent entry, undecryptable entry), the
+    // conservative answer is to leave it — a skipped cleanup leaks an orphan,
+    // a wrong delete loses a live value.
+    async deleteIfUnchanged(ref, expectedValue) {
+      const key = readKey();
+      if (!key) return false;
+      const file = readSecretsFile();
+      const entry = file.entries[ref];
+      if (!entry) return false;
+      try {
+        if (decryptEntry(entry, key) !== expectedValue) return false;
+      } catch {
+        return false;
+      }
+      delete file.entries[ref];
+      writeSecretsFile(file);
+      return true;
+    },
+
     async has(ref) {
       return ref in readSecretsFile().entries;
     },

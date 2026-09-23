@@ -4,10 +4,11 @@
 // dispatch. A secret value only ever passes through this file and
 // src/storage/depositories/** (style-guide secret-handling conventions).
 
+import { realpathSync } from 'node:fs';
 import { EnigmaError } from '../core/errors.js';
 import { validateName } from '../core/naming.js';
 import { findProjectPath, projectId as computeProjectId } from '../core/project.js';
-import { appendAuditEvent, auditErrorText } from '../core/audit.js';
+import { appendAuditEvent, auditErrorText, classifyCleanupError } from '../core/audit.js';
 import type { AuditActor, AuditEvent, AuditRevealMethod } from '../core/audit.js';
 import {
   buildRef,
@@ -44,6 +45,42 @@ function createDepository(id: DepositoryId, ctx: DepositoryContext = {}): Deposi
 function projectPathFor(entry: Pick<IndexEntry, 'scope' | 'projectPath'>, cwd?: string): string | undefined {
   if (entry.scope === 'project') return entry.projectPath;
   return cwd ? findProjectPath(cwd) : undefined;
+}
+
+/**
+ * Physical-directory identity for `env` storage locations (Issue #70): the
+ * recorded `projectPath` is lexical, so two spellings of one directory
+ * (e.g. a symlinked worktree path) must compare equal — a `.env` file is
+ * one physical location however it was reached. Falls back to the lexical
+ * path when realpath fails (e.g. the worktree is gone): a stale spelling
+ * then simply differs from any live one, which is the safe direction.
+ */
+function canonicalPath(p: string | undefined): string | undefined {
+  if (p === undefined) return undefined;
+  try {
+    return realpathSync(p);
+  } catch {
+    return p;
+  }
+}
+
+/**
+ * True when any current index entry still maps to `displaced`'s storage
+ * location (Issue #70). Stable addresses are reusable: between our commit
+ * and our cleanup delete, a concurrent rotate can legitimately repopulate
+ * the same `(depository, ref)` — and for `env` the same `(projectPath,
+ * NAME)` — and commit it as current. `readIndex()` without the lock is
+ * enough: the index is written by atomic rename, so this always sees a
+ * fully committed state, and no index state could make the delete safe
+ * that a later commit couldn't invalidate anyway.
+ */
+function locationReclaimed(displaced: IndexEntry): boolean {
+  return readIndex().entries.some(
+    (e) =>
+      e.depository === displaced.depository &&
+      e.ref === displaced.ref &&
+      (displaced.depository !== 'env' || canonicalPath(e.projectPath) === canonicalPath(displaced.projectPath)),
+  );
 }
 
 export interface SetSecretOptions {
@@ -130,6 +167,27 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
     throw err;
   }
 
+  // Issue #70: for prompt-free depositories, capture the displaced copy's
+  // current value between the write and the index commit. The post-commit
+  // cleanup may then delete the old location only while its content is
+  // still this displaced copy — a stable address repopulated since (env's
+  // `(projectPath, NAME)`, encrypted's `<id>/NAME`) must never be removed.
+  // Prompting depositories (keychain, secret-service, 1password) get no
+  // extra read: 1password's fresh item ids are unreusable by construction,
+  // and a guarding read on the other two could prompt. 'empty' means the
+  // old location was already absent at capture → nothing to delete.
+  let capturedOld: { kind: 'value'; value: string } | { kind: 'empty' } | { kind: 'none' } = { kind: 'none' };
+  if (existing && opts.rotate && existing.depository === opts.depository) {
+    const oldDep = createDepository(existing.depository, { projectPath: projectPathFor(existing, opts.cwd) });
+    if (oldDep.promptProfile === 'none') {
+      try {
+        capturedOld = { kind: 'value', value: await oldDep.resolve(existing.ref) };
+      } catch (err) {
+        if (err instanceof EnigmaError && err.code === 'E_NOT_FOUND') capturedOld = { kind: 'empty' };
+      }
+    }
+  }
+
   const now = new Date().toISOString();
   const entry: IndexEntry = {
     name: opts.name,
@@ -143,6 +201,10 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
+  // Issue #70: the entry this write actually displaces — authoritative only
+  // inside the lock, where the delta sees the post-acquire index. Captured
+  // for the post-commit cleanup below; the pre-lock `existing` may be stale.
+  let displaced: IndexEntry | undefined;
   try {
     mutateIndex((current) => {
       // Issue #66, AC #4/#5: re-read inside the lock so the delta sees the
@@ -162,6 +224,7 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
           secretName: opts.name,
         });
       }
+      displaced = currentExisting;
       return upsertIndexEntry(current, entry);
     });
   } catch (err) {
@@ -171,6 +234,51 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
   appendAuditEvent({ op, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: true, error: null });
 
   const warnings = opts.depository === 'env' && projectPath ? checkEnvGitignore(projectPath) : [];
+
+  // Issue #70, D1.3: a same-depository rotate removes the displaced copy once
+  // the index points at the new location. Best-effort — a cleanup failure
+  // warns and audits like `move`'s (classifyCleanupError) but never fails the
+  // rotate: the new value and index are already authoritative. Guards:
+  //   - only when the old STORAGE LOCATION differs from the new one — a
+  //     different ref, or for env a different physical projectPath (recorded
+  //     projectPath is lexical; canonicalized here). Same-address writes
+  //     already overwrote in place; deleting them would destroy the new value.
+  //   - only when no committed index entry still references the old location
+  //     (locationReclaimed): a concurrent rotate that repopulated and
+  //     committed that address made it current again.
+  //   - where the depository can compare content prompt-free (env, encrypted),
+  //     only while the stored value is still the displaced copy captured
+  //     before the commit (deleteIfUnchanged) — covering repopulation that
+  //     lands between the commit and this delete.
+  // Fresh-id depositories (1password) need none of the value guards. A
+  // different-depository rotate is `move`'s domain and stays untouched.
+  if (displaced && displaced.depository === opts.depository) {
+    const locationDiffers =
+      displaced.ref !== ref ||
+      (opts.depository === 'env' && canonicalPath(displaced.projectPath) !== canonicalPath(projectPath));
+    if (locationDiffers && !locationReclaimed(displaced)) {
+      const oldDep = createDepository(displaced.depository, { projectPath: projectPathFor(displaced, opts.cwd) });
+      const capturedForDisplaced =
+        existing !== undefined &&
+        displaced.ref === existing.ref &&
+        (opts.depository !== 'env' || canonicalPath(displaced.projectPath) === canonicalPath(existing.projectPath));
+      try {
+        if (capturedOld.kind === 'empty' && capturedForDisplaced) {
+          // Already absent at capture — nothing to delete.
+        } else if (capturedOld.kind === 'value' && capturedForDisplaced && oldDep.deleteIfUnchanged) {
+          await oldDep.deleteIfUnchanged(displaced.ref, capturedOld.value);
+        } else {
+          await oldDep.delete(displaced.ref);
+        }
+      } catch (err) {
+        warnings.push(
+          `could not remove the old copy of ${opts.name} in ${opts.depository} (cleanup failed: ${classifyCleanupError(err)})`,
+        );
+        appendAuditEvent({ op: 'remove', name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: classifyCleanupError(err) });
+      }
+    }
+  }
+
   return { rotated: Boolean(existing), warnings };
 }
 

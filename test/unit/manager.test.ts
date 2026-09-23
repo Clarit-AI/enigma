@@ -458,9 +458,16 @@ describe('storage manager', () => {
 
     let releaseDelete: () => void = () => {};
     const deleteHeld = new Promise<void>((resolve) => { releaseDelete = resolve; });
+    // Only the FIRST `item delete` — the one deleteSecret issues — is parked.
+    // Issue #70's rotate cleanup issues its own best-effort delete of the same
+    // (now-displaced) item inside the setSecret below; a shared gate would
+    // deadlock the rotate on `deleteHeld`, which is only released afterwards.
+    let deleteCalls = 0;
     respondToOp = (call) => {
       if (call.args[0] === 'item' && call.args[1] === 'delete') {
-        return deleteHeld.then(() => ({ stdout: '' }));
+        deleteCalls += 1;
+        if (deleteCalls === 1) return deleteHeld.then(() => ({ stdout: '' }));
+        return { stdout: '' };
       }
       if (call.args[0] === 'item' && call.args[1] === 'create') {
         return { stdout: JSON.stringify({ id: 'opitemid_rotated', title: 'NAME_CHANGED', category: 'API_CREDENTIAL' }) };

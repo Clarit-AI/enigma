@@ -36,6 +36,19 @@ export interface Depository {
    */
   resolve(ref: string): Promise<string>;
   delete(ref: string): Promise<void>;
+  /**
+   * Optional compare-and-delete used by Issue #70's rotate cleanup on
+   * stable-address depositories: removes `ref` only when the stored value
+   * still equals `expectedValue` (the displaced copy the caller captured
+   * before committing). Stable locations are reusable — a concurrent rotate
+   * can legitimately repopulate the same address between the index commit
+   * and this delete — so the comparison, where it can run atomically inside
+   * the depository's own read-modify-write, is what prevents deleting a
+   * value that isn't the displaced one. Returns whether a delete happened.
+   * Absent → callers fall back to `delete` (fresh-id and promptable
+   * depositories, where a guarding read is unnecessary or would prompt).
+   */
+  deleteIfUnchanged?(ref: string, expectedValue: string): Promise<boolean>;
   has(ref: string): Promise<boolean>;
 }
 
