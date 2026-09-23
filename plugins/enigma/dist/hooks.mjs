@@ -177,6 +177,7 @@ function listIndexEntries(index, opts = {}) {
     return { ...entry, shadowed: Boolean(shadowedBy) };
   });
 }
+var SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 
 // src/storage/depositories/encrypted.ts
 import { createCipheriv, createDecipheriv, randomBytes as randomBytes2 } from "node:crypto";
