@@ -5028,23 +5028,86 @@ function report(data, json, cwd, note) {
 }
 async function runBrowserFlow(entries, opts) {
   const handle = await startServer();
-  const record = RequestStore.create({
-    kind: "import",
-    names: entries.map((e) => e.name),
-    values: Object.fromEntries(entries.map((e) => [e.name, e.value])),
-    ambiguousNames: entries.filter((e) => e.ambiguous).map((e) => e.name),
-    ambiguousReasons: Object.fromEntries(entries.filter((e) => e.ambiguous && e.ambiguousReason).map((e) => [e.name, e.ambiguousReason])),
-    scope: "project",
-    envFilePath: opts.absPath
-  });
-  const url = `${handle.origin}/i/${record.id}`;
-  process.stderr.write(
-    `Open ${url} to choose where to store ${entries.length} secret(s): ${entries.map((e) => e.name).join(", ")}
-`
-  );
   try {
-    await RequestStore.waitForFulfilled(record.id);
-  } catch (err) {
+    const record = RequestStore.create({
+      kind: "import",
+      names: entries.map((e) => e.name),
+      values: Object.fromEntries(entries.map((e) => [e.name, e.value])),
+      ambiguousNames: entries.filter((e) => e.ambiguous).map((e) => e.name),
+      ambiguousReasons: Object.fromEntries(entries.filter((e) => e.ambiguous && e.ambiguousReason).map((e) => [e.name, e.ambiguousReason])),
+      scope: "project",
+      envFilePath: opts.absPath
+    });
+    const url = `${handle.origin}/i/${record.id}`;
+    process.stderr.write(
+      `Open ${url} to choose where to store ${entries.length} secret(s): ${entries.map((e) => e.name).join(", ")}
+`
+    );
+    try {
+      await RequestStore.waitForFulfilled(record.id);
+    } catch (err) {
+      if (err instanceof OutcomeUnknownError) {
+        return report(
+          {
+            imported: [],
+            failed: [],
+            // NOT notAttempted: the form WAS used, so writes may already have
+            // happened — nothing here can claim the names were never attempted.
+            notAttempted: [],
+            skippedInvalid: opts.skippedInvalid,
+            skippedMismatch: [],
+            warnings: [],
+            fileRewritten: false,
+            error: {
+              code: "E_OUTCOME_UNKNOWN",
+              message: "the page was used but no result was recorded. Some secrets may already be stored \u2014 run `enigma list` to check before retrying."
+            }
+          },
+          opts.json,
+          opts.cwd
+        );
+      }
+      if (err instanceof RequestExpiredError) {
+        return report(
+          {
+            imported: [],
+            failed: [],
+            // Accurate here: a never-used expiry means no submission ran, so
+            // every name really was never attempted.
+            notAttempted: entries.map((e) => e.name),
+            skippedInvalid: opts.skippedInvalid,
+            skippedMismatch: [],
+            warnings: [],
+            fileRewritten: false,
+            error: {
+              code: "E_REQUEST_EXPIRED",
+              message: "the import link expired before it was completed."
+            }
+          },
+          opts.json,
+          opts.cwd
+        );
+      }
+      throw err;
+    }
+    const finalRecord = RequestStore.get(record.id);
+    const results = finalRecord?.results ?? [];
+    const outcome = finalRecord?.importOutcome;
+    return report(
+      {
+        imported: results.filter((r) => r.ok).map((r) => r.name),
+        failed: results.filter((r) => !r.ok && r.errorCode !== "E_NOT_ATTEMPTED").map((r) => ({ name: r.name, errorCode: r.errorCode ?? "E_UNKNOWN", message: r.reason })),
+        notAttempted: results.filter((r) => r.errorCode === "E_NOT_ATTEMPTED").map((r) => r.name),
+        skippedInvalid: opts.skippedInvalid,
+        skippedMismatch: outcome?.skippedMismatch ?? [],
+        warnings: outcome?.warnings ?? [],
+        fileRewritten: outcome?.fileRewritten ?? false,
+        depository: outcome?.depository
+      },
+      opts.json,
+      opts.cwd
+    );
+  } finally {
     try {
       await handle.close();
     } catch (closeErr) {
@@ -5053,68 +5116,7 @@ async function runBrowserFlow(entries, opts) {
 `
       );
     }
-    if (err instanceof OutcomeUnknownError) {
-      return report(
-        {
-          imported: [],
-          failed: [],
-          // NOT notAttempted: the form WAS used, so writes may already have
-          // happened — nothing here can claim the names were never attempted.
-          notAttempted: [],
-          skippedInvalid: opts.skippedInvalid,
-          skippedMismatch: [],
-          warnings: [],
-          fileRewritten: false,
-          error: {
-            code: "E_OUTCOME_UNKNOWN",
-            message: "the page was used but no result was recorded. Some secrets may already be stored \u2014 run `enigma list` to check before retrying."
-          }
-        },
-        opts.json,
-        opts.cwd
-      );
-    }
-    if (err instanceof RequestExpiredError) {
-      return report(
-        {
-          imported: [],
-          failed: [],
-          // Accurate here: a never-used expiry means no submission ran, so
-          // every name really was never attempted.
-          notAttempted: entries.map((e) => e.name),
-          skippedInvalid: opts.skippedInvalid,
-          skippedMismatch: [],
-          warnings: [],
-          fileRewritten: false,
-          error: {
-            code: "E_REQUEST_EXPIRED",
-            message: "the import link expired before it was completed."
-          }
-        },
-        opts.json,
-        opts.cwd
-      );
-    }
-    throw err;
   }
-  await handle.close();
-  const finalRecord = RequestStore.get(record.id);
-  const results = finalRecord?.results ?? [];
-  const outcome = finalRecord?.importOutcome;
-  return report(
-    {
-      imported: results.filter((r) => r.ok).map((r) => r.name),
-      failed: results.filter((r) => !r.ok && r.errorCode !== "E_NOT_ATTEMPTED").map((r) => ({ name: r.name, errorCode: r.errorCode ?? "E_UNKNOWN", message: r.reason })),
-      notAttempted: results.filter((r) => r.errorCode === "E_NOT_ATTEMPTED").map((r) => r.name),
-      skippedInvalid: opts.skippedInvalid,
-      skippedMismatch: outcome?.skippedMismatch ?? [],
-      warnings: outcome?.warnings ?? [],
-      fileRewritten: outcome?.fileRewritten ?? false,
-      depository: outcome?.depository
-    },
-    opts.json,
-    opts.cwd
-  );
 }
 async function cmdImport(argv) {
   const { positionals, flags } = parseArgs(argv, { value: ["depository"], boolean: ["json", "rotate"] });
