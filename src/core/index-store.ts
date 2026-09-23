@@ -1,8 +1,9 @@
-import { chmodSync, closeSync, ftruncateSync, mkdirSync, openSync, writeSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { chmodSync, closeSync, existsSync, ftruncateSync, mkdirSync, openSync, writeSync } from 'node:fs';
+import { dirname, resolve } from 'node:path';
 import { EnigmaError } from './errors.js';
 import { loadIndexLock } from './native-lock.js';
 import { indexLockPath, indexPath } from './paths.js';
+import { findRepoIdentityPath, projectId as computeProjectId } from './project.js';
 import { readJsonFile, writeJsonFileAtomic } from './secure-file.js';
 import type { DepositoryId } from '../storage/interfaces.js';
 
@@ -371,4 +372,238 @@ export function mutateIndex(delta: (current: IndexFile) => IndexFile): void {
   } finally {
     lock.release();
   }
+}
+
+/* ------------------------------------------------------------------ *
+ *  Scope migration (Issue #72, plan Decision 2)                        *
+ * ------------------------------------------------------------------ *
+ *
+ * After the repo-identity change (Issue #67), a `scope: 'project'` entry
+ * whose stored `projectId` no longer matches the canonical repo identity
+ * is invisible everywhere — including from the worktree that wrote it.
+ * There is deliberately no read-time fallback: the entries are re-keyed
+ * explicitly by `enigma migrate-scope`, and doctor/SessionStart surface
+ * them until then.
+ *
+ * The migration is INDEX-ONLY: it rewrites `projectId`, never resolves a
+ * value, and never calls a depository — nothing below imports the storage
+ * layer. Everything here carries names, paths, and classes only.
+ */
+
+/** The four classes of the migration contract (Issue #72, classification table). */
+export type LegacyScopeClass = 'adoptable' | 'orphaned-adoptable' | 'orphaned-unrecoverable' | 'conflict';
+
+export interface LegacyScopeItem {
+  entry: IndexEntry;
+  class: LegacyScopeClass;
+  /**
+   * True when this run's options would re-key the entry: every `adoptable`
+   * entry, plus an `orphaned-adoptable` entry whose recorded `projectPath`
+   * the user attested via `--from`. Conflicts are never rekeyable.
+   */
+  rekeyable: boolean;
+  /** Value-free qualifier shown next to the class (conflict reason, `needs --from <path>`, …). */
+  detail?: string;
+}
+
+export interface LegacyScopeReport {
+  /** The current repo's identity id — the re-key target. */
+  projectId: string;
+  /** The canonical repo identity path `projectId` hashes (printed as the plan's target repo). */
+  identityPath: string;
+  /** Legacy entries, sorted by name for stable output. */
+  items: LegacyScopeItem[];
+  counts: Record<LegacyScopeClass, number>;
+}
+
+/**
+ * Depositories whose value survives a deleted worktree (it lives outside
+ * `projectPath`), so an orphaned entry there stays adoptable once the user
+ * attests membership. `env` is excluded on purpose — its value lived inside
+ * the deleted `.env`, which is the `orphaned-unrecoverable` class.
+ */
+const ORPHAN_ADOPTABLE_DEPOSITORIES: ReadonlySet<DepositoryId> = new Set([
+  'encrypted',
+  'keychain',
+  'secret-service',
+  '1password',
+]);
+
+/**
+ * Classifies every legacy `scope: 'project'` entry against the repo that
+ * owns `cwd`. "Legacy" = stored `projectId` differs from the current repo
+ * identity id. An entry is a migration candidate only when its recorded
+ * `projectPath` still exists AND resolves (via `findRepoIdentityPath`) to
+ * THIS repo's identity — an entry whose path exists but belongs to another
+ * repo is skipped entirely, never reported.
+ *
+ * An entry whose `projectPath` is gone (or was never recorded) is an
+ * orphan: membership can't be proven, so a non-`env` orphan is re-keyed
+ * only when `opts.from` lexically matches the recorded `projectPath`
+ * (`resolve`-normalized string equality — the path no longer exists, so
+ * realpath comparison is impossible; the user's attest IS the check).
+ *
+ * `opts.from` also widens the collision pool: a `--from`-matched orphan
+ * participates in name-collision detection exactly like a proven entry.
+ */
+export function classifyLegacyScopeEntries(index: IndexFile, opts: { cwd: string; from?: string }): LegacyScopeReport {
+  const identityPath = findRepoIdentityPath(opts.cwd);
+  const pid = computeProjectId(opts.cwd);
+  const fromResolved = opts.from === undefined ? undefined : resolve(opts.from);
+
+  const items: LegacyScopeItem[] = [];
+  /** Entries this run could re-key before conflict checks (proven + --from-attested orphans). */
+  const pool: { entry: IndexEntry; orphan: boolean }[] = [];
+
+  for (const entry of index.entries) {
+    if (entry.scope !== 'project' || entry.projectId === pid) continue;
+
+    const recordedPath = entry.projectPath;
+    if (recordedPath !== undefined && existsSync(recordedPath)) {
+      if (findRepoIdentityPath(recordedPath) === identityPath) pool.push({ entry, orphan: false });
+      continue;
+    }
+
+    if (!ORPHAN_ADOPTABLE_DEPOSITORIES.has(entry.depository)) {
+      // `env` (and any future depository whose value lives inside the
+      // worktree): the value went away with the path. Never re-keyed, even
+      // with --from; --prune-unrecoverable is the only cleanup.
+      items.push({ entry, class: 'orphaned-unrecoverable', rekeyable: false, detail: `value is gone; re-request ${entry.name}` });
+      continue;
+    }
+    if (fromResolved !== undefined && recordedPath !== undefined && resolve(recordedPath) === fromResolved) {
+      pool.push({ entry, orphan: true });
+    } else {
+      items.push({
+        entry,
+        class: 'orphaned-adoptable',
+        rekeyable: false,
+        detail: recordedPath === undefined ? 'no recorded projectPath' : `needs --from ${recordedPath}`,
+      });
+    }
+  }
+
+  // Conflict pool: an entry is skipped when its name already exists at the
+  // repo id, or when two candidates share a name — never overwritten,
+  // re-runnable after the user resolves it.
+  const poolByName = new Map<string, { entry: IndexEntry; orphan: boolean }[]>();
+  for (const candidate of pool) {
+    const siblings = poolByName.get(candidate.entry.name) ?? [];
+    siblings.push(candidate);
+    poolByName.set(candidate.entry.name, siblings);
+  }
+  for (const [name, siblings] of poolByName) {
+    const existsAtTarget = findIndexEntry(index, name, 'project', pid) !== undefined;
+    for (const candidate of siblings) {
+      if (existsAtTarget || siblings.length > 1) {
+        items.push({
+          entry: candidate.entry,
+          class: 'conflict',
+          rekeyable: false,
+          detail: existsAtTarget ? 'name already exists at repo scope' : 'duplicate legacy entries share this name',
+        });
+      } else {
+        items.push({
+          entry: candidate.entry,
+          class: candidate.orphan ? 'orphaned-adoptable' : 'adoptable',
+          rekeyable: true,
+          detail: candidate.orphan ? 'attested by --from' : undefined,
+        });
+      }
+    }
+  }
+
+  items.sort((a, b) => a.entry.name.localeCompare(b.entry.name));
+
+  const counts: Record<LegacyScopeClass, number> = {
+    adoptable: 0,
+    'orphaned-adoptable': 0,
+    'orphaned-unrecoverable': 0,
+    conflict: 0,
+  };
+  for (const item of items) counts[item.class]++;
+
+  return { projectId: pid, identityPath, items, counts };
+}
+
+/**
+ * The one-line surfacing shared by `enigma doctor`, `enigma_doctor`, and the
+ * SessionStart hook (Issue #72): per-class counts plus the exact command to
+ * run — counts, names, and paths only, never a value. Returns `null` when
+ * there are no legacy entries, which is what "no extra line" means on every
+ * surface.
+ */
+export function legacyScopeCountsLine(report: LegacyScopeReport): string | null {
+  const total = report.items.length;
+  if (total === 0) return null;
+  const c = report.counts;
+  return (
+    `${total} project-scope ${total === 1 ? 'entry' : 'entries'} predate repo-scope identity ` +
+    `(${c.adoptable} adoptable, ${c['orphaned-adoptable']} orphaned-adoptable, ` +
+    `${c['orphaned-unrecoverable']} orphaned-unrecoverable, ${c.conflict} conflict) — ` +
+    'run `enigma migrate-scope` to preview, then `enigma migrate-scope --apply` to re-key'
+  );
+}
+
+export interface MigrateScopeOptions {
+  cwd: string;
+  /** Lexical match against a recorded `projectPath`, attesting that the orphaned entries at that path belong to this repo. */
+  from?: string;
+  /** Remove `orphaned-unrecoverable` entries instead of leaving them in place. */
+  pruneUnrecoverable?: boolean;
+}
+
+export interface MigrateScopeResult {
+  /** Entries re-keyed to the repo identity id (post-re-key form). */
+  rekeyed: IndexEntry[];
+  /** `orphaned-unrecoverable` entries removed by `pruneUnrecoverable`. */
+  pruned: IndexEntry[];
+  /** Entries left in place because their name collides at the repo id. */
+  conflicts: IndexEntry[];
+  /** `orphaned-adoptable` entries left in place — no `--from` attested them. */
+  pendingOrphans: IndexEntry[];
+  /** `orphaned-unrecoverable` entries left in place (no prune flag). */
+  unrecoverable: IndexEntry[];
+}
+
+/**
+ * Applies the scope migration under ONE index-lock acquisition for the
+ * whole batch (Issue #72; locking per Issue #66). The plan is recomputed
+ * from the index re-read INSIDE the critical section, so a pre-lock
+ * classification that went stale (a concurrent `setSecret`, a resolved
+ * conflict) can never cause a lost update or a wrong re-key. Re-keys and
+ * prunes touch only the classified entries, matched by object identity —
+ * every other entry in the index passes through untouched.
+ */
+export function migrateScope(opts: MigrateScopeOptions): MigrateScopeResult {
+  const result: MigrateScopeResult = { rekeyed: [], pruned: [], conflicts: [], pendingOrphans: [], unrecoverable: [] };
+  mutateIndex((current) => {
+    const plan = classifyLegacyScopeEntries(current, { cwd: opts.cwd, from: opts.from });
+    const now = new Date().toISOString();
+    const rekeyMap = new Map<IndexEntry, IndexEntry>();
+    const pruneSet = new Set<IndexEntry>();
+
+    for (const item of plan.items) {
+      if (item.rekeyable) {
+        // projectPath and ref stay exactly as recorded — only projectId changes.
+        rekeyMap.set(item.entry, { ...item.entry, projectId: plan.projectId, updatedAt: now });
+      } else if (item.class === 'conflict') {
+        result.conflicts.push(item.entry);
+      } else if (item.class === 'orphaned-adoptable') {
+        result.pendingOrphans.push(item.entry);
+      } else if (opts.pruneUnrecoverable) {
+        pruneSet.add(item.entry);
+      } else {
+        result.unrecoverable.push(item.entry);
+      }
+    }
+
+    result.rekeyed = [...rekeyMap.values()];
+    result.pruned = current.entries.filter((e) => pruneSet.has(e));
+    return {
+      ...current,
+      entries: current.entries.filter((e) => !pruneSet.has(e)).map((e) => rekeyMap.get(e) ?? e),
+    };
+  });
+  return result;
 }

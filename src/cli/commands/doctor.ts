@@ -4,7 +4,7 @@ import { platform, release } from 'node:os';
 import { promisify } from 'node:util';
 import { parseArgs } from '../args.js';
 import { detectAll } from '../../storage/detect.js';
-import { readIndex } from '../../core/index-store.js';
+import { classifyLegacyScopeEntries, legacyScopeCountsLine, readIndex } from '../../core/index-store.js';
 import { computeManifestGaps } from '../../core/manifest-gaps.js';
 import { auditLogPath, configPath, enigmaHome, indexPath, keyPath, secretsPath } from '../../core/paths.js';
 import { EnigmaError } from '../../core/errors.js';
@@ -34,8 +34,23 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
   }));
 
   let index: { ok: boolean; entries?: number; error?: string };
+  let legacyScope: { adoptable: number; orphanedAdoptable: number; orphanedUnrecoverable: number; conflict: number } | null = null;
+  let legacyScopeLine: string | null = null;
   try {
-    index = { ok: true, entries: readIndex().entries.length };
+    const indexFile = readIndex();
+    index = { ok: true, entries: indexFile.entries.length };
+    // Issue #72: surface legacy project-scope entries by class so the user
+    // knows to run `enigma migrate-scope` (counts/paths only, never values).
+    const report = classifyLegacyScopeEntries(indexFile, { cwd: process.cwd() });
+    if (report.items.length > 0) {
+      legacyScope = {
+        adoptable: report.counts.adoptable,
+        orphanedAdoptable: report.counts['orphaned-adoptable'],
+        orphanedUnrecoverable: report.counts['orphaned-unrecoverable'],
+        conflict: report.counts.conflict,
+      };
+      legacyScopeLine = legacyScopeCountsLine(report);
+    }
   } catch (err) {
     index = { ok: false, error: err instanceof EnigmaError ? err.code : 'unknown error' };
   }
@@ -62,6 +77,7 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
     index,
     vault,
     manifestGaps,
+    legacyScope,
   };
 
   if (json) {
@@ -82,6 +98,9 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
     `Vault file: ${vault.secretsFilePresent ? 'present' : 'missing'}`,
     `Manifest gaps: ${manifestGaps.length === 0 ? 'none' : manifestGaps.join(', ')}`,
   ];
+  if (legacyScopeLine) {
+    lines.push(`Legacy scope entries: ${legacyScopeLine}`);
+  }
   process.stdout.write(`${lines.join('\n')}\n`);
   return 0;
 }

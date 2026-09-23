@@ -110,13 +110,13 @@ async function readWithEchoDisabled(stdin, stderr) {
   };
   let handleSignal;
   try {
-    return await new Promise((resolve3, reject) => {
+    return await new Promise((resolve4, reject) => {
       let value = "";
       const onData = (chunk) => {
         for (const ch of chunk) {
           if (ch === "\r" || ch === "\n") {
             stdin.removeListener("data", onData);
-            resolve3(value);
+            resolve4(value);
             return;
           }
           if (ch === ETX) {
@@ -258,9 +258,6 @@ function loadProjectManifest(projectPath) {
   return manifest;
 }
 
-// src/storage/manager.ts
-import { realpathSync as realpathSync2 } from "node:fs";
-
 // src/core/naming.ts
 var NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 function validateName(name) {
@@ -400,22 +397,14 @@ function auditErrorText(err) {
   if (err instanceof Error) return err.constructor.name;
   return "UnknownError";
 }
-function classifyCleanupError(err) {
-  const code = err?.code;
-  if (code === "ENOENT") return "ref-not-found";
-  if (code === "EACCES" || code === "EPERM") return "permission-denied";
-  if (code === "ENOTDIR" || code === "EISDIR") return "path-invalid";
-  if (code === "EBUSY") return "resource-busy";
-  return auditErrorText(err);
-}
 function appendAuditEvent(event) {
   const line = { ts: (/* @__PURE__ */ new Date()).toISOString(), ...event };
   appendLineSecure(auditLogPath(), JSON.stringify(line));
 }
 
 // src/core/index-store.ts
-import { chmodSync as chmodSync2, closeSync, ftruncateSync, mkdirSync as mkdirSync2, openSync, writeSync } from "node:fs";
-import { dirname as dirname4 } from "node:path";
+import { chmodSync as chmodSync2, closeSync, existsSync as existsSync4, ftruncateSync, mkdirSync as mkdirSync2, openSync, writeSync } from "node:fs";
+import { dirname as dirname4, resolve as resolve3 } from "node:path";
 
 // src/core/native-lock.ts
 import { createRequire } from "node:module";
@@ -630,17 +619,122 @@ function mutateIndex(delta) {
     lock.release();
   }
 }
+var ORPHAN_ADOPTABLE_DEPOSITORIES = /* @__PURE__ */ new Set([
+  "encrypted",
+  "keychain",
+  "secret-service",
+  "1password"
+]);
+function classifyLegacyScopeEntries(index, opts) {
+  const identityPath = findRepoIdentityPath(opts.cwd);
+  const pid = projectId(opts.cwd);
+  const fromResolved = opts.from === void 0 ? void 0 : resolve3(opts.from);
+  const items = [];
+  const pool = [];
+  for (const entry of index.entries) {
+    if (entry.scope !== "project" || entry.projectId === pid) continue;
+    const recordedPath2 = entry.projectPath;
+    if (recordedPath2 !== void 0 && existsSync4(recordedPath2)) {
+      if (findRepoIdentityPath(recordedPath2) === identityPath) pool.push({ entry, orphan: false });
+      continue;
+    }
+    if (!ORPHAN_ADOPTABLE_DEPOSITORIES.has(entry.depository)) {
+      items.push({ entry, class: "orphaned-unrecoverable", rekeyable: false, detail: `value is gone; re-request ${entry.name}` });
+      continue;
+    }
+    if (fromResolved !== void 0 && recordedPath2 !== void 0 && resolve3(recordedPath2) === fromResolved) {
+      pool.push({ entry, orphan: true });
+    } else {
+      items.push({
+        entry,
+        class: "orphaned-adoptable",
+        rekeyable: false,
+        detail: recordedPath2 === void 0 ? "no recorded projectPath" : `needs --from ${recordedPath2}`
+      });
+    }
+  }
+  const poolByName = /* @__PURE__ */ new Map();
+  for (const candidate of pool) {
+    const siblings = poolByName.get(candidate.entry.name) ?? [];
+    siblings.push(candidate);
+    poolByName.set(candidate.entry.name, siblings);
+  }
+  for (const [name, siblings] of poolByName) {
+    const existsAtTarget = findIndexEntry(index, name, "project", pid) !== void 0;
+    for (const candidate of siblings) {
+      if (existsAtTarget || siblings.length > 1) {
+        items.push({
+          entry: candidate.entry,
+          class: "conflict",
+          rekeyable: false,
+          detail: existsAtTarget ? "name already exists at repo scope" : "duplicate legacy entries share this name"
+        });
+      } else {
+        items.push({
+          entry: candidate.entry,
+          class: candidate.orphan ? "orphaned-adoptable" : "adoptable",
+          rekeyable: true,
+          detail: candidate.orphan ? "attested by --from" : void 0
+        });
+      }
+    }
+  }
+  items.sort((a, b) => a.entry.name.localeCompare(b.entry.name));
+  const counts = {
+    adoptable: 0,
+    "orphaned-adoptable": 0,
+    "orphaned-unrecoverable": 0,
+    conflict: 0
+  };
+  for (const item of items) counts[item.class]++;
+  return { projectId: pid, identityPath, items, counts };
+}
+function legacyScopeCountsLine(report2) {
+  const total = report2.items.length;
+  if (total === 0) return null;
+  const c = report2.counts;
+  return `${total} project-scope ${total === 1 ? "entry" : "entries"} predate repo-scope identity (${c.adoptable} adoptable, ${c["orphaned-adoptable"]} orphaned-adoptable, ${c["orphaned-unrecoverable"]} orphaned-unrecoverable, ${c.conflict} conflict) \u2014 run \`enigma migrate-scope\` to preview, then \`enigma migrate-scope --apply\` to re-key`;
+}
+function migrateScope(opts) {
+  const result = { rekeyed: [], pruned: [], conflicts: [], pendingOrphans: [], unrecoverable: [] };
+  mutateIndex((current) => {
+    const plan = classifyLegacyScopeEntries(current, { cwd: opts.cwd, from: opts.from });
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const rekeyMap = /* @__PURE__ */ new Map();
+    const pruneSet = /* @__PURE__ */ new Set();
+    for (const item of plan.items) {
+      if (item.rekeyable) {
+        rekeyMap.set(item.entry, { ...item.entry, projectId: plan.projectId, updatedAt: now });
+      } else if (item.class === "conflict") {
+        result.conflicts.push(item.entry);
+      } else if (item.class === "orphaned-adoptable") {
+        result.pendingOrphans.push(item.entry);
+      } else if (opts.pruneUnrecoverable) {
+        pruneSet.add(item.entry);
+      } else {
+        result.unrecoverable.push(item.entry);
+      }
+    }
+    result.rekeyed = [...rekeyMap.values()];
+    result.pruned = current.entries.filter((e) => pruneSet.has(e));
+    return {
+      ...current,
+      entries: current.entries.filter((e) => !pruneSet.has(e)).map((e) => rekeyMap.get(e) ?? e)
+    };
+  });
+  return result;
+}
 
 // src/storage/depositories/encrypted.ts
 import { createCipheriv, createDecipheriv, randomBytes as randomBytes2 } from "node:crypto";
-import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
 var ALGORITHM = "aes-256-gcm";
 var KEY_BYTES = 32;
 var IV_BYTES = 12;
 var FILE_MODE2 = 384;
 var EMPTY_SECRETS_FILE = { version: 1, entries: {} };
 function readKey() {
-  if (!existsSync4(keyPath())) return void 0;
+  if (!existsSync5(keyPath())) return void 0;
   const key = Buffer.from(readFileSync3(keyPath(), "utf8"), "base64");
   if (key.length !== KEY_BYTES) readFailed();
   return key;
@@ -708,26 +802,6 @@ function createEncryptedDepository() {
         writeSecretsFile(file);
       }
     },
-    // Issue #70: compare-and-delete in one synchronous read-modify-write. If
-    // the key's content can't be verified against the captured displaced
-    // copy (missing key material, absent entry, undecryptable entry), the
-    // conservative answer is to leave it — a skipped cleanup leaks an orphan,
-    // a wrong delete loses a live value.
-    async deleteIfUnchanged(ref, expectedValue) {
-      const key = readKey();
-      if (!key) return false;
-      const file = readSecretsFile();
-      const entry = file.entries[ref];
-      if (!entry) return false;
-      try {
-        if (decryptEntry(entry, key) !== expectedValue) return false;
-      } catch {
-        return false;
-      }
-      delete file.entries[ref];
-      writeSecretsFile(file);
-      return true;
-    },
     async has(ref) {
       return ref in readSecretsFile().entries;
     }
@@ -743,7 +817,7 @@ var encryptedDepositoryModule = {
 };
 
 // src/storage/depositories/env.ts
-import { existsSync as existsSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync6, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
 import { join as join4 } from "node:path";
 var BEGIN_MARKER = "# enigma:begin";
 var END_MARKER = "# enigma:end";
@@ -820,7 +894,7 @@ function removeManagedValue(content, name) {
 }
 function checkEnvGitignore(projectPath) {
   const gitignorePath = join4(projectPath, ".gitignore");
-  if (!existsSync5(gitignorePath)) {
+  if (!existsSync6(gitignorePath)) {
     return [".env is not gitignored: no .gitignore file found in this project"];
   }
   const lines = readFileSync4(gitignorePath, "utf8").split(/\r?\n/);
@@ -844,7 +918,7 @@ function requireProjectPath(ctx) {
 }
 function createEnvDepository(ctx) {
   const envFilePath = join4(requireProjectPath(ctx), ".env");
-  const readEnvFile = () => existsSync5(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
+  const readEnvFile = () => existsSync6(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
   return {
     id: "env",
     promptProfile: "none",
@@ -863,15 +937,6 @@ function createEnvDepository(ctx) {
     async delete(ref) {
       const content = readEnvFile();
       if (content) writeFileSync3(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE3 });
-    },
-    // Issue #70: compare-and-delete in one synchronous read-modify-write, so
-    // a `.env` line repopulated since the displaced copy was captured is
-    // never removed.
-    async deleteIfUnchanged(ref, expectedValue) {
-      const content = readEnvFile();
-      if (extractManagedValue(content, ref) !== expectedValue) return false;
-      writeFileSync3(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE3 });
-      return true;
     },
     async has(ref) {
       return extractManagedValue(readEnvFile(), ref) !== void 0;
@@ -897,24 +962,24 @@ var PROBE_REF = "__enigma_detect_probe__";
 var REF_PATTERN = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH = 512;
 function runSecretTool(args) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     execFile(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecretToolWithStdin(args, value) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const child = execFile(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -1047,7 +1112,7 @@ var linuxSecretServiceDepositoryModule = {
 
 // src/storage/depositories/macos-keychain.ts
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync6 } from "node:fs";
+import { existsSync as existsSync7 } from "node:fs";
 var SECURITY_BIN = "/usr/bin/security";
 var SERVICE2 = "enigma";
 var EXEC_TIMEOUT_MS2 = 1e4;
@@ -1059,24 +1124,24 @@ var REF_PATTERN2 = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH2 = 512;
 var MARKER_BYTE = 1;
 function runSecurity(args) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     execFile2(SECURITY_BIN, args, { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecurityBatch(line) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const child = execFile2(SECURITY_BIN, ["-i"], { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -1214,7 +1279,7 @@ var macosKeychainDepositoryModule = {
     if (process.platform !== "darwin") {
       return { id: "keychain", promptProfile: "may-prompt", available: false, reason: "not running on macOS" };
     }
-    const available = existsSync6(SECURITY_BIN);
+    const available = existsSync7(SECURITY_BIN);
     return {
       id: "keychain",
       promptProfile: "may-prompt",
@@ -1238,24 +1303,24 @@ var REF_MAX_LENGTH3 = 512;
 var VAULT_MISSING_PATTERN = /isn't a vault|no vault named|could not find vault/i;
 var ITEM_MISSING_PATTERN = /isn't an item|could not find item|item.*not found/i;
 function runOp(args) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runOpWithStdin(args, stdinData) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const child = execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -1502,19 +1567,6 @@ function projectPathFor(entry, cwd) {
   if (entry.scope === "project") return entry.projectPath;
   return cwd ? findProjectPath(cwd) : void 0;
 }
-function canonicalPath(p) {
-  if (p === void 0) return void 0;
-  try {
-    return realpathSync2(p);
-  } catch {
-    return p;
-  }
-}
-function locationReclaimed(displaced) {
-  return readIndex().entries.some(
-    (e) => e.depository === displaced.depository && e.ref === displaced.ref && (displaced.depository !== "env" || canonicalPath(e.projectPath) === canonicalPath(displaced.projectPath))
-  );
-}
 async function setSecret(opts) {
   const auditRefusal = (err, op2) => {
     appendAuditEvent({ op: op2, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
@@ -1558,17 +1610,6 @@ async function setSecret(opts) {
     auditRefusal(err, op);
     throw err;
   }
-  let capturedOld = { kind: "none" };
-  if (existing && opts.rotate && existing.depository === opts.depository) {
-    const oldDep = createDepository(existing.depository, { projectPath: projectPathFor(existing, opts.cwd) });
-    if (oldDep.promptProfile === "none") {
-      try {
-        capturedOld = { kind: "value", value: await oldDep.resolve(existing.ref) };
-      } catch (err) {
-        if (err instanceof EnigmaError && err.code === "E_NOT_FOUND") capturedOld = { kind: "empty" };
-      }
-    }
-  }
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const entry = {
     name: opts.name,
@@ -1582,7 +1623,6 @@ async function setSecret(opts) {
     createdAt: existing?.createdAt ?? now,
     updatedAt: now
   };
-  let displaced;
   try {
     mutateIndex((current) => {
       const currentExisting = findIndexEntry(current, opts.name, opts.scope, pid);
@@ -1593,7 +1633,6 @@ async function setSecret(opts) {
           secretName: opts.name
         });
       }
-      displaced = currentExisting;
       return upsertIndexEntry(current, entry);
     });
   } catch (err) {
@@ -1602,26 +1641,6 @@ async function setSecret(opts) {
   }
   appendAuditEvent({ op, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: true, error: null });
   const warnings = opts.depository === "env" && projectPath ? checkEnvGitignore(projectPath) : [];
-  if (displaced && displaced.depository === opts.depository) {
-    const locationDiffers = displaced.ref !== ref || opts.depository === "env" && canonicalPath(displaced.projectPath) !== canonicalPath(projectPath);
-    if (locationDiffers && !locationReclaimed(displaced)) {
-      const oldDep = createDepository(displaced.depository, { projectPath: projectPathFor(displaced, opts.cwd) });
-      const capturedForDisplaced = existing !== void 0 && displaced.ref === existing.ref && (opts.depository !== "env" || canonicalPath(displaced.projectPath) === canonicalPath(existing.projectPath));
-      try {
-        if (capturedOld.kind === "empty" && capturedForDisplaced) {
-        } else if (capturedOld.kind === "value" && capturedForDisplaced && oldDep.deleteIfUnchanged) {
-          await oldDep.deleteIfUnchanged(displaced.ref, capturedOld.value);
-        } else {
-          await oldDep.delete(displaced.ref);
-        }
-      } catch (err) {
-        warnings.push(
-          `could not remove the old copy of ${opts.name} in ${opts.depository} (cleanup failed: ${classifyCleanupError(err)})`
-        );
-        appendAuditEvent({ op: "remove", name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: classifyCleanupError(err) });
-      }
-    }
-  }
   return { rotated: Boolean(existing), warnings };
 }
 function listSecrets(opts = {}) {
@@ -1724,7 +1743,7 @@ async function cmdAdd(argv, streams = {}) {
 
 // src/cli/commands/doctor.ts
 import { execFile as execFile4 } from "node:child_process";
-import { existsSync as existsSync7 } from "node:fs";
+import { existsSync as existsSync8 } from "node:fs";
 import { platform, release } from "node:os";
 import { promisify } from "node:util";
 
@@ -1763,14 +1782,27 @@ async function cmdDoctor(argv) {
     reason: d.reason ?? null
   }));
   let index;
+  let legacyScope = null;
+  let legacyScopeLine = null;
   try {
-    index = { ok: true, entries: readIndex().entries.length };
+    const indexFile = readIndex();
+    index = { ok: true, entries: indexFile.entries.length };
+    const report3 = classifyLegacyScopeEntries(indexFile, { cwd: process.cwd() });
+    if (report3.items.length > 0) {
+      legacyScope = {
+        adoptable: report3.counts.adoptable,
+        orphanedAdoptable: report3.counts["orphaned-adoptable"],
+        orphanedUnrecoverable: report3.counts["orphaned-unrecoverable"],
+        conflict: report3.counts.conflict
+      };
+      legacyScopeLine = legacyScopeCountsLine(report3);
+    }
   } catch (err) {
     index = { ok: false, error: err instanceof EnigmaError ? err.code : "unknown error" };
   }
   const vault = {
-    keyPresent: existsSync7(keyPath()),
-    secretsFilePresent: existsSync7(secretsPath())
+    keyPresent: existsSync8(keyPath()),
+    secretsFilePresent: existsSync8(secretsPath())
   };
   const { gaps: manifestGaps } = computeManifestGaps(process.cwd());
   const report2 = {
@@ -1787,7 +1819,8 @@ async function cmdDoctor(argv) {
     },
     index,
     vault,
-    manifestGaps
+    manifestGaps,
+    legacyScope
   };
   if (json) {
     process.stdout.write(`${JSON.stringify(report2)}
@@ -1807,6 +1840,9 @@ async function cmdDoctor(argv) {
     `Vault file: ${vault.secretsFilePresent ? "present" : "missing"}`,
     `Manifest gaps: ${manifestGaps.length === 0 ? "none" : manifestGaps.join(", ")}`
   ];
+  if (legacyScopeLine) {
+    lines.push(`Legacy scope entries: ${legacyScopeLine}`);
+  }
   process.stdout.write(`${lines.join("\n")}
 `);
   return 0;
@@ -1830,7 +1866,7 @@ async function cmdGet(argv) {
 }
 
 // src/cli/commands/import.ts
-import { existsSync as existsSync9, readFileSync as readFileSync6 } from "node:fs";
+import { existsSync as existsSync10, readFileSync as readFileSync6 } from "node:fs";
 import { isAbsolute, join as join5 } from "node:path";
 
 // src/request/store.ts
@@ -1848,13 +1884,13 @@ var REVEAL_TTL_MS = 5 * 60 * 1e3;
 var SWEEP_INTERVAL_MS = 60 * 1e3;
 var USED_GRACE_MS = 5 * 60 * 1e3;
 function deferred() {
-  let resolve3;
+  let resolve4;
   let reject;
   const promise = new Promise((res, rej) => {
-    resolve3 = res;
+    resolve4 = res;
     reject = rej;
   });
-  return { promise, resolve: resolve3, reject };
+  return { promise, resolve: resolve4, reject };
 }
 function defaultTtlMs(kind) {
   return kind === "reveal" ? REVEAL_TTL_MS : REQUEST_TTL_MS;
@@ -2344,7 +2380,7 @@ function removeDotEnvEntries(content, names, opts = {}) {
 
 // src/storage/import-commit.ts
 import { randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync8, readFileSync as readFileSync5, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync9, readFileSync as readFileSync5, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 var FILE_MODE4 = 384;
 function writeFileAtomic(path, content, mode) {
   const tmpPath = `${path}.${randomBytes4(6).toString("hex")}.tmp`;
@@ -2355,7 +2391,7 @@ function writeFileAtomic(path, content, mode) {
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     try {
-      if (existsSync8(tmpPath)) unlinkSync(tmpPath);
+      if (existsSync9(tmpPath)) unlinkSync(tmpPath);
       return { ok: false, error };
     } catch {
       return { ok: false, error, leftoverPath: tmpPath };
@@ -2412,7 +2448,7 @@ async function commitImport(opts) {
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
-  const currentContent = existsSync8(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
+  const currentContent = existsSync9(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
   const valueByName = new Map(opts.entries.map((e) => [e.name, e.value]));
   const currentValueByName = new Map(parseDotEnv(currentContent).entries.map((e) => [e.name, e.value]));
   const toRemove = [];
@@ -2788,7 +2824,7 @@ var PayloadTooLargeError = class extends Error {
   }
 };
 function readBody(req, maxBytes = MAX_BODY_BYTES) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const chunks = [];
     let total = 0;
     let settled2 = false;
@@ -2809,7 +2845,7 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
     req.on("end", () => {
       if (settled2) return;
       settled2 = true;
-      resolve3(Buffer.concat(chunks));
+      resolve4(Buffer.concat(chunks));
     });
     req.on("error", settleError);
   });
@@ -5208,7 +5244,7 @@ var MIN_REARM_DELAY_MS = 1e3;
 var state;
 var starting;
 function settled(value) {
-  return new Promise((resolve3) => resolve3(value));
+  return new Promise((resolve4) => resolve4(value));
 }
 function toHandle(s) {
   return { port: s.port, origin: `http://${s.host}:${s.port}`, close: stopServer };
@@ -5244,7 +5280,7 @@ function startServer(opts = {}) {
       (_resolve, reject) => reject(new Error(`refusing to bind ${host} over plain HTTP; pass allowInsecureHttp to override (ADR-005)`))
     );
   }
-  starting = new Promise((resolve3, reject) => {
+  starting = new Promise((resolve4, reject) => {
     const server = http.createServer((req, res) => {
       if (state) resetIdleTimer(state);
       void handleRequest(req, res);
@@ -5260,7 +5296,7 @@ function startServer(opts = {}) {
       state = newState;
       resetIdleTimer(newState);
       starting = void 0;
-      resolve3(toHandle(newState));
+      resolve4(toHandle(newState));
     });
   });
   return starting;
@@ -5270,7 +5306,7 @@ function stopServer() {
   if (!current) return settled(void 0);
   state = void 0;
   if (current.idleTimer) clearTimeout(current.idleTimer);
-  return new Promise((resolve3) => current.server.close(() => resolve3()));
+  return new Promise((resolve4) => current.server.close(() => resolve4()));
 }
 
 // src/cli/commands/import.ts
@@ -5405,7 +5441,7 @@ async function cmdImport(argv) {
   const cwd = process.cwd();
   const projectPath = findProjectPath(cwd);
   const absPath = isAbsolute(pathArg) ? pathArg : join5(cwd, pathArg);
-  if (!existsSync9(absPath)) {
+  if (!existsSync10(absPath)) {
     throw new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` });
   }
   const content = readFileSync6(absPath, "utf8");
@@ -5456,7 +5492,7 @@ async function cmdImport(argv) {
 }
 
 // src/cli/commands/install.ts
-import { existsSync as existsSync10, mkdirSync as mkdirSync3, readFileSync as readFileSync7, renameSync as renameSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync11, mkdirSync as mkdirSync3, readFileSync as readFileSync7, renameSync as renameSync3, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { dirname as dirname5, join as join6 } from "node:path";
 var MARKETPLACE_NAME = "clarit-enigma";
@@ -5476,7 +5512,7 @@ function detectStyle(raw) {
   };
 }
 function readSettings(path) {
-  if (!existsSync10(path)) return { settings: {}, style: DEFAULT_STYLE };
+  if (!existsSync11(path)) return { settings: {}, style: DEFAULT_STYLE };
   let raw;
   try {
     raw = readFileSync7(path, "utf8");
@@ -5636,13 +5672,135 @@ async function cmdList(argv) {
   return 0;
 }
 
+// src/cli/commands/migrate-scope.ts
+var USAGE4 = "enigma migrate-scope [--from PATH] [--apply] [--prune-unrecoverable]";
+var HELP = `${USAGE4}
+
+Re-keys project-scope index entries recorded before projectId became the
+canonical repository identity: entries saved from a linked worktree, a
+symlinked clone path, or a submodule are invisible until re-keyed. The
+migration is index-only \u2014 it rewrites projectId, never resolves a value,
+and never calls a depository.
+
+Dry run by default: prints name, depository, recorded projectPath,
+classification, and the target repo. --apply performs the plan under one
+index lock and writes one 'migrate' audit line per re-keyed entry.
+
+Classes:
+  adoptable               recorded projectPath still exists and belongs to
+                          this repo \u2014 re-keyed.
+  orphaned-adoptable      projectPath gone; the value lives outside the
+                          worktree \u2014 re-keyed only when --from PATH names
+                          the recorded projectPath. The match is lexical:
+                          the path no longer exists, so your attest is the
+                          only check.
+  orphaned-unrecoverable  projectPath gone and depository is env \u2014 the
+                          value is gone; re-request the name. Only
+                          --prune-unrecoverable removes the entry (audit
+                          op 'remove').
+  conflict                the name already exists at repo scope, or two
+                          legacy entries share it \u2014 skipped and named,
+                          never overwritten; re-runnable after you resolve
+                          it.
+
+Exit codes: 0 when nothing actionable remains (always for a dry run);
+1 when conflicts or unadopted orphans remain after --apply; 2 usage.
+`;
+function recordedPath(entry) {
+  return entry.projectPath ?? "(no recorded projectPath)";
+}
+function planLine(item) {
+  const e = item.entry;
+  return `  ${item.class.padEnd(22)} ${e.name}  ${e.depository}  ${recordedPath(e)}${item.detail ? ` \u2014 ${item.detail}` : ""}`;
+}
+function appliedLine(verb, e, detail) {
+  return `  ${verb.padEnd(22)} ${e.name}  ${e.depository}  ${recordedPath(e)}${detail ? ` \u2014 ${detail}` : ""}`;
+}
+async function cmdMigrateScope(argv) {
+  const { positionals, flags } = parseArgs(argv, {
+    value: ["from"],
+    boolean: ["apply", "prune-unrecoverable", "help"]
+  });
+  if (flags.help) {
+    process.stdout.write(HELP);
+    return 0;
+  }
+  if (positionals.length > 0) throw new UsageError(USAGE4);
+  const apply = Boolean(flags.apply);
+  const pruneUnrecoverable = Boolean(flags["prune-unrecoverable"]);
+  const from = typeof flags.from === "string" ? flags.from : void 0;
+  const cwd = process.cwd();
+  const plan = classifyLegacyScopeEntries(readIndex(), { cwd, from });
+  if (plan.items.length === 0) {
+    process.stdout.write("No legacy project-scope entries found for this repository.\n");
+    return 0;
+  }
+  const header = [
+    `Target repo: ${plan.identityPath} (projectId ${plan.projectId})`,
+    ...plan.items.map(planLine),
+    `Summary: ${plan.counts.adoptable} adoptable, ${plan.counts["orphaned-adoptable"]} orphaned-adoptable, ${plan.counts["orphaned-unrecoverable"]} orphaned-unrecoverable, ${plan.counts.conflict} conflict`
+  ];
+  const fromUnmatched = from !== void 0 && !plan.items.some((i) => i.class === "orphaned-adoptable" && i.rekeyable) ? [`Note: --from ${from} matched no orphaned entry's recorded projectPath.`] : [];
+  if (!apply) {
+    process.stdout.write(`${["enigma migrate-scope \u2014 dry run (no changes; re-run with --apply)", ...header, ...fromUnmatched].join("\n")}
+`);
+    return 0;
+  }
+  let result;
+  try {
+    result = migrateScope({ cwd, from, pruneUnrecoverable });
+  } catch (err) {
+    for (const item of plan.items) {
+      if (item.rekeyable) {
+        appendAuditEvent({
+          op: "migrate",
+          name: item.entry.name,
+          scope: "project",
+          depository: item.entry.depository,
+          actor: "cli",
+          ok: false,
+          error: auditErrorText(err)
+        });
+      }
+    }
+    throw err;
+  }
+  for (const e of result.rekeyed) {
+    appendAuditEvent({ op: "migrate", name: e.name, scope: "project", depository: e.depository, actor: "cli", ok: true, error: null });
+  }
+  for (const e of result.pruned) {
+    appendAuditEvent({ op: "remove", name: e.name, scope: "project", depository: e.depository, actor: "cli", ok: true, error: null });
+  }
+  const lines = [
+    "enigma migrate-scope \u2014 applied",
+    ...header,
+    ...result.rekeyed.map((e) => appliedLine("re-keyed", e)),
+    ...result.pruned.map((e) => appliedLine("pruned", e)),
+    ...result.conflicts.map((e) => appliedLine("skipped", e, "conflict \u2014 resolve and re-run")),
+    ...result.pendingOrphans.map((e) => appliedLine("left", e, "needs --from to attest membership")),
+    ...result.unrecoverable.map((e) => appliedLine("left", e, `value is gone; re-request ${e.name}`)),
+    ...fromUnmatched
+  ];
+  process.stdout.write(`${lines.join("\n")}
+`);
+  return result.conflicts.length > 0 || result.pendingOrphans.length > 0 ? 1 : 0;
+}
+
 // src/cli/commands/move.ts
-var USAGE4 = "enigma move NAME --to ID [--scope project|global]";
+var USAGE5 = "enigma move NAME --to ID [--scope project|global]";
+function classifyCleanupError(err) {
+  const code = err?.code;
+  if (code === "ENOENT") return "ref-not-found";
+  if (code === "EACCES" || code === "EPERM") return "permission-denied";
+  if (code === "ENOTDIR" || code === "EISDIR") return "path-invalid";
+  if (code === "EBUSY") return "resource-busy";
+  return auditErrorText(err);
+}
 async function cmdMove(argv) {
   const { positionals, flags } = parseArgs(argv, { value: ["to", "scope"] });
   const [name] = positionals;
   const to = flags.to;
-  if (!name || typeof to !== "string") throw new UsageError(USAGE4);
+  if (!name || typeof to !== "string") throw new UsageError(USAGE5);
   const target = to;
   const scopeFlag = parseScope(flags.scope);
   const cwd = process.cwd();
@@ -5691,11 +5849,11 @@ async function cmdMove(argv) {
 }
 
 // src/cli/commands/remove.ts
-var USAGE5 = "enigma remove NAME [--scope project|global]";
+var USAGE6 = "enigma remove NAME [--scope project|global]";
 async function cmdRemove(argv) {
   const { positionals, flags } = parseArgs(argv, { value: ["scope"] });
   const [name] = positionals;
-  if (!name) throw new UsageError(USAGE5);
+  if (!name) throw new UsageError(USAGE6);
   const scope = parseScope(flags.scope);
   await deleteSecret(name, { scope, cwd: process.cwd(), actor: "cli" });
   process.stdout.write(`Removed ${name}${scope ? ` (${scope})` : ""}
@@ -5706,7 +5864,7 @@ async function cmdRemove(argv) {
 // src/cli/commands/run.ts
 import { spawn } from "node:child_process";
 import { constants as osConstants } from "node:os";
-var USAGE6 = "enigma run [--only A,B] [--scope project|global] -- <command> [args...]";
+var USAGE7 = "enigma run [--only A,B] [--scope project|global] -- <command> [args...]";
 var FORWARDED_SIGNALS = ["SIGINT", "SIGTERM", "SIGHUP"];
 var EXIT_BINARY_MISSING = 127;
 function entriesToInject(entries, only) {
@@ -5721,7 +5879,7 @@ function entriesToInject(entries, only) {
   return matched;
 }
 function spawnChild(command, args, env) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const child = spawn(command, args, { stdio: "inherit", env });
     const forward = (signal) => {
       child.kill(signal);
@@ -5738,23 +5896,23 @@ function spawnChild(command, args, env) {
       stopForwarding();
       if (signal) {
         const signum = osConstants.signals[signal] ?? 0;
-        resolve3(128 + signum);
+        resolve4(128 + signum);
         return;
       }
-      resolve3(code ?? 1);
+      resolve4(code ?? 1);
     });
   });
 }
 async function cmdRun(argv) {
   const dashIdx = argv.indexOf("--");
-  if (dashIdx === -1) throw new UsageError(USAGE6);
+  if (dashIdx === -1) throw new UsageError(USAGE7);
   const prefixParsed = parseArgs(argv.slice(0, dashIdx), { value: ["only", "scope"] });
   if (prefixParsed.positionals.length > 0) {
-    throw new UsageError(`${USAGE6}
+    throw new UsageError(`${USAGE7}
 (stray positional before --: ${prefixParsed.positionals.join(" ")})`);
   }
   const commandArgv = argv.slice(dashIdx + 1);
-  if (commandArgv.length === 0) throw new UsageError(USAGE6);
+  if (commandArgv.length === 0) throw new UsageError(USAGE7);
   const { flags } = prefixParsed;
   const scope = parseScope(flags.scope) ?? "all";
   const only = typeof flags.only === "string" ? flags.only.split(",").map((n) => n.trim()).filter((n) => n.length > 0) : void 0;
@@ -5791,7 +5949,7 @@ function notImplemented(command) {
 }
 
 // src/cli/index.ts
-var USAGE7 = `Usage: enigma <command> [options]
+var USAGE8 = `Usage: enigma <command> [options]
 
 Commands:
   add NAME [--depository ID] [--scope project|global] [--description TEXT] [--usage interactive|unattended]
@@ -5801,6 +5959,7 @@ Commands:
   run [--only A,B] [--scope project|global] -- <command> [args...]
   get NAME [--scope project|global]
   import [PATH] [--depository ID] [--rotate] [--json]
+  migrate-scope [--from PATH] [--apply] [--prune-unrecoverable]
   doctor [--json]
   install [--uninstall]
 
@@ -5816,6 +5975,7 @@ var COMMANDS = {
   get: cmdGet,
   doctor: cmdDoctor,
   import: cmdImport,
+  "migrate-scope": cmdMigrateScope,
   install: cmdInstall,
   request: notImplemented("request"),
   reveal: notImplemented("reveal")
@@ -5823,13 +5983,13 @@ var COMMANDS = {
 async function main(argv) {
   const [command, ...rest] = argv;
   if (!command) {
-    process.stderr.write(USAGE7);
+    process.stderr.write(USAGE8);
     return 2;
   }
   const handler = COMMANDS[command];
   if (!handler) {
     process.stderr.write(`enigma: unknown command '${command}'
-${USAGE7}`);
+${USAGE8}`);
     return 2;
   }
   try {

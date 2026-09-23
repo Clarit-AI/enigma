@@ -4,7 +4,7 @@ import { platform, release } from 'node:os';
 import { promisify } from 'node:util';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { EnigmaError } from '../../core/errors.js';
-import { readIndex } from '../../core/index-store.js';
+import { classifyLegacyScopeEntries, legacyScopeCountsLine, readIndex } from '../../core/index-store.js';
 import { computeManifestGaps } from '../../core/manifest-gaps.js';
 import { auditLogPath, configPath, enigmaHome, indexPath, keyPath, secretsPath } from '../../core/paths.js';
 import { RequestStore } from '../../request/store.js';
@@ -47,8 +47,15 @@ export function registerDoctorTool(server: McpServer): void {
       );
 
       let indexStatus: string;
+      let legacyScopeLine: string | null = null;
       try {
-        indexStatus = `ok (${readIndex().entries.length} entries)`;
+        const indexFile = readIndex();
+        indexStatus = `ok (${indexFile.entries.length} entries)`;
+        // Issue #72: surface legacy project-scope entries by class, with the
+        // exact `enigma migrate-scope` command — counts/paths only, never a
+        // value. Unlike the request store, the index is on disk so this is
+        // real here (and in the SessionStart hook for the same reason).
+        legacyScopeLine = legacyScopeCountsLine(classifyLegacyScopeEntries(indexFile, { cwd }));
       } catch (err) {
         indexStatus = `ERROR: ${err instanceof EnigmaError ? err.code : 'unknown error'}`;
       }
@@ -70,6 +77,7 @@ export function registerDoctorTool(server: McpServer): void {
         `Manifest gaps: ${manifestGaps.length === 0 ? 'none' : manifestGaps.join(', ')}`,
         `Paths: index=${indexPath()} audit=${auditLogPath()} config=${configPath()}`,
       ];
+      if (legacyScopeLine) lines.push(`Legacy scope entries: ${legacyScopeLine}`);
 
       // Issue #62 + #68 + #40: a request/import whose form was already
       // submitted (the web layer stored the secret independently of this

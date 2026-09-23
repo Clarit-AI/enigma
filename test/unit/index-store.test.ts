@@ -1,9 +1,11 @@
+import { createHash } from 'node:crypto';
 import {
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
   readdirSync,
+  realpathSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -16,8 +18,11 @@ import {
   LOCK_MAX_ATTEMPTS,
   LOCK_RETRY_INTERVAL_MS,
   buildRef,
+  classifyLegacyScopeEntries,
   findIndexEntry,
+  legacyScopeCountsLine,
   listIndexEntries,
+  migrateScope,
   mutateIndex,
   readIndex,
   removeIndexEntry,
@@ -26,6 +31,7 @@ import {
 } from '../../src/core/index-store.js';
 import type { IndexEntry, IndexFile } from '../../src/core/index-store.js';
 import { indexLockPath, indexPath } from '../../src/core/paths.js';
+import { projectId } from '../../src/core/project.js';
 import { EnigmaError } from '../../src/core/errors.js';
 
 function makeEntry(overrides: Partial<IndexEntry> = {}): IndexEntry {
@@ -354,5 +360,169 @@ describe('index-store mutateIndex lock (Issue #66)', () => {
 
     const names = readIndex().entries.map((e) => e.name).sort();
     expect(names).toEqual(['NAME_B']);
+  });
+});
+
+describe('scope migration (Issue #72)', () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+  let repoDir: string;
+  const worktrees: string[] = [];
+
+  function legacyProjectId(worktreeRoot: string): string {
+    return createHash('sha256').update(realpathSync(worktreeRoot)).digest('hex').slice(0, 16);
+  }
+
+  function linkedWorktree(name: string): string {
+    const wt = realpathSync(mkdtempSync(join(tmpdir(), `enigma-wt-${name}-`)));
+    const gitdir = join(repoDir, '.git', 'worktrees', name);
+    mkdirSync(gitdir, { recursive: true });
+    writeFileSync(join(gitdir, 'commondir'), '../..\n');
+    writeFileSync(join(wt, '.git'), `gitdir: ${gitdir}\n`);
+    worktrees.push(wt);
+    return wt;
+  }
+
+  function legacy(overrides: Partial<IndexEntry> & Pick<IndexEntry, 'name'>): IndexEntry {
+    return makeEntry({
+      scope: 'project',
+      depository: 'encrypted',
+      ref: `${overrides.projectId}/${overrides.name}`,
+      ...overrides,
+    });
+  }
+
+  function seed(entry: IndexEntry): void {
+    mutateIndex((cur) => upsertIndexEntry(cur, entry));
+  }
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), 'enigma-home-'));
+    originalHome = process.env.ENIGMA_HOME;
+    process.env.ENIGMA_HOME = tmpHome;
+    repoDir = realpathSync(mkdtempSync(join(tmpdir(), 'enigma-repo-')));
+    mkdirSync(join(repoDir, '.git'));
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.ENIGMA_HOME;
+    else process.env.ENIGMA_HOME = originalHome;
+    rmSync(tmpHome, { recursive: true, force: true });
+    rmSync(repoDir, { recursive: true, force: true });
+    for (const dir of worktrees.splice(0)) rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('classifies a worktree-written entry as adoptable — path exists and resolves to this repo', () => {
+    const wt = linkedWorktree('one');
+    seed(legacy({ name: 'OLD_KEY', projectId: legacyProjectId(wt), projectPath: wt }));
+
+    const report = classifyLegacyScopeEntries(readIndex(), { cwd: repoDir });
+    expect(report.projectId).toBe(projectId(repoDir));
+    expect(report.items).toHaveLength(1);
+    expect(report.items[0]).toMatchObject({ class: 'adoptable', rekeyable: true });
+    expect(report.counts).toEqual({ adoptable: 1, 'orphaned-adoptable': 0, 'orphaned-unrecoverable': 0, conflict: 0 });
+  });
+
+  it('classifies a dead-path non-env entry as orphaned-adoptable; --from attests it into the re-key pool', () => {
+    const gone = join(tmpdir(), 'enigma-dead-path-nope');
+    seed(legacy({ name: 'ORPHAN', projectId: 'deadbeef00000000', projectPath: gone, depository: 'keychain' }));
+
+    const without = classifyLegacyScopeEntries(readIndex(), { cwd: repoDir });
+    expect(without.items[0]).toMatchObject({ class: 'orphaned-adoptable', rekeyable: false });
+
+    const attested = classifyLegacyScopeEntries(readIndex(), { cwd: repoDir, from: gone });
+    expect(attested.items[0]).toMatchObject({ class: 'orphaned-adoptable', rekeyable: true });
+  });
+
+  it('classifies a dead-path env entry as orphaned-unrecoverable — --from cannot rescue it', () => {
+    const gone = join(tmpdir(), 'enigma-dead-path-nope');
+    seed(legacy({ name: 'ENV_GONE', projectId: 'deadbeef00000000', projectPath: gone, depository: 'env', ref: 'ENV_GONE' }));
+
+    const report = classifyLegacyScopeEntries(readIndex(), { cwd: repoDir, from: gone });
+    expect(report.items[0]).toMatchObject({ class: 'orphaned-unrecoverable', rekeyable: false });
+    expect(report.items[0]?.detail).toContain('re-request ENV_GONE');
+  });
+
+  it('classifies a name already at the repo id, and two legacy entries sharing a name, as conflicts', () => {
+    const wt1 = linkedWorktree('one');
+    const wt2 = linkedWorktree('two');
+    seed(legacy({ name: 'TAKEN', projectId: projectId(repoDir), projectPath: repoDir }));
+    seed(legacy({ name: 'TAKEN', projectId: legacyProjectId(wt1), projectPath: wt1 }));
+    seed(legacy({ name: 'DUP', projectId: legacyProjectId(wt1), projectPath: wt1 }));
+    seed(legacy({ name: 'DUP', projectId: legacyProjectId(wt2), projectPath: wt2 }));
+
+    const report = classifyLegacyScopeEntries(readIndex(), { cwd: repoDir });
+    expect(report.counts.conflict).toBe(3);
+    expect(report.items.every((i) => i.class === 'conflict' && !i.rekeyable)).toBe(true);
+  });
+
+  it('skips entries already at the repo id, global entries, and entries belonging to other repos', () => {
+    const otherRepo = realpathSync(mkdtempSync(join(tmpdir(), 'enigma-other-repo-')));
+    mkdirSync(join(otherRepo, '.git'));
+    try {
+      seed(legacy({ name: 'CURRENT', projectId: projectId(repoDir), projectPath: repoDir }));
+      seed(legacy({ name: 'GLOBAL', scope: 'global', projectId: undefined, projectPath: undefined }));
+      seed(legacy({ name: 'FOREIGN', projectId: projectId(otherRepo), projectPath: otherRepo }));
+
+      const report = classifyLegacyScopeEntries(readIndex(), { cwd: repoDir });
+      expect(report.items).toHaveLength(0);
+      expect(legacyScopeCountsLine(report)).toBeNull();
+    } finally {
+      rmSync(otherRepo, { recursive: true, force: true });
+    }
+  });
+
+  it('migrateScope re-keys only classified entries — projectPath/ref preserved, other entries untouched', () => {
+    const wt = linkedWorktree('one');
+    const oldId = legacyProjectId(wt);
+    seed(legacy({ name: 'OLD', projectId: oldId, projectPath: wt }));
+    seed(legacy({ name: 'KEEP', projectId: projectId(repoDir), projectPath: repoDir, ref: `${projectId(repoDir)}/KEEP` }));
+
+    const result = migrateScope({ cwd: repoDir });
+    expect(result.rekeyed.map((e) => e.name)).toEqual(['OLD']);
+    expect(result.rekeyed[0]).toMatchObject({ projectId: projectId(repoDir), projectPath: wt, ref: `${oldId}/OLD` });
+
+    const after = readIndex();
+    expect(findIndexEntry(after, 'OLD', 'project', projectId(repoDir))).toBeDefined();
+    expect(findIndexEntry(after, 'KEEP', 'project', projectId(repoDir))).toBeDefined();
+    expect(after.entries).toHaveLength(2);
+  });
+
+  it('migrateScope prunes unrecoverable entries only with pruneUnrecoverable', () => {
+    const gone = join(tmpdir(), 'enigma-dead-path-nope');
+    seed(legacy({ name: 'ENV_GONE', projectId: 'deadbeef00000000', projectPath: gone, depository: 'env', ref: 'ENV_GONE' }));
+
+    const kept = migrateScope({ cwd: repoDir });
+    expect(kept.unrecoverable.map((e) => e.name)).toEqual(['ENV_GONE']);
+    expect(kept.pruned).toHaveLength(0);
+    expect(readIndex().entries).toHaveLength(1);
+
+    const pruned = migrateScope({ cwd: repoDir, pruneUnrecoverable: true });
+    expect(pruned.pruned.map((e) => e.name)).toEqual(['ENV_GONE']);
+    expect(readIndex().entries).toHaveLength(0);
+  });
+
+  it('migrateScope reports leftover conflicts and unadopted orphans, and re-keys --from-attested orphans', () => {
+    const gone = join(tmpdir(), 'enigma-dead-path-nope');
+    seed(legacy({ name: 'ORPHAN', projectId: 'deadbeef00000000', projectPath: gone, depository: 'keychain' }));
+
+    const noFrom = migrateScope({ cwd: repoDir });
+    expect(noFrom.pendingOrphans.map((e) => e.name)).toEqual(['ORPHAN']);
+    expect(noFrom.rekeyed).toHaveLength(0);
+
+    const withFrom = migrateScope({ cwd: repoDir, from: gone });
+    expect(withFrom.rekeyed.map((e) => e.name)).toEqual(['ORPHAN']);
+    expect(findIndexEntry(readIndex(), 'ORPHAN', 'project', projectId(repoDir))).toBeDefined();
+  });
+
+  it('legacyScopeCountsLine carries per-class counts and the exact command — never a value', () => {
+    const wt = linkedWorktree('one');
+    seed(legacy({ name: 'OLD_KEY', projectId: legacyProjectId(wt), projectPath: wt }));
+    const report = classifyLegacyScopeEntries(readIndex(), { cwd: repoDir });
+
+    const line = legacyScopeCountsLine(report);
+    expect(line).toContain('1 adoptable');
+    expect(line).toContain('enigma migrate-scope');
+    expect(line).toContain('--apply');
   });
 });

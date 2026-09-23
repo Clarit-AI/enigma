@@ -2983,7 +2983,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve3.call(this, root, ref);
+      let _sch = resolve4.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -3010,7 +3010,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve3(root, ref) {
+    function resolve4(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3840,7 +3840,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve3(baseURI, relativeURI, options) {
+    function resolve4(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const {
         parsed: baseParsed,
@@ -4209,7 +4209,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve3,
+      resolve: resolve4,
       resolveComponent,
       equal,
       serialize,
@@ -10000,7 +10000,7 @@ var require_compile2 = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve3.call(this, root, ref);
+      let _sch = resolve4.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -10027,7 +10027,7 @@ var require_compile2 = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve3(root, ref) {
+    function resolve4(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -21555,7 +21555,7 @@ var recursive = /* @__PURE__ */ new WeakMap();
 var NONE = 0;
 var ASSUMED = 1;
 var PROVEN = 2;
-function isRecursive(inst, stack, resolve3) {
+function isRecursive(inst, stack, resolve4) {
   const cached3 = recursive.get(inst);
   if (cached3 !== void 0)
     return cached3 ? PROVEN : NONE;
@@ -21565,7 +21565,7 @@ function isRecursive(inst, stack, resolve3) {
   let result = NONE;
   const check2 = (child) => {
     if (result !== PROVEN && child?._zod) {
-      const answer = isRecursive(child, stack, resolve3);
+      const answer = isRecursive(child, stack, resolve4);
       if (answer > result)
         result = answer;
     }
@@ -21576,7 +21576,7 @@ function isRecursive(inst, stack, resolve3) {
       const desc = Object.getOwnPropertyDescriptor(sh, key);
       if (spread && !desc.enumerable)
         continue;
-      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve3) : NONE;
+      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve4) : NONE;
       if (child > answer)
         answer = child;
     }
@@ -21640,7 +21640,7 @@ function isRecursive(inst, stack, resolve3) {
       break;
     // `$ZodLazy` caches its inner on the def, so a resolved edge is followed exactly
     case "lazy": {
-      const inner = def._cachedInner ?? (resolve3 ? inst._zod.innerType : void 0);
+      const inner = def._cachedInner ?? (resolve4 ? inst._zod.innerType : void 0);
       merge2(inner ? isRecursive(inner, stack, false) : ASSUMED);
       break;
     }
@@ -40048,7 +40048,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
+        await new Promise((resolve4) => setTimeout(resolve4, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error62) {
@@ -40065,7 +40065,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve4, reject) => {
       const earlyReject = (error62) => {
         reject(error62);
       };
@@ -40143,7 +40143,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve3(parseResult.data);
+            resolve4(parseResult.data);
           }
         } catch (error62) {
           reject(error62);
@@ -40404,12 +40404,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve3, reject) => {
+    return new Promise((resolve4, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve3, interval);
+      const timeoutId = setTimeout(resolve4, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -41500,7 +41500,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
+      await new Promise((resolve4) => setTimeout(resolve4, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -42164,12 +42164,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve3) => {
+    return new Promise((resolve4) => {
       const json2 = serializeMessage(message);
       if (this._stdout.write(json2)) {
-        resolve3();
+        resolve4();
       } else {
-        this._stdout.once("drain", resolve3);
+        this._stdout.once("drain", resolve4);
       }
     });
   }
@@ -42207,13 +42207,13 @@ var REVEAL_TTL_MS = 5 * 60 * 1e3;
 var SWEEP_INTERVAL_MS = 60 * 1e3;
 var USED_GRACE_MS = 5 * 60 * 1e3;
 function deferred() {
-  let resolve3;
+  let resolve4;
   let reject;
   const promise2 = new Promise((res, rej) => {
-    resolve3 = res;
+    resolve4 = res;
     reject = rej;
   });
-  return { promise: promise2, resolve: resolve3, reject };
+  return { promise: promise2, resolve: resolve4, reject };
 }
 function defaultTtlMs(kind) {
   return kind === "reveal" ? REVEAL_TTL_MS : REQUEST_TTL_MS;
@@ -42513,8 +42513,8 @@ var RequestStore = {
 import { execFile } from "node:child_process";
 var DETECT_TIMEOUT_MS = 2e3;
 function checkBinary(command, args) {
-  return new Promise((resolve3) => {
-    execFile(command, args, { timeout: DETECT_TIMEOUT_MS, maxBuffer: 4096 }, (error62) => resolve3(!error62));
+  return new Promise((resolve4) => {
+    execFile(command, args, { timeout: DETECT_TIMEOUT_MS, maxBuffer: 4096 }, (error62) => resolve4(!error62));
   });
 }
 function detectCloudflared() {
@@ -42533,7 +42533,7 @@ function remoteUnavailable(detail) {
   return new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: `cloudflared: ${detail}` });
 }
 function startCloudflaredTunnel(targetUrl) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const child = spawn("cloudflared", ["tunnel", "--url", targetUrl], { stdio: ["ignore", "ignore", "pipe"] });
     child.unref();
     let stderrBuf = "";
@@ -42571,7 +42571,7 @@ function startCloudflaredTunnel(targetUrl) {
         const killer = setTimeout(() => child.kill("SIGKILL"), 2e3);
         killer.unref();
       };
-      resolve3({
+      resolve4({
         url: match[0],
         binary: "cloudflared",
         stop,
@@ -42600,13 +42600,13 @@ function remoteUnavailable2(detail) {
   return new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: `tailscale: ${detail}` });
 }
 function runTailscale(args, timeoutMs) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     execFile2("tailscale", args, { timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
@@ -42634,7 +42634,7 @@ function offBestEffort() {
 async function startTailscaleServe(port) {
   const dnsName = await selfDnsName();
   const target = `http://127.0.0.1:${port}`;
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const child = spawn2("tailscale", ["serve", `--https=${SERVE_PORT}`, target], { stdio: "ignore" });
     child.unref();
     let settled2 = false;
@@ -42654,7 +42654,7 @@ async function startTailscaleServe(port) {
     const graceTimer = setTimeout(() => {
       if (settled2) return;
       settled2 = true;
-      resolve3({ url: `https://${dnsName}`, binary: "tailscale", stop, waitForUnexpectedExit: () => unexpectedExit });
+      resolve4({ url: `https://${dnsName}`, binary: "tailscale", stop, waitForUnexpectedExit: () => unexpectedExit });
     }, START_GRACE_MS);
     graceTimer.unref();
     child.on("error", () => {
@@ -43010,8 +43010,8 @@ function appendAuditEvent(event) {
 }
 
 // src/core/index-store.ts
-import { chmodSync as chmodSync2, closeSync, ftruncateSync, mkdirSync as mkdirSync2, openSync, writeSync } from "node:fs";
-import { dirname as dirname4 } from "node:path";
+import { chmodSync as chmodSync2, closeSync, existsSync as existsSync4, ftruncateSync, mkdirSync as mkdirSync2, openSync, writeSync } from "node:fs";
+import { dirname as dirname4, resolve as resolve3 } from "node:path";
 
 // src/core/native-lock.ts
 import { createRequire } from "node:module";
@@ -43226,17 +43226,93 @@ function mutateIndex(delta) {
     lock.release();
   }
 }
+var ORPHAN_ADOPTABLE_DEPOSITORIES = /* @__PURE__ */ new Set([
+  "encrypted",
+  "keychain",
+  "secret-service",
+  "1password"
+]);
+function classifyLegacyScopeEntries(index, opts) {
+  const identityPath = findRepoIdentityPath(opts.cwd);
+  const pid = projectId(opts.cwd);
+  const fromResolved = opts.from === void 0 ? void 0 : resolve3(opts.from);
+  const items = [];
+  const pool = [];
+  for (const entry of index.entries) {
+    if (entry.scope !== "project" || entry.projectId === pid) continue;
+    const recordedPath = entry.projectPath;
+    if (recordedPath !== void 0 && existsSync4(recordedPath)) {
+      if (findRepoIdentityPath(recordedPath) === identityPath) pool.push({ entry, orphan: false });
+      continue;
+    }
+    if (!ORPHAN_ADOPTABLE_DEPOSITORIES.has(entry.depository)) {
+      items.push({ entry, class: "orphaned-unrecoverable", rekeyable: false, detail: `value is gone; re-request ${entry.name}` });
+      continue;
+    }
+    if (fromResolved !== void 0 && recordedPath !== void 0 && resolve3(recordedPath) === fromResolved) {
+      pool.push({ entry, orphan: true });
+    } else {
+      items.push({
+        entry,
+        class: "orphaned-adoptable",
+        rekeyable: false,
+        detail: recordedPath === void 0 ? "no recorded projectPath" : `needs --from ${recordedPath}`
+      });
+    }
+  }
+  const poolByName = /* @__PURE__ */ new Map();
+  for (const candidate of pool) {
+    const siblings = poolByName.get(candidate.entry.name) ?? [];
+    siblings.push(candidate);
+    poolByName.set(candidate.entry.name, siblings);
+  }
+  for (const [name, siblings] of poolByName) {
+    const existsAtTarget = findIndexEntry(index, name, "project", pid) !== void 0;
+    for (const candidate of siblings) {
+      if (existsAtTarget || siblings.length > 1) {
+        items.push({
+          entry: candidate.entry,
+          class: "conflict",
+          rekeyable: false,
+          detail: existsAtTarget ? "name already exists at repo scope" : "duplicate legacy entries share this name"
+        });
+      } else {
+        items.push({
+          entry: candidate.entry,
+          class: candidate.orphan ? "orphaned-adoptable" : "adoptable",
+          rekeyable: true,
+          detail: candidate.orphan ? "attested by --from" : void 0
+        });
+      }
+    }
+  }
+  items.sort((a, b) => a.entry.name.localeCompare(b.entry.name));
+  const counts = {
+    adoptable: 0,
+    "orphaned-adoptable": 0,
+    "orphaned-unrecoverable": 0,
+    conflict: 0
+  };
+  for (const item of items) counts[item.class]++;
+  return { projectId: pid, identityPath, items, counts };
+}
+function legacyScopeCountsLine(report) {
+  const total = report.items.length;
+  if (total === 0) return null;
+  const c = report.counts;
+  return `${total} project-scope ${total === 1 ? "entry" : "entries"} predate repo-scope identity (${c.adoptable} adoptable, ${c["orphaned-adoptable"]} orphaned-adoptable, ${c["orphaned-unrecoverable"]} orphaned-unrecoverable, ${c.conflict} conflict) \u2014 run \`enigma migrate-scope\` to preview, then \`enigma migrate-scope --apply\` to re-key`;
+}
 
 // src/storage/depositories/encrypted.ts
 import { createCipheriv, createDecipheriv, randomBytes as randomBytes3 } from "node:crypto";
-import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
 var ALGORITHM = "aes-256-gcm";
 var KEY_BYTES = 32;
 var IV_BYTES = 12;
 var FILE_MODE2 = 384;
 var EMPTY_SECRETS_FILE = { version: 1, entries: {} };
 function readKey() {
-  if (!existsSync4(keyPath())) return void 0;
+  if (!existsSync5(keyPath())) return void 0;
   const key = Buffer.from(readFileSync3(keyPath(), "utf8"), "base64");
   if (key.length !== KEY_BYTES) readFailed();
   return key;
@@ -43339,7 +43415,7 @@ var encryptedDepositoryModule = {
 };
 
 // src/storage/depositories/env.ts
-import { existsSync as existsSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync6, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
 import { join as join3 } from "node:path";
 var BEGIN_MARKER = "# enigma:begin";
 var END_MARKER = "# enigma:end";
@@ -43416,7 +43492,7 @@ function removeManagedValue(content, name) {
 }
 function checkEnvGitignore(projectPath) {
   const gitignorePath = join3(projectPath, ".gitignore");
-  if (!existsSync5(gitignorePath)) {
+  if (!existsSync6(gitignorePath)) {
     return [".env is not gitignored: no .gitignore file found in this project"];
   }
   const lines = readFileSync4(gitignorePath, "utf8").split(/\r?\n/);
@@ -43440,7 +43516,7 @@ function requireProjectPath(ctx) {
 }
 function createEnvDepository(ctx) {
   const envFilePath = join3(requireProjectPath(ctx), ".env");
-  const readEnvFile = () => existsSync5(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
+  const readEnvFile = () => existsSync6(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
   return {
     id: "env",
     promptProfile: "none",
@@ -43493,24 +43569,24 @@ var PROBE_REF = "__enigma_detect_probe__";
 var REF_PATTERN = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH = 512;
 function runSecretTool(args) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     execFile3(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecretToolWithStdin(args, value) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const child = execFile3(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -43643,7 +43719,7 @@ var linuxSecretServiceDepositoryModule = {
 
 // src/storage/depositories/macos-keychain.ts
 import { execFile as execFile4 } from "node:child_process";
-import { existsSync as existsSync6 } from "node:fs";
+import { existsSync as existsSync7 } from "node:fs";
 var SECURITY_BIN = "/usr/bin/security";
 var SERVICE2 = "enigma";
 var EXEC_TIMEOUT_MS2 = 1e4;
@@ -43655,24 +43731,24 @@ var REF_PATTERN2 = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH2 = 512;
 var MARKER_BYTE = 1;
 function runSecurity(args) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     execFile4(SECURITY_BIN, args, { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecurityBatch(line) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const child = execFile4(SECURITY_BIN, ["-i"], { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -43810,7 +43886,7 @@ var macosKeychainDepositoryModule = {
     if (process.platform !== "darwin") {
       return { id: "keychain", promptProfile: "may-prompt", available: false, reason: "not running on macOS" };
     }
-    const available = existsSync6(SECURITY_BIN);
+    const available = existsSync7(SECURITY_BIN);
     return {
       id: "keychain",
       promptProfile: "may-prompt",
@@ -43834,24 +43910,24 @@ var REF_MAX_LENGTH3 = 512;
 var VAULT_MISSING_PATTERN = /isn't a vault|no vault named|could not find vault/i;
 var ITEM_MISSING_PATTERN = /isn't an item|could not find item|item.*not found/i;
 function runOp(args) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     execFile5(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runOpWithStdin(args, stdinData) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const child = execFile5(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -44379,7 +44455,7 @@ ${remoteNote}` : outcome.text;
 
 // src/mcp/tools/doctor.ts
 import { execFile as execFile6 } from "node:child_process";
-import { existsSync as existsSync7 } from "node:fs";
+import { existsSync as existsSync8 } from "node:fs";
 import { platform, release } from "node:os";
 import { promisify } from "node:util";
 
@@ -44482,8 +44558,11 @@ function registerDoctorTool(server) {
         (d) => `  ${d.id}: ${d.available ? "available" : "unavailable"} (prompt profile: ${d.promptProfile}${d.reason ? `, ${d.reason}` : ""})`
       );
       let indexStatus;
+      let legacyScopeLine = null;
       try {
-        indexStatus = `ok (${readIndex().entries.length} entries)`;
+        const indexFile = readIndex();
+        indexStatus = `ok (${indexFile.entries.length} entries)`;
+        legacyScopeLine = legacyScopeCountsLine(classifyLegacyScopeEntries(indexFile, { cwd }));
       } catch (err) {
         indexStatus = `ERROR: ${err instanceof EnigmaError ? err.code : "unknown error"}`;
       }
@@ -44498,11 +44577,12 @@ function registerDoctorTool(server) {
         `Client elicitation support: url=${supportsUrlElicitation(server.server)} form=${supportsFormElicitation(server.server)}`,
         `Config home: ${enigmaHome()}`,
         `Index: ${indexStatus}`,
-        `Vault key: ${existsSync7(keyPath()) ? "present" : "missing"}`,
-        `Vault file: ${existsSync7(secretsPath()) ? "present" : "missing"}`,
+        `Vault key: ${existsSync8(keyPath()) ? "present" : "missing"}`,
+        `Vault file: ${existsSync8(secretsPath()) ? "present" : "missing"}`,
         `Manifest gaps: ${manifestGaps.length === 0 ? "none" : manifestGaps.join(", ")}`,
         `Paths: index=${indexPath()} audit=${auditLogPath()} config=${configPath()}`
       ];
+      if (legacyScopeLine) lines.push(`Legacy scope entries: ${legacyScopeLine}`);
       const pendingRequests = RequestStore.listUnconsumedFulfilled();
       if (pendingRequests.length > 0) {
         lines.push(
@@ -44522,7 +44602,7 @@ function registerDoctorTool(server) {
 }
 
 // src/mcp/tools/import.ts
-import { existsSync as existsSync9, readFileSync as readFileSync6 } from "node:fs";
+import { existsSync as existsSync10, readFileSync as readFileSync6 } from "node:fs";
 import { isAbsolute, join as join5 } from "node:path";
 
 // src/storage/dotenv-file.ts
@@ -44684,7 +44764,7 @@ function removeDotEnvEntries(content, names, opts = {}) {
 
 // src/storage/import-commit.ts
 import { randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync8, readFileSync as readFileSync5, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync9, readFileSync as readFileSync5, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 var FILE_MODE4 = 384;
 function writeFileAtomic(path, content, mode) {
   const tmpPath = `${path}.${randomBytes4(6).toString("hex")}.tmp`;
@@ -44695,7 +44775,7 @@ function writeFileAtomic(path, content, mode) {
   } catch (err) {
     const error62 = err instanceof Error ? err.message : String(err);
     try {
-      if (existsSync8(tmpPath)) unlinkSync(tmpPath);
+      if (existsSync9(tmpPath)) unlinkSync(tmpPath);
       return { ok: false, error: error62 };
     } catch {
       return { ok: false, error: error62, leftoverPath: tmpPath };
@@ -44752,7 +44832,7 @@ async function commitImport(opts) {
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
-  const currentContent = existsSync8(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
+  const currentContent = existsSync9(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
   const valueByName = new Map(opts.entries.map((e) => [e.name, e.value]));
   const currentValueByName = new Map(parseDotEnv(currentContent).entries.map((e) => [e.name, e.value]));
   const toRemove = [];
@@ -45128,7 +45208,7 @@ var PayloadTooLargeError = class extends Error {
   }
 };
 function readBody(req, maxBytes = MAX_BODY_BYTES) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const chunks = [];
     let total = 0;
     let settled2 = false;
@@ -45149,7 +45229,7 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
     req.on("end", () => {
       if (settled2) return;
       settled2 = true;
-      resolve3(Buffer.concat(chunks));
+      resolve4(Buffer.concat(chunks));
     });
     req.on("error", settleError);
   });
@@ -47515,7 +47595,7 @@ var MIN_REARM_DELAY_MS = 1e3;
 var state;
 var starting;
 function settled(value) {
-  return new Promise((resolve3) => resolve3(value));
+  return new Promise((resolve4) => resolve4(value));
 }
 function toHandle(s) {
   return { port: s.port, origin: `http://${s.host}:${s.port}`, close: stopServer };
@@ -47551,7 +47631,7 @@ function startServer(opts = {}) {
       (_resolve, reject) => reject(new Error(`refusing to bind ${host} over plain HTTP; pass allowInsecureHttp to override (ADR-005)`))
     );
   }
-  starting = new Promise((resolve3, reject) => {
+  starting = new Promise((resolve4, reject) => {
     const server = http.createServer((req, res) => {
       if (state) resetIdleTimer(state);
       void handleRequest(req, res);
@@ -47567,7 +47647,7 @@ function startServer(opts = {}) {
       state = newState;
       resetIdleTimer(newState);
       starting = void 0;
-      resolve3(toHandle(newState));
+      resolve4(toHandle(newState));
     });
   });
   return starting;
@@ -47577,7 +47657,7 @@ function stopServer() {
   if (!current) return settled(void 0);
   state = void 0;
   if (current.idleTimer) clearTimeout(current.idleTimer);
-  return new Promise((resolve3) => current.server.close(() => resolve3()));
+  return new Promise((resolve4) => current.server.close(() => resolve4()));
 }
 
 // src/mcp/schemas.ts
@@ -47618,7 +47698,7 @@ function registerImportTool(server) {
       const projectPath = findProjectPath(cwd);
       const pathArg = args.path ?? ".env";
       const absPath = isAbsolute(pathArg) ? pathArg : join5(cwd, pathArg);
-      if (!existsSync9(absPath)) {
+      if (!existsSync10(absPath)) {
         return errorResult(new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` }));
       }
       const content = readFileSync6(absPath, "utf8");
@@ -47776,7 +47856,7 @@ function buildHiddenAnswerScript(name, reason) {
 // src/native/exec.ts
 import { spawn as spawn3 } from "node:child_process";
 function execWithStdin(command, args, input2, opts) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const child = spawn3(command, args, { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
@@ -47818,7 +47898,7 @@ function execWithStdin(command, args, input2, opts) {
       finish(() => reject(new EnigmaError({ code: "E_UI_UNAVAILABLE", message: `${command} failed to start` })));
     });
     child.on("close", (code) => {
-      finish(() => resolve3({ code, stdout, stderr }));
+      finish(() => resolve4({ code, stdout, stderr }));
     });
     child.stdin.on("error", () => {
     });
