@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { connectWithCapabilities } from './harness.js';
 import { setSecret } from '../../../src/storage/manager.js';
 import { registerActiveTunnel } from '../../../src/remote/index.js';
@@ -162,5 +162,58 @@ describe('enigma_await', () => {
     const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
     expect(text).toBe('Stored OPENAI_API_KEY in encrypted (global)\nRemote access via tailscale was used for this request.');
     await pair.close();
+  });
+
+  it('a used-but-swept record (the human submitted but fulfill never ran) resolves with E_OUTCOME_UNKNOWN naming the declared names (Issue #69 AC #5, via the shared resolveRequestOutcome helper)', async () => {
+    // Injects the OutcomeUnknownError rejection the sweeper would produce
+    // after the 5-min used-grace period — avoiding fake-timer advances of
+    // several minutes (slow and brittle against vitest's microtask
+    // iteration limits) — and asserts the SHARED mapping in
+    // resolveRequestOutcome where the amendment places it. The MCP layer
+    // is tested indirectly via the existing real-round-trip cases in
+    // request.test.ts and via the wire-format assertions on this
+    // EnigmaError — every tool-level caller (await.ts, request.ts) goes
+    // through this helper, so a single unit test covers the mapping.
+    const record = RequestStore.create({
+      kind: 'request',
+      names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'],
+    });
+    const { OutcomeUnknownError } = await import('../../../src/request/store.js');
+    const { resolveRequestOutcome } = await import('../../../src/mcp/request-outcome.js');
+
+    const waiterSpy = vi
+      .spyOn(RequestStore, 'waitForFulfilled')
+      .mockImplementationOnce(() => Promise.reject(new OutcomeUnknownError(['OPENAI_API_KEY', 'GITHUB_TOKEN'])));
+
+    try {
+      await expect(resolveRequestOutcome(record.id, process.cwd())).rejects.toMatchObject({
+        code: 'E_OUTCOME_UNKNOWN',
+        message: expect.stringMatching(/OPENAI_API_KEY.*GITHUB_TOKEN.*enigma list/s),
+      });
+    } finally {
+      waiterSpy.mockRestore();
+    }
+  });
+
+  it('a never-used expiry still rejects with the generic "request expired" — never with E_OUTCOME_UNKNOWN', async () => {
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+    const { resolveRequestOutcome } = await import('../../../src/mcp/request-outcome.js');
+    const { EnigmaError } = await import('../../../src/core/errors.js');
+
+    // Inject the plain Error('request expired') rejection the sweeper
+    // produces for an unused-but-expired record — the helper must pass
+    // it through unchanged, so the await tool's catch maps it to
+    // E_REQUEST_EXPIRED (the code reserved for never-used expiry).
+    const waiterSpy = vi
+      .spyOn(RequestStore, 'waitForFulfilled')
+      .mockImplementationOnce(() => Promise.reject(new Error('request expired')));
+
+    try {
+      const promise = resolveRequestOutcome(record.id, process.cwd());
+      await expect(promise).rejects.toThrow(/request expired/);
+      await expect(promise).rejects.not.toBeInstanceOf(EnigmaError);
+    } finally {
+      waiterSpy.mockRestore();
+    }
   });
 });

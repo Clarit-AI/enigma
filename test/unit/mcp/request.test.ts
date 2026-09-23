@@ -542,4 +542,31 @@ describe('enigma_request remote access (Issue #12)', () => {
     expect(tunnelChild.kill).toHaveBeenCalledWith('SIGTERM');
     await pair.close();
   });
+
+  it('blocking enigma_request: a used-but-swept record yields E_OUTCOME_UNKNOWN through the shared resolveRequestOutcome mapping (Issue #69 AC #5)', async () => {
+    // Injects the OutcomeUnknownError rejection the sweeper would produce
+    // after the 5-min used-grace period — avoiding fake-timer advances of
+    // several minutes (slow and brittle against vitest's microtask
+    // iteration limits) — and asserts the SHARED mapping in
+    // resolveRequestOutcome where the amendment places it. request.ts's
+    // catch block (passes EnigmaError to errorResult) is the only branch
+    // between the helper and the wire, and errorResult is already
+    // exhaustively covered by other tests.
+    const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'] });
+    const { OutcomeUnknownError } = await import('../../../src/request/store.js');
+    const { resolveRequestOutcome } = await import('../../../src/mcp/request-outcome.js');
+
+    const waiterSpy = vi
+      .spyOn(RequestStore, 'waitForFulfilled')
+      .mockImplementationOnce(() => Promise.reject(new OutcomeUnknownError(['OPENAI_API_KEY', 'GITHUB_TOKEN'])));
+
+    try {
+      await expect(resolveRequestOutcome(record.id, process.cwd())).rejects.toMatchObject({
+        code: 'E_OUTCOME_UNKNOWN',
+        message: expect.stringMatching(/OPENAI_API_KEY.*GITHUB_TOKEN.*enigma list/s),
+      });
+    } finally {
+      waiterSpy.mockRestore();
+    }
+  });
 });

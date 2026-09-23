@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { RequestStore } from '../../../src/request/store.js';
+import { OutcomeUnknownError, RequestStore } from '../../../src/request/store.js';
 
 describe('RequestStore', () => {
   beforeEach(() => {
@@ -381,6 +381,103 @@ describe('RequestStore', () => {
       vi.advanceTimersByTime(6 * 60 * 1000);
 
       expect(RequestStore.get(record.id)).toBeUndefined();
+    });
+
+    it('sweeping a used record whose fulfill never ran rejects the waiter with OutcomeUnknownError carrying the declared names (Issue #69 AC #5)', async () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'], ttlMs: 1000 });
+      const waiter = RequestStore.waitForFulfilled(record.id);
+
+      // Mark used (POST /r/:id consumed the token) but do NOT call fulfill —
+      // simulates the POST handler crashing between tryMarkUsed and the
+      // per-name setSecret loop, the gap the issue closes.
+      RequestStore.tryMarkUsed(record.id);
+
+      // Past used-grace (5 min) AND past the request's own TTL — the record
+      // is still in the map within the used-grace window; the sweeper
+      // deletes it after that and rejects the waiter.
+      vi.advanceTimersByTime(6 * 60 * 1000);
+
+      await expect(waiter).rejects.toBeInstanceOf(OutcomeUnknownError);
+      await expect(waiter).rejects.toMatchObject({ names: ['OPENAI_API_KEY', 'GITHUB_TOKEN'] });
+    });
+
+    it('sweeping a fulfilled reveal record (results defaults to []) does NOT reject — only used-no-results does (Issue #69 amendment #4)', () => {
+      // fulfill() is called without an explicit results array for a reveal,
+      // since it has no per-name write outcome to report — so results === []
+      // (NOT undefined), and the sweeper's "results === undefined" branch
+      // does not fire for it. The record is swept silently.
+      const reveal = RequestStore.create({ kind: 'reveal', names: ['GITHUB_TOKEN'] });
+      RequestStore.tryMarkUsed(reveal.id);
+      RequestStore.fulfill(reveal.id); // no results argument → []
+      const waiter = RequestStore.waitForFulfilled(reveal.id);
+      let rejected = false;
+      void waiter.catch(() => {
+        rejected = true;
+      });
+
+      vi.advanceTimersByTime(6 * 60 * 1000);
+
+      expect(RequestStore.get(reveal.id)).toBeUndefined();
+      expect(rejected).toBe(false);
+    });
+  });
+
+  describe('earliestOpenExpiry (Issue #69 §3)', () => {
+    beforeEach(() => {
+      vi.useFakeTimers();
+    });
+
+    it('returns undefined when no records exist', () => {
+      expect(RequestStore.earliestOpenExpiry(Date.now())).toBeUndefined();
+    });
+
+    it('returns undefined when the only record is used (in grace)', () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'] });
+      RequestStore.tryMarkUsed(record.id);
+
+      expect(RequestStore.earliestOpenExpiry(Date.now())).toBeUndefined();
+    });
+
+    it('returns undefined when the only record is already expired (within unused-window before sweeper runs)', () => {
+      RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 1000 });
+      vi.advanceTimersByTime(1001);
+
+      expect(RequestStore.earliestOpenExpiry(Date.now())).toBeUndefined();
+    });
+
+    it('returns the smallest expiresAt among multiple unused, non-expired records', () => {
+      const now = Date.now();
+      const earlier = RequestStore.create({ kind: 'request', names: ['A'], ttlMs: 60_000 });
+      const later = RequestStore.create({ kind: 'request', names: ['B'], ttlMs: 120_000 });
+
+      expect(RequestStore.earliestOpenExpiry(now)).toBe(earlier.expiresAt);
+      // And it changes once the earlier record is no longer open:
+      RequestStore.tryMarkUsed(earlier.id);
+      expect(RequestStore.earliestOpenExpiry(now)).toBe(later.expiresAt);
+    });
+
+    it('boundary: at now === expiresAt the record is NOT open (AC #9, strict `<` matches isExpired)', () => {
+      RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 1000 });
+      vi.advanceTimersByTime(1000);
+
+      expect(RequestStore.earliestOpenExpiry(Date.now())).toBeUndefined();
+    });
+
+    it('a record one ms before expiry IS open', () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 1000 });
+      vi.advanceTimersByTime(999);
+
+      const expiry = RequestStore.earliestOpenExpiry(Date.now());
+      expect(expiry).toBe(record.expiresAt);
+    });
+
+    it('never-used expiry still rejects with the generic "request expired" — never with OutcomeUnknownError (AC #5)', async () => {
+      const record = RequestStore.create({ kind: 'request', names: ['OPENAI_API_KEY'], ttlMs: 1000 });
+      const waiter = RequestStore.waitForFulfilled(record.id);
+      const assertion = expect(waiter).rejects.toThrow(/request expired/);
+
+      vi.advanceTimersByTime(61_000);
+      await assertion;
     });
   });
 });
