@@ -234,7 +234,13 @@ describe('commitImport (fs-mocked edge cases, Issue #13 review round 2)', () => 
           actor: 'cli',
         });
 
-        expect(unlinkCalls).toHaveLength(1);
+        // Issue #66: setSecret's index write now goes through mutateIndex,
+        // whose `release()` calls unlinkSync on the lock file in `finally`
+        // — so the mock sees an extra unlink for `index.lock` that this
+        // test never asked about. Filter to the .env rewrite's own temp
+        // files, the same way the renameCalls check above already does.
+        const envUnlinks = unlinkCalls.filter((p) => typeof p === 'string' && isOwnTempFile(p, envFilePath));
+        expect(envUnlinks).toHaveLength(1);
         const [tmpPath] = renameCalls.filter(([, to]) => to === envFilePath)[0]!;
         expect(realExistsSync(tmpPath as string)).toBe(false);
       });
