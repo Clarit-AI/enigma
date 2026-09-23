@@ -27,11 +27,13 @@ export function secretsPath(): string {
 }
 
 /**
- * Interprocess lock file for the index (`mutateIndex` in index-store.ts).
- * Lives next to `index.json`; its presence means another process is inside
- * a critical section that re-reads → applies a delta → writes the index
- * (Issue #66). The file holds `<pid>\n<createdAtMs>\n` at mode 0600 — pid
- * + timestamp only, never a value.
+ * Persistent anchor file for the index lock (`mutateIndex` in
+ * index-store.ts). Lives next to `index.json`. Created ONCE at mode 0600
+ * and never renamed, unlinked, or replaced; exclusion is a kernel
+ * `flock(2)` on the open file description (Issue #66), not anything read
+ * from the file's name or body. The body (`<pid>\n<createdAtMs>\n`) is
+ * optional informational metadata written after the lock is held — pid +
+ * timestamp only, never a value, never read for safety.
  */
 export function indexLockPath(): string {
   return join(enigmaHome(), 'index.lock');

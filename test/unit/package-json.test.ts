@@ -29,7 +29,9 @@ describe('package.json (AC6)', () => {
     expect(pkg.bin?.enigma).toBe('plugins/enigma/dist/cli.mjs');
   });
 
-  it('publishes only the plugin dist directory', () => {
-    expect(pkg.files).toEqual(['plugins/enigma/dist']);
+  it('publishes only the plugin dist and native directories', () => {
+    // Issue #66: the first-party flock addon ships beside dist/ so a
+    // marketplace/npm install carries the committed per-platform artifacts.
+    expect(pkg.files).toEqual(['plugins/enigma/dist', 'plugins/enigma/native']);
   });
 });

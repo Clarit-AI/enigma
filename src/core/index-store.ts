@@ -1,17 +1,7 @@
-import {
-  chmodSync,
-  closeSync,
-  linkSync,
-  mkdirSync,
-  openSync,
-  readFileSync,
-  renameSync,
-  unlinkSync,
-  writeFileSync,
-} from 'node:fs';
+import { chmodSync, closeSync, ftruncateSync, mkdirSync, openSync, writeSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { randomBytes } from 'node:crypto';
 import { EnigmaError } from './errors.js';
+import { loadIndexLock } from './native-lock.js';
 import { indexLockPath, indexPath } from './paths.js';
 import { readJsonFile, writeJsonFileAtomic } from './secure-file.js';
 import type { DepositoryId } from '../storage/interfaces.js';
@@ -146,7 +136,7 @@ export function listIndexEntries(
 }
 
 /* ------------------------------------------------------------------ *
- *  Index lock — interprocess critical section for every index write   *
+ *  Index lock — kernel-held critical section for every index write    *
  * ------------------------------------------------------------------ *
  *
  * Issue #66: `writeIndex` is atomic (tmp + rename, secure-file.ts) but not
@@ -156,65 +146,68 @@ export function listIndexEntries(
  * its change inside a short, interprocess-locked critical section that
  * reads the index again before applying it.
  *
- * The lock file is `<ENIGMA_HOME>/index.lock`, mode 0600. Its body is three
- * newline-separated fields:
+ * Mechanism (superseding the earlier name-based O_EXCL + stale-threshold
+ * protocol, which is removed in full): exclusion is a kernel `flock(2)` on
+ * a PERSISTENT anchor file at `<ENIGMA_HOME>/index.lock` (mode 0600),
+ * through the first-party N-API addon (`native/index-lock.cc`, committed
+ * per-platform under `plugins/enigma/native/<os>-<arch>/`). There is no
+ * pure-JS fallback — unsupported platforms fail closed with
+ * `E_LOCK_UNAVAILABLE` rather than running a second, weaker protocol.
  *
- *   <token>\n<pid>\n<createdAtMs>\n
+ * Invariants:
+ * - The anchor is created ONCE (`openSync(path, 'wx', 0o600)`; `EEXIST` →
+ *   open the existing file). It is NEVER renamed, unlinked, or replaced —
+ *   including at release. The kernel ties the lock to the open file
+ *   description, so the inode must be stable; deleting the name would let
+ *   two holders end up on different inodes.
+ * - Acquire = `flock(fd, LOCK_EX | LOCK_NB)` in a bounded retry loop with
+ *   `Atomics.wait` sleep (no busy-spin). Exhaustion → `E_LOCK_TIMEOUT`
+ *   naming the path (Issue #66, AC #2). Unexpected fs/native errors during
+ *   acquire are wrapped the same way — no raw `node:fs` error escapes
+ *   `mutateIndex`.
+ * - Release = `flock(fd, LOCK_UN)` + `close(fd)`, run in `finally` (Issue
+ *   #66, AC #1). It never touches the file's name or body.
+ * - Crash recovery is the kernel's (Issue #66, AC #3): the lock dies with
+ *   the process — any death, including SIGKILL — so a crashed holder can
+ *   never wedge the index and no staleness heuristic is needed. A paused
+ *   but ALIVE owner is waited out and never evicted.
+ * - The body (`<pid>\n<createdAtMs>\n`) is OPTIONAL INFORMATIONAL
+ *   metadata written after the lock is held, via the held fd. It is never
+ *   read for safety; a leftover legacy body (empty, partial, or old-format)
+ *   is simply overwritten on the next successful acquire.
  *
- * - `token`: 32-char hex from `crypto.randomBytes(16)` — unique per acquire.
- *   Used to detect that a release is unlinking the lock WE created, not a
- *   lock a stale-break replacement put in its place.
- * - `pid`: debugging only (never a value, just identifies the holding
- *   process).
- * - `createdAtMs`: the wall-clock instant the lock was acquired. The
- *   stale-break path reads this from a tombstone to verify the stolen lock
- *   really was stale before unlinking it; a live lock stolen by mistake is
- *   restored via `linkSync` rather than unlinked.
- *
- * Acquisition uses `openSync(path, 'wx')` (O_EXCL). On `EEXIST`, the file is
- * either live (held by another process) or stale (left by a crashed one).
- * Stale locks are broken via a tombstone `renameSync` followed by an
- * in-content age check (so a lock whose `stat.mtimeMs` looked stale but
- * whose own `createdAtMs` is recent — i.e. we stole a live lock — is
- * restored, not unlinked). Two concurrent breakers race on the rename: the
- * winner unlinks the tombstone and proceeds, the loser sees `ENOENT` (the
- * source has already been moved) and retries the open. Tombstone-name
- * collisions are vanishingly rare but also retry safely via `EEXIST`.
- *
- * The lock is released in `finally`; the release only unlinks if the file
- * still carries the acquirer's token. The read-then-unlink window is
- * small (a few microseconds) and accepted: if a stale-break replacement
- * happens between the read and the unlink, we leave the new owner's lock
- * alone.
- *
- * No raw `node:fs` error may escape `mutateIndex`. Anything unexpected from
- * `acquireIndexLock` is wrapped in `EnigmaError` with `E_LOCK_TIMEOUT` (the
- * lock acquisition failed, and that's the most accurate code for an
- * unexpected fs failure mid-acquire — the caller's only recourse is to
- * retry or surface the lock-acquisition failure). The user's `delta`
- * closure and `writeIndex` keep their own error handling.
+ * Assumptions / scope (documented, not assumed away):
+ * - flock is ADVISORY: exclusion holds among cooperating processes. Every
+ *   index writer — `setSecret`, `deleteSecret`, `move` (via `setSecret(…,
+ *   rotate: true)`), `import-commit` (via per-entry `setSecret`) — goes
+ *   through this helper, so the cooperating set is exactly Enigma's
+ *   writers. Slow depository I/O (1Password prompts, keychain) stays OUT
+ *   of the critical section.
+ * - Upgrade is stop/restart ALL writers: a long-running MCP server keeps
+ *   the old protocol in memory until it restarts. There is NO
+ *   mixed-protocol guarantee — a process running the removed name-based
+ *   protocol can unlink/replace the anchor and split exclusion across two
+ *   inodes. `enigma doctor` can hint at running writers; it does NOT prove
+ *   they are all stopped.
+ * - Known limitation (unchanged): two concurrent `set` calls with
+ *   `rotate=false` for the same name may leave the loser's value as an
+ *   orphan in the depository; see `docs/architecture.md` ADR-003 and
+ *   Issue #70.
  */
-
-/** A lock older than this is treated as a crashed peer and broken (Issue #66, AC #3). */
-export let LOCK_STALE_MS = 30_000;
 /** Per-retry synchronous sleep while the lock is held by a live process. */
 export let LOCK_RETRY_INTERVAL_MS = 10;
 /** Maximum acquire attempts before throwing `E_LOCK_TIMEOUT` (Issue #66, AC #2). */
 export let LOCK_MAX_ATTEMPTS = 50;
 
 /**
- * Test-only: shrink the timing windows so the lock tests don't sit on a
- * 30 s stale wait or a 500 ms retry budget. Always restore the originals
- * in `afterEach` — production reads the values at each acquire call, so a
- * stale test override does not affect subsequent test files, but the
- * convention here is "leave production timings as you found them".
+ * Test-only: shrink the retry budget so lock tests don't sit on a 500 ms
+ * bounded wait. Restore in `afterEach` — production reads the values at
+ * each acquire call.
  */
 export function __setLockTimingForTesting(opts: {
-  staleMs?: number;
   retryIntervalMs?: number;
   maxAttempts?: number;
 }): void {
-  if (opts.staleMs !== undefined) LOCK_STALE_MS = opts.staleMs;
   if (opts.retryIntervalMs !== undefined) LOCK_RETRY_INTERVAL_MS = opts.retryIntervalMs;
   if (opts.maxAttempts !== undefined) LOCK_MAX_ATTEMPTS = opts.maxAttempts;
 }
@@ -234,20 +227,15 @@ function syncSleep(ms: number): void {
 }
 
 interface Lock {
-  readonly path: string;
-  /**
-   * Unlinks the lock file iff it still carries the token this Lock was
-   * acquired with. The check-then-unlink window is small (a few
-   * microseconds); if a stale-break replacement lands in that window, the
-   * new owner's lock is left alone.
-   */
+  /** `flock(LOCK_UN)` + `close(fd)`. Never deletes or replaces the anchor. */
   release(): void;
 }
 
 /**
  * Best-effort mkdir+chmod of the parent dir. ENOENT/EEXIST are
  * expected — the dir already exists at the right mode from any prior
- * Enigma write. Anything else is wrapped.
+ * Enigma write. Anything else is swallowed here and surfaces from the
+ * open below if the dir is genuinely missing/unwritable.
  */
 function ensureLockDir(lockPath: string): void {
   const dir = dirname(lockPath);
@@ -262,28 +250,11 @@ function ensureLockDir(lockPath: string): void {
 }
 
 /**
- * Reads the lock file's body and returns the parsed token/pid/createdAtMs,
- * or `undefined` if the file is unreadable / malformed. Never throws.
- */
-function readLockBody(lockPath: string): { token: string; pid: string; createdAtMs: number } | undefined {
-  try {
-    const raw = readFileSync(lockPath, 'utf8');
-    const lines = raw.split('\n');
-    const token = lines[0] ?? '';
-    const pid = lines[1] ?? '';
-    const createdAtMs = Number(lines[2] ?? Number.NaN);
-    if (!token || !Number.isFinite(createdAtMs)) return undefined;
-    return { token, pid, createdAtMs };
-  } catch {
-    return undefined;
-  }
-}
-
-/**
- * Wrap any unexpected fs error from the acquire path as `E_LOCK_TIMEOUT`.
- * The acquirer's only recourse on a hard fs failure is to surface the
- * lock-acquisition error, and `E_LOCK_TIMEOUT` is the closest code we have
- * — the message names the cause via the original error's constructor name.
+ * Wrap any unexpected fs/native error from the acquire path as
+ * `E_LOCK_TIMEOUT`. The acquirer's only recourse on a hard failure is to
+ * surface the lock-acquisition error, and `E_LOCK_TIMEOUT` is the closest
+ * code we have — the message names the cause via the original error's
+ * constructor name.
  */
 function wrapAcquireError(err: unknown, lockPath: string): EnigmaError {
   const cause = err instanceof Error ? err.constructor.name : String(err);
@@ -293,121 +264,82 @@ function wrapAcquireError(err: unknown, lockPath: string): EnigmaError {
   });
 }
 
+/**
+ * Opens the PERSISTENT anchor. Create-once semantics: `wx` (O_EXCL) on the
+ * first ever acquire, plain open afterwards. The inode created here is
+ * never renamed, unlinked, or replaced for the lifetime of the install.
+ */
+function openAnchor(lockPath: string): number {
+  try {
+    return openSync(lockPath, 'wx', 0o600);
+  } catch (err) {
+    if (!(err instanceof Error) || (err as NodeJS.ErrnoException).code !== 'EEXIST') {
+      throw wrapAcquireError(err, lockPath);
+    }
+  }
+  try {
+    return openSync(lockPath, 'r+');
+  } catch (err) {
+    throw wrapAcquireError(err, lockPath);
+  }
+}
+
+/**
+ * OPTIONAL informational metadata, written only after the lock is held and
+ * only through the held fd. Never read for safety; failures are silently
+ * ignored (the lock itself is already ours at this point).
+ */
+function writeInfoMetadata(fd: number): void {
+  try {
+    ftruncateSync(fd, 0);
+    writeSync(fd, `${process.pid}\n${Date.now()}\n`, 0);
+  } catch {
+    // informational only
+  }
+}
+
 function acquireIndexLock(): Lock {
   const lockPath = indexLockPath();
   ensureLockDir(lockPath);
-
-  for (let attempt = 0; attempt < LOCK_MAX_ATTEMPTS; attempt++) {
-    let fd: number | undefined;
-    try {
-      fd = openSync(lockPath, 'wx', 0o600);
-    } catch (err) {
-      if (!(err instanceof Error) || (err as NodeJS.ErrnoException).code !== 'EEXIST') {
-        throw wrapAcquireError(err, lockPath);
-      }
-      // EEXIST — someone else holds (or crashed holding) the lock. `fd` is
-      // still `undefined`, so we fall through to the "determine live vs
-      // stale" branch below. Crucially: we have NOT touched the existing
-      // file in any way here — only openSync failing tells us it exists,
-      // and generating a token/writing/unlinking must never happen on this
-      // path, or we'd be deleting a lock we don't own.
-    }
-
-    if (fd !== undefined) {
-      // openSync succeeded: the lock file is ours, empty, mode 0600. From
-      // here, any failure must unlink it (lock-leak fix) rather than leave
-      // an orphaned, ownerless lock file on disk for the next acquirer to
-      // trip over.
-      const token = randomBytes(16).toString('hex');
-      let bodyWritten = false;
-      try {
-        writeFileSync(fd, `${token}\n${process.pid}\n${Date.now()}\n`);
-        bodyWritten = true;
-        closeSync(fd);
-      } catch (err) {
-        if (!bodyWritten) {
-          try { closeSync(fd); } catch { /* fd already invalid */ }
-        }
-        try { unlinkSync(lockPath); } catch { /* best-effort */ }
-        throw wrapAcquireError(err, lockPath);
-      }
-
-      // We hold the lock. Return the release handle.
-      return {
-        path: lockPath,
-        release: () => {
-          try {
-            const current = readLockBody(lockPath);
-            if (current && current.token === token) {
-              try { unlinkSync(lockPath); } catch { /* best-effort */ }
+  const addon = loadIndexLock();
+  const fd = openAnchor(lockPath);
+  try {
+    for (let attempt = 0; attempt < LOCK_MAX_ATTEMPTS; attempt++) {
+      if (addon.tryLockSync(fd)) {
+        writeInfoMetadata(fd);
+        return {
+          release: () => {
+            try {
+              addon.unlockSync(fd);
+            } catch {
+              // best-effort: close below still runs
             }
-            // Token mismatch → a stale-break replacement put a new owner's
-            // lock here; leave it alone.
-          } catch {
-            // best-effort
-          }
-        },
-      };
+            try {
+              closeSync(fd);
+            } catch {
+              // best-effort
+            }
+          },
+        };
+      }
+      // Held by a live peer (or a paused one) — sleep then retry. A holder
+      // that dies gets released by the kernel, so a retry can always win.
+      syncSleep(LOCK_RETRY_INTERVAL_MS);
     }
-
-    // EEXIST path — lock file already exists. Determine live vs stale.
-    let body: ReturnType<typeof readLockBody>;
+    throw new EnigmaError({
+      code: 'E_LOCK_TIMEOUT',
+      message: `Could not acquire ${lockPath} within ${LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS} ms; another process holds the index lock.`,
+    });
+  } catch (err) {
+    // fd cleanup on every non-success path (AC: no fd leak).
     try {
-      body = readLockBody(lockPath);
-    } catch (err) {
-      throw wrapAcquireError(err, lockPath);
+      closeSync(fd);
+    } catch {
+      // best-effort
     }
-    if (!body) {
-      // File disappeared between EEXIST and our read — retry the open.
-      continue;
-    }
-
-    const ageMs = Date.now() - body.createdAtMs;
-    if (ageMs > LOCK_STALE_MS) {
-      // Stale break. Rename to a unique tombstone so only ONE breaker's
-      // rename wins; the other breaker sees ENOENT (source moved) and
-      // retries the open.
-      const tombstone = `${lockPath}.stale-${process.pid}-${randomBytes(4).toString('hex')}`;
-      try {
-        renameSync(lockPath, tombstone);
-      } catch (renameErr) {
-        const code = (renameErr as NodeJS.ErrnoException).code;
-        // ENOENT: another breaker moved the source out from under us.
-        // EEXIST: tombstone-name collision (vanishingly rare with randomBytes).
-        // Either way, retry the open.
-        if (code === 'ENOENT' || code === 'EEXIST') continue;
-        throw wrapAcquireError(renameErr, lockPath);
-      }
-
-      // Verify we didn't steal a live lock. If the tombstone's recorded
-      // `createdAtMs` is still within the stale threshold, the lock was
-      // alive when we stole it; restore it via linkSync, back off, and
-      // retry. linkSync failing with EEXIST means someone else already
-      // recreated the lock at `lockPath` — fine, leave their lock alone.
-      const tombstoneBody = readLockBody(tombstone);
-      if (
-        tombstoneBody &&
-        Date.now() - tombstoneBody.createdAtMs <= LOCK_STALE_MS
-      ) {
-        try { linkSync(tombstone, lockPath); } catch { /* EEXIST fine */ }
-        try { unlinkSync(tombstone); } catch { /* best-effort */ }
-        syncSleep(LOCK_RETRY_INTERVAL_MS);
-        continue;
-      }
-
-      // Legitimate stale break.
-      try { unlinkSync(tombstone); } catch { /* best-effort */ }
-      continue;
-    }
-
-    // Lock is held by a live process — sleep then retry.
-    syncSleep(LOCK_RETRY_INTERVAL_MS);
+    if (err instanceof EnigmaError) throw err;
+    throw wrapAcquireError(err, lockPath);
   }
-
-  throw new EnigmaError({
-    code: 'E_LOCK_TIMEOUT',
-    message: `Could not acquire ${lockPath} within ${LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS} ms; another process holds the index lock.`,
-  });
 }
 
 /**
@@ -422,12 +354,13 @@ function acquireIndexLock(): Lock {
  * prompts, keychain operations) belongs in the caller, OUTSIDE the lock.
  * Callers compute their delta from the `current` index passed to the
  * closure, which is the authoritative state at the moment the lock was
- * acquired — a tighter window than `readIndex → slow I/O → writeIndex`,
- * and the only way two concurrent writers can race.
+ * acquired.
  *
- * The lock is `<ENIGMA_HOME>/index.lock` (`indexLockPath`); see ADR-003 in
- * `docs/architecture.md` for the design rationale and the known
- * limitation around same-name concurrent `set` with `rotate=false`.
+ * The lock is a kernel flock on the persistent `<ENIGMA_HOME>/index.lock`
+ * anchor (`indexLockPath`); see ADR-003 in `docs/architecture.md` for the
+ * mechanism decision, the stop/restart-all-writers upgrade requirement, and
+ * the known limitation around same-name concurrent `set` with
+ * `rotate=false`.
  */
 export function mutateIndex(delta: (current: IndexFile) => IndexFile): void {
   const lock = acquireIndexLock();

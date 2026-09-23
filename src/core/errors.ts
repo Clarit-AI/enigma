@@ -25,7 +25,9 @@ export type EnigmaErrorCode =
   /** `enigma run` could not spawn its child because the binary does not exist on PATH (Issue #22, AC #1). Maps to exit 127 (the shell convention for "command not found"); see docs/api-contracts.md §3. */
   | 'E_BINARY_MISSING'
   /** `mutateIndex` could not acquire `<ENIGMA_HOME>/index.lock` within the bounded retry window (Issue #66, AC #2). The message names the lock file path so a reader knows what to investigate, never a value. */
-  | 'E_LOCK_TIMEOUT';
+  | 'E_LOCK_TIMEOUT'
+  /** The first-party flock addon has no packaged artifact for this platform/arch, or the artifact failed to load (Issue #66 mechanism decision). Fail-closed: there is no pure-JS fallback lock protocol. */
+  | 'E_LOCK_UNAVAILABLE';
 
 export interface EnigmaErrorOptions {
   code: EnigmaErrorCode;

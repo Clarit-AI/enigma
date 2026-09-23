@@ -3,6 +3,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -14,7 +15,6 @@ import {
   __setLockTimingForTesting,
   LOCK_MAX_ATTEMPTS,
   LOCK_RETRY_INTERVAL_MS,
-  LOCK_STALE_MS,
   buildRef,
   findIndexEntry,
   listIndexEntries,
@@ -45,7 +45,6 @@ describe('index-store', () => {
   let originalHome: string | undefined;
   // Saved so afterEach can restore, even if a test mutated the constants.
   const originalTimings = {
-    staleMs: LOCK_STALE_MS,
     retryIntervalMs: LOCK_RETRY_INTERVAL_MS,
     maxAttempts: LOCK_MAX_ATTEMPTS,
   };
@@ -177,7 +176,6 @@ describe('index-store mutateIndex lock (Issue #66)', () => {
   let tmpHome: string;
   let originalHome: string | undefined;
   const originalTimings = {
-    staleMs: LOCK_STALE_MS,
     retryIntervalMs: LOCK_RETRY_INTERVAL_MS,
     maxAttempts: LOCK_MAX_ATTEMPTS,
   };
@@ -195,7 +193,7 @@ describe('index-store mutateIndex lock (Issue #66)', () => {
     rmSync(tmpHome, { recursive: true, force: true });
   });
 
-  it('acquires and releases the lock — file exists during the delta and is gone after (Issue #66, AC #1)', () => {
+  it('anchor is created once and persists across release — release never unlinks (Issue #66, AC #1)', () => {
     let observedDuringDelta: string | null = null;
     let observedMode: number | null = null;
     mutateIndex((cur) => {
@@ -204,41 +202,73 @@ describe('index-store mutateIndex lock (Issue #66)', () => {
       return upsertIndexEntry(cur, makeEntry());
     });
 
-    expect(observedDuringDelta).not.toBeNull();
-    // Three lines: token + pid + createdAtMs (a trailing \n yields a fourth
-    // empty entry on split — verify the non-empty parts explicitly).
-    const lines = observedDuringDelta!.split('\n').filter((line) => line.length > 0);
-    expect(lines).toHaveLength(3);
-    // token: 32-char hex from randomBytes(16).
-    expect(lines[0]).toMatch(/^[0-9a-f]{32}$/);
-    expect(Number.isFinite(Number(lines[1]))).toBe(true);
-    expect(Number.isFinite(Number(lines[2]))).toBe(true);
-    expect(Number(lines[1])).toBe(process.pid);
-
-    // Lock file mode is 0600 (observed inside the critical section, before release).
+    // Anchor survives release (kernel lock is what gets released).
+    expect(existsSync(indexLockPath())).toBe(true);
     expect(observedMode).toBe(0o600);
 
-    // Lock file is released after mutateIndex returns.
-    expect(existsSync(indexLockPath())).toBe(false);
+    // Informational body only: pid + timestamp, never a value. Written
+    // after the lock is held, never read for safety.
+    const lines = observedDuringDelta!.split('\n').filter((line) => line.length > 0);
+    expect(lines).toHaveLength(2);
+    expect(Number(lines[0])).toBe(process.pid);
+    expect(Number.isFinite(Number(lines[1]))).toBe(true);
+
+    // The inode is stable across acquire/release cycles — the anchor is
+    // never renamed, unlinked, or replaced.
+    const ino = statSync(indexLockPath()).ino;
+    for (let i = 0; i < 5; i++) mutateIndex((cur) => cur);
+    expect(statSync(indexLockPath()).ino).toBe(ino);
+    expect(existsSync(indexLockPath())).toBe(true);
   });
 
-  it('release() only unlinks the lock if it still carries our token — a lock a stale-break winner replaced under us is left alone (Issue #66 review)', () => {
+  it('a leftover empty/legacy body is irrelevant and gets rewritten (Issue #66, AC #3 area)', () => {
+    // Simulate an anchor left behind by the removed name-based protocol or
+    // a crash mid-metadata-write: garbage in, acquire still works, body is
+    // rewritten — content is never consulted for safety.
     const lockPath = indexLockPath();
-    let replacementBody = '';
-    mutateIndex((cur) => {
-      // Simulate a stale-break winner replacing our lock file with its own
-      // (different-token) lock while we still believe we hold it. In
-      // practice a *live* holder's lock can't be broken by anyone else —
-      // the stale check requires it to look stale first — but this is
-      // exactly the invariant the token check exists to protect: release()
-      // must never remove a lock it does not own, however it got there.
-      replacementBody = `deadbeefdeadbeefdeadbeefdeadbeef\n424242\n${Date.now()}\n`;
-      writeFileSync(lockPath, replacementBody, { mode: 0o600 });
-      return upsertIndexEntry(cur, makeEntry());
-    });
+    mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
+    writeFileSync(lockPath, 'deadbeefdeadbeefdeadbeefdeadbeef\nnot-a-timestamp\n', { mode: 0o600 });
 
-    expect(existsSync(lockPath)).toBe(true);
-    expect(readFileSync(lockPath, 'utf8')).toBe(replacementBody);
+    mutateIndex((cur) => upsertIndexEntry(cur, makeEntry()));
+
+    const lines = readFileSync(lockPath, 'utf8').split('\n').filter((l) => l.length > 0);
+    expect(lines).toHaveLength(2);
+    expect(Number(lines[0])).toBe(process.pid);
+    expect(readIndex().entries).toHaveLength(1);
+  });
+
+  it('a lock held by a live peer is waited out then times out — never evicted (Issue #66, AC #2)', async () => {
+    const lockPath = indexLockPath();
+    mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
+    writeFileSync(lockPath, '', { mode: 0o600 });
+
+    // Hold the kernel lock through a second open description (flock is per
+    // description, so this contends exactly like another process would).
+    const { loadIndexLock } = await import('../../src/core/native-lock.js');
+    const { openSync, closeSync } = await import('node:fs');
+    const addon = loadIndexLock();
+    const heldFd = openSync(lockPath, 'r+');
+    expect(addon.tryLockSync(heldFd)).toBe(true);
+    const heldIno = statSync(lockPath).ino;
+
+    __setLockTimingForTesting({ retryIntervalMs: 5, maxAttempts: 3 });
+    try {
+      mutateIndex((cur) => cur);
+      expect.unreachable('mutateIndex should have thrown E_LOCK_TIMEOUT');
+    } catch (err) {
+      expect(err).toBeInstanceOf(EnigmaError);
+      expect((err as EnigmaError).code).toBe('E_LOCK_TIMEOUT');
+      expect((err as EnigmaError).message).toContain(lockPath);
+    }
+
+    // Never evicted: same inode, file untouched by the failed waiter.
+    expect(statSync(lockPath).ino).toBe(heldIno);
+
+    // Release the peer hold; the next acquire works immediately.
+    addon.unlockSync(heldFd);
+    closeSync(heldFd);
+    mutateIndex((cur) => upsertIndexEntry(cur, makeEntry()));
+    expect(readIndex().entries).toHaveLength(1);
   });
 
   it('releases the lock in finally even when the delta throws', () => {
@@ -247,7 +277,10 @@ describe('index-store mutateIndex lock (Issue #66)', () => {
         throw new Error('delta blew up');
       }),
     ).toThrowError(/delta blew up/);
-    expect(existsSync(indexLockPath())).toBe(false);
+    // The anchor persists but the kernel lock is free: a follow-up acquire
+    // completes without waiting out the retry budget.
+    mutateIndex((cur) => upsertIndexEntry(cur, makeEntry({ name: 'AFTER' })));
+    expect(readIndex().entries.map((e) => e.name)).toEqual(['AFTER']);
   });
 
   it('does not write the index when the delta throws (lock cleanup, no partial commit)', () => {
@@ -266,60 +299,24 @@ describe('index-store mutateIndex lock (Issue #66)', () => {
     expect(readFileSync(indexPath(), 'utf8')).toBe(before);
   });
 
-  it('breaks a stale lock left by a crashed process and re-acquires (Issue #66, AC #3)', () => {
-    // Plant a lock file whose recorded createdAtMs is well past the stale
-    // threshold. Staleness is judged from the lock body's own content, not
-    // filesystem mtime (see acquireIndexLock), so the body's third field is
-    // what makes this lock look crashed-and-abandoned.
-    const lockPath = indexLockPath();
-    mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
-    const staleCreatedAtMs = Date.now() - LOCK_STALE_MS - 5_000;
-    writeFileSync(lockPath, `deadbeefdeadbeefdeadbeefdeadbeef\n99999\n${staleCreatedAtMs}\n`, { mode: 0o600 });
+  it('repeated failing deltas do not leak fds (acquire closes on every path)', () => {
+    const fdDir = existsSync('/proc/self/fd') ? '/proc/self/fd' : '/dev/fd';
+    // Warm up lazy state (addon cache, first anchor create) before counting.
+    mutateIndex((cur) => cur);
 
-    mutateIndex((cur) => upsertIndexEntry(cur, makeEntry()));
-
-    expect(existsSync(lockPath)).toBe(false);
-    const index = readIndex();
-    expect(index.entries).toHaveLength(1);
-    expect(index.entries[0]?.name).toBe('OPENAI_API_KEY');
-  });
-
-  it('does NOT break a fresh lock held by a live process (waits then times out)', () => {
-    const lockPath = indexLockPath();
-    mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
-    // Fresh (just-now) createdAtMs — must NOT be broken.
-    writeFileSync(lockPath, `deadbeefdeadbeefdeadbeefdeadbeef\n99999\n${Date.now()}\n`, { mode: 0o600 });
-
-    __setLockTimingForTesting({ staleMs: 60_000, retryIntervalMs: 5, maxAttempts: 3 });
-
-    try {
-      mutateIndex((cur) => cur);
-      expect.unreachable('mutateIndex should have thrown E_LOCK_TIMEOUT');
-    } catch (err) {
-      expect(err).toBeInstanceOf(EnigmaError);
-      expect((err as EnigmaError).code).toBe('E_LOCK_TIMEOUT');
-      expect((err as EnigmaError).message).toContain(lockPath);
+    const openFds = () => readdirSync(fdDir).length;
+    const before = openFds();
+    for (let i = 0; i < 40; i++) {
+      try {
+        mutateIndex(() => {
+          throw new Error('delta blew up');
+        });
+      } catch {
+        // expected
+      }
     }
-
-    // The fresh lock is still owned by the simulated peer.
-    expect(existsSync(lockPath)).toBe(true);
-  });
-
-  it('throws E_LOCK_TIMEOUT after the bounded retry window, naming the lock file (Issue #66, AC #2)', () => {
-    const lockPath = indexLockPath();
-    mkdirSync(dirname(lockPath), { recursive: true, mode: 0o700 });
-    writeFileSync(lockPath, `deadbeefdeadbeefdeadbeefdeadbeef\n99999\n${Date.now()}\n`, { mode: 0o600 });
-
-    __setLockTimingForTesting({ staleMs: 60_000, retryIntervalMs: 5, maxAttempts: 3 });
-
-    try {
-      mutateIndex((cur) => cur);
-      expect.unreachable('mutateIndex should have thrown');
-    } catch (err) {
-      expect(err).toBeInstanceOf(EnigmaError);
-      expect((err as EnigmaError).code).toBe('E_LOCK_TIMEOUT');
-      expect((err as EnigmaError).message).toContain(lockPath);
-    }
+    for (let i = 0; i < 40; i++) mutateIndex((cur) => cur);
+    expect(openFds()).toBe(before);
   });
 
   it('two consecutive mutateIndex calls serialize; both commits land (sanity)', () => {
@@ -329,21 +326,15 @@ describe('index-store mutateIndex lock (Issue #66)', () => {
     expect(names).toEqual(['A', 'B']);
   });
 
-  it('sequential simulation (NOT proof of interprocess exclusion — see manager.test.ts AC #6): two mutateIndex calls for different names, each re-reading inside its own lock, both entries survive', () => {
-    // This is a SEQUENTIAL simulation of the AC's race, run entirely within
-    // one process/one call stack — it proves mutateIndex's re-read-inside-
-    // the-lock contract, not that two REAL concurrent processes actually
-    // exclude each other (this test suite has no way to run genuinely
-    // concurrent processes). The real lost-update regression coverage for
-    // AC #6 lives at the `setSecret` level in manager.test.ts, which
-    // exercises the actual async interleaving via a deferred depository
-    // write (QA Low 5, PR #77 review).
+  it('sequential simulation (NOT proof of interprocess exclusion — see the real-process suite in test/integration/index-lock-kernel.test.ts and manager.test.ts AC #6): two mutateIndex calls for different names, each re-reading inside its own lock, both entries survive', () => {
+    // SEQUENTIAL simulation of the AC's race shape — proves mutateIndex's
+    // re-read-inside-the-lock contract only. Real cross-process exclusion
+    // is covered by test/integration/index-lock-kernel.test.ts (real
+    // child processes); the real lost-update regression coverage for AC #6
+    // lives at the `setSecret` level in manager.test.ts (QA Low 5).
     mutateIndex((cur) => upsertIndexEntry(cur, makeEntry({ name: 'NAME_A' })));
     mutateIndex((cur) => {
-      // Inside A's second critical section, simulate "B already wrote NAME_B".
       const seed = upsertIndexEntry(cur, makeEntry({ name: 'NAME_B' }));
-      // Then A adds its own entry on top — the order is reversed, but both names
-      // are present because the names differ.
       return upsertIndexEntry(seed, makeEntry({ name: 'NAME_A' }));
     });
 
@@ -351,17 +342,12 @@ describe('index-store mutateIndex lock (Issue #66)', () => {
     expect(names).toEqual(['NAME_A', 'NAME_B']);
   });
 
-  it('sequential simulation (NOT proof of interprocess exclusion — see manager.test.ts AC #7): a remove interleaved with a set of a different name, both effects persist', () => {
-    // Same caveat as the AC #6 test above: a sequential simulation of the
-    // interleaving, not real interprocess concurrency. The real lost-update
-    // coverage for AC #7 lives at the `deleteSecret`/`setSecret` level in
-    // manager.test.ts (QA Low 5, PR #77 review).
-    // Seed NAME_A, then mutate twice: first remove NAME_A, then set NAME_B.
+  it('sequential simulation (NOT proof of interprocess exclusion — see the real-process suite in test/integration/index-lock-kernel.test.ts and manager.test.ts AC #7): a remove interleaved with a set of a different name, both effects persist', () => {
+    // Same caveat as the test above. Real lost-update coverage for AC #7
+    // lives at the `deleteSecret`/`setSecret` level in manager.test.ts.
     mutateIndex((cur) => upsertIndexEntry(cur, makeEntry({ name: 'NAME_A' })));
 
     mutateIndex((cur) => {
-      // First, simulate a concurrent remove of NAME_A and a concurrent set of
-      // NAME_B that landed between our initial reads and our lock acquire.
       const withoutA = { ...cur, entries: cur.entries.filter((e) => e.name !== 'NAME_A') };
       return upsertIndexEntry(withoutA, makeEntry({ name: 'NAME_B' }));
     });

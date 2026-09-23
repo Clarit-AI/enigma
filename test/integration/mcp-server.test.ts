@@ -133,7 +133,7 @@ describe('enigma MCP server, over real stdio (S3.1 protocol half)', () => {
           arguments: { names: ['OPENAI_API_KEY'], reason: 'integration test', usage: 'interactive', scope: 'global' },
         });
 
-        expect(result.isError).toBeFalsy();
+        expect(result.isError, textOf(result)).toBeFalsy();
         expect(textOf(result)).toBe('Stored OPENAI_API_KEY in encrypted (global)');
 
         const completeNotification = captured.find(
@@ -213,7 +213,7 @@ describe('enigma MCP server, over real stdio (S3.1 protocol half)', () => {
         expect(postResp.status).toBe(200);
 
         const awaited = await client.callTool({ name: 'enigma_await', arguments: { request_id: fallback.request_id } });
-        expect(awaited.isError).toBeFalsy();
+        expect(awaited.isError, textOf(awaited)).toBeFalsy();
         expect(textOf(awaited)).toBe('Stored OPENAI_API_KEY in encrypted (global)');
 
         const transcript = JSON.stringify(captured.map((c) => c.message));

@@ -31,6 +31,36 @@ jobs:
             exit 1
           fi
       - run: npm audit --audit-level=high
+      - run: npm run check:native
+
+  # Validates the COMMITTED native artifacts (the bytes a marketplace
+  # install runs) on each supported platform: binary digest, source
+  # staleness metadata, then a real dlopen+lock smoke of the shipped file.
+  # The fresh-rebuild step is labeled separately — a rebuilt replacement
+  # passing its own smoke does NOT validate what installs ship.
+  native-artifacts:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            label: darwin-arm64
+          - runner: macos-15-intel
+            label: darwin-x64
+          - runner: ubuntu-22.04
+            label: linux-x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '20'
+      - name: Validate committed artifact (shipped bytes) — ${{ matrix.label }}
+        run: node scripts/check-native.mjs
+      - name: Fresh-rebuild smoke (does NOT validate shipped bytes) — ${{ matrix.label }}
+        run: |
+          node scripts/build-native.mjs
+          node scripts/check-native.mjs
 
   toolchain-guard:
     # Issue #29: proves the stale/absent-node_modules guard actually fires,

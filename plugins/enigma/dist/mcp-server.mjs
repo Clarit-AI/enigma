@@ -2983,7 +2983,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve2.call(this, root, ref);
+      let _sch = resolve3.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -3010,7 +3010,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve2(root, ref) {
+    function resolve3(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3840,7 +3840,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve2(baseURI, relativeURI, options) {
+    function resolve3(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const {
         parsed: baseParsed,
@@ -4209,7 +4209,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve2,
+      resolve: resolve3,
       resolveComponent,
       equal,
       serialize,
@@ -10000,7 +10000,7 @@ var require_compile2 = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve2.call(this, root, ref);
+      let _sch = resolve3.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -10027,7 +10027,7 @@ var require_compile2 = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve2(root, ref) {
+    function resolve3(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -21555,17 +21555,17 @@ var recursive = /* @__PURE__ */ new WeakMap();
 var NONE = 0;
 var ASSUMED = 1;
 var PROVEN = 2;
-function isRecursive(inst, stack, resolve2) {
-  const cached2 = recursive.get(inst);
-  if (cached2 !== void 0)
-    return cached2 ? PROVEN : NONE;
+function isRecursive(inst, stack, resolve3) {
+  const cached3 = recursive.get(inst);
+  if (cached3 !== void 0)
+    return cached3 ? PROVEN : NONE;
   if (stack.has(inst))
     return PROVEN;
   stack.add(inst);
   let result = NONE;
   const check2 = (child) => {
     if (result !== PROVEN && child?._zod) {
-      const answer = isRecursive(child, stack, resolve2);
+      const answer = isRecursive(child, stack, resolve3);
       if (answer > result)
         result = answer;
     }
@@ -21576,7 +21576,7 @@ function isRecursive(inst, stack, resolve2) {
       const desc = Object.getOwnPropertyDescriptor(sh, key);
       if (spread && !desc.enumerable)
         continue;
-      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve2) : NONE;
+      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve3) : NONE;
       if (child > answer)
         answer = child;
     }
@@ -21640,7 +21640,7 @@ function isRecursive(inst, stack, resolve2) {
       break;
     // `$ZodLazy` caches its inner on the def, so a resolved edge is followed exactly
     case "lazy": {
-      const inner = def._cachedInner ?? (resolve2 ? inst._zod.innerType : void 0);
+      const inner = def._cachedInner ?? (resolve3 ? inst._zod.innerType : void 0);
       merge2(inner ? isRecursive(inner, stack, false) : ASSUMED);
       break;
     }
@@ -33525,15 +33525,15 @@ function visit(schema, fnOrHandlers) {
   };
   const cache = /* @__PURE__ */ new Map();
   function run(s) {
-    const cached2 = cache.get(s);
-    if (cached2 === RESOLVING) {
+    const cached3 = cache.get(s);
+    if (cached3 === RESOLVING) {
       return new $ZodLazy({
         type: "lazy",
         getter: () => cache.get(s)
       });
     }
-    if (cached2 !== void 0)
-      return cached2;
+    if (cached3 !== void 0)
+      return cached3;
     cache.set(s, RESOLVING);
     const inner = mapInner(s);
     const mapped = fn(inner, inner !== s);
@@ -40048,7 +40048,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
+        await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error62) {
@@ -40065,7 +40065,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve3, reject) => {
       const earlyReject = (error62) => {
         reject(error62);
       };
@@ -40143,7 +40143,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve2(parseResult.data);
+            resolve3(parseResult.data);
           }
         } catch (error62) {
           reject(error62);
@@ -40404,12 +40404,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve2, reject) => {
+    return new Promise((resolve3, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve2, interval);
+      const timeoutId = setTimeout(resolve3, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -41500,7 +41500,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve2) => setTimeout(resolve2, pollInterval));
+      await new Promise((resolve3) => setTimeout(resolve3, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -42164,12 +42164,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve2) => {
+    return new Promise((resolve3) => {
       const json2 = serializeMessage(message);
       if (this._stdout.write(json2)) {
-        resolve2();
+        resolve3();
       } else {
-        this._stdout.once("drain", resolve2);
+        this._stdout.once("drain", resolve3);
       }
     });
   }
@@ -42199,13 +42199,13 @@ var REVEAL_TTL_MS = 5 * 60 * 1e3;
 var SWEEP_INTERVAL_MS = 60 * 1e3;
 var USED_GRACE_MS = 5 * 60 * 1e3;
 function deferred() {
-  let resolve2;
+  let resolve3;
   let reject;
   const promise2 = new Promise((res, rej) => {
-    resolve2 = res;
+    resolve3 = res;
     reject = rej;
   });
-  return { promise: promise2, resolve: resolve2, reject };
+  return { promise: promise2, resolve: resolve3, reject };
 }
 function defaultTtlMs(kind) {
   return kind === "reveal" ? REVEAL_TTL_MS : REQUEST_TTL_MS;
@@ -42425,8 +42425,8 @@ var RequestStore = {
 import { execFile } from "node:child_process";
 var DETECT_TIMEOUT_MS = 2e3;
 function checkBinary(command, args) {
-  return new Promise((resolve2) => {
-    execFile(command, args, { timeout: DETECT_TIMEOUT_MS, maxBuffer: 4096 }, (error62) => resolve2(!error62));
+  return new Promise((resolve3) => {
+    execFile(command, args, { timeout: DETECT_TIMEOUT_MS, maxBuffer: 4096 }, (error62) => resolve3(!error62));
   });
 }
 function detectCloudflared() {
@@ -42445,7 +42445,7 @@ function remoteUnavailable(detail) {
   return new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: `cloudflared: ${detail}` });
 }
 function startCloudflaredTunnel(targetUrl) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const child = spawn("cloudflared", ["tunnel", "--url", targetUrl], { stdio: ["ignore", "ignore", "pipe"] });
     child.unref();
     let stderrBuf = "";
@@ -42483,7 +42483,7 @@ function startCloudflaredTunnel(targetUrl) {
         const killer = setTimeout(() => child.kill("SIGKILL"), 2e3);
         killer.unref();
       };
-      resolve2({
+      resolve3({
         url: match[0],
         binary: "cloudflared",
         stop,
@@ -42512,13 +42512,13 @@ function remoteUnavailable2(detail) {
   return new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: `tailscale: ${detail}` });
 }
 function runTailscale(args, timeoutMs) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     execFile2("tailscale", args, { timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
@@ -42546,7 +42546,7 @@ function offBestEffort() {
 async function startTailscaleServe(port) {
   const dnsName = await selfDnsName();
   const target = `http://127.0.0.1:${port}`;
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const child = spawn2("tailscale", ["serve", `--https=${SERVE_PORT}`, target], { stdio: "ignore" });
     child.unref();
     let settled2 = false;
@@ -42566,7 +42566,7 @@ async function startTailscaleServe(port) {
     const graceTimer = setTimeout(() => {
       if (settled2) return;
       settled2 = true;
-      resolve2({ url: `https://${dnsName}`, binary: "tailscale", stop, waitForUnexpectedExit: () => unexpectedExit });
+      resolve3({ url: `https://${dnsName}`, binary: "tailscale", stop, waitForUnexpectedExit: () => unexpectedExit });
     }, START_GRACE_MS);
     graceTimer.unref();
     child.on("error", () => {
@@ -42911,19 +42911,62 @@ function appendAuditEvent(event) {
 }
 
 // src/core/index-store.ts
-import {
-  chmodSync as chmodSync2,
-  closeSync,
-  linkSync,
-  mkdirSync as mkdirSync2,
-  openSync,
-  readFileSync as readFileSync3,
-  renameSync as renameSync2,
-  unlinkSync,
-  writeFileSync as writeFileSync2
-} from "node:fs";
-import { dirname as dirname3 } from "node:path";
-import { randomBytes as randomBytes3 } from "node:crypto";
+import { chmodSync as chmodSync2, closeSync, ftruncateSync, mkdirSync as mkdirSync2, openSync, writeSync } from "node:fs";
+import { dirname as dirname4 } from "node:path";
+
+// src/core/native-lock.ts
+import { createRequire } from "node:module";
+import { existsSync as existsSync3 } from "node:fs";
+import { dirname as dirname3, resolve as resolve2 } from "node:path";
+import { fileURLToPath } from "node:url";
+var SUPPORTED_NATIVE_TARGETS = ["darwin-arm64", "darwin-x64", "linux-x64"];
+function nativeTargetTag() {
+  return `${process.platform}-${process.arch}`;
+}
+var cached2;
+function candidatePaths(tag) {
+  const here = dirname3(fileURLToPath(import.meta.url));
+  const paths = [];
+  const override = process.env.ENIGMA_NATIVE_DIR;
+  if (override) paths.push(resolve2(override, tag, "index-lock.node"));
+  paths.push(resolve2(here, "..", "native", tag, "index-lock.node"));
+  paths.push(resolve2(here, "..", "..", "plugins", "enigma", "native", tag, "index-lock.node"));
+  paths.push(resolve2(process.cwd(), "plugins", "enigma", "native", tag, "index-lock.node"));
+  return paths;
+}
+function loadIndexLock() {
+  if (cached2) return cached2;
+  const tag = nativeTargetTag();
+  if (!SUPPORTED_NATIVE_TARGETS.includes(tag)) {
+    throw new EnigmaError({
+      code: "E_LOCK_UNAVAILABLE",
+      message: `Enigma's index lock has no packaged native artifact for ${tag}; supported platforms: ${SUPPORTED_NATIVE_TARGETS.join(", ")}. Refusing to run without kernel-held exclusion (no fallback protocol).`
+    });
+  }
+  const paths = candidatePaths(tag);
+  const found = paths.find((p) => existsSync3(p));
+  if (!found) {
+    throw new EnigmaError({
+      code: "E_LOCK_UNAVAILABLE",
+      message: `Enigma's index lock artifact for ${tag} is missing (looked for: ${paths.join(", ")}). Reinstall the plugin; refusing to run without kernel-held exclusion.`
+    });
+  }
+  try {
+    const addon = createRequire(import.meta.url)(found);
+    if (typeof addon.tryLockSync !== "function" || typeof addon.unlockSync !== "function") {
+      throw new Error("missing tryLockSync/unlockSync exports");
+    }
+    cached2 = addon;
+    return addon;
+  } catch (err) {
+    throw new EnigmaError({
+      code: "E_LOCK_UNAVAILABLE",
+      message: `Enigma's index lock artifact for ${tag} failed to load (${found}): ${err instanceof Error ? err.message : String(err)}. Refusing to run without kernel-held exclusion.`
+    });
+  }
+}
+
+// src/core/index-store.ts
 var EMPTY_INDEX = { version: 1, entries: [] };
 function buildRef(name, scope, projectId2) {
   return scope === "global" ? `global/${name}` : `${projectId2}/${name}`;
@@ -42978,7 +43021,6 @@ function listIndexEntries(index, opts = {}) {
     return { ...entry, shadowed: Boolean(shadowedBy) };
   });
 }
-var LOCK_STALE_MS = 3e4;
 var LOCK_RETRY_INTERVAL_MS = 10;
 var LOCK_MAX_ATTEMPTS = 50;
 var SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
@@ -42987,24 +43029,11 @@ function syncSleep(ms) {
   Atomics.wait(SLEEP_BUFFER, 0, 0, ms);
 }
 function ensureLockDir(lockPath) {
-  const dir = dirname3(lockPath);
+  const dir = dirname4(lockPath);
   try {
     mkdirSync2(dir, { recursive: true, mode: 448 });
     chmodSync2(dir, 448);
   } catch {
-  }
-}
-function readLockBody(lockPath) {
-  try {
-    const raw = readFileSync3(lockPath, "utf8");
-    const lines = raw.split("\n");
-    const token = lines[0] ?? "";
-    const pid = lines[1] ?? "";
-    const createdAtMs = Number(lines[2] ?? Number.NaN);
-    if (!token || !Number.isFinite(createdAtMs)) return void 0;
-    return { token, pid, createdAtMs };
-  } catch {
-    return void 0;
   }
 }
 function wrapAcquireError(err, lockPath) {
@@ -43014,101 +43043,65 @@ function wrapAcquireError(err, lockPath) {
     message: `Failed to acquire ${lockPath}: ${cause}`
   });
 }
+function openAnchor(lockPath) {
+  try {
+    return openSync(lockPath, "wx", 384);
+  } catch (err) {
+    if (!(err instanceof Error) || err.code !== "EEXIST") {
+      throw wrapAcquireError(err, lockPath);
+    }
+  }
+  try {
+    return openSync(lockPath, "r+");
+  } catch (err) {
+    throw wrapAcquireError(err, lockPath);
+  }
+}
+function writeInfoMetadata(fd) {
+  try {
+    ftruncateSync(fd, 0);
+    writeSync(fd, `${process.pid}
+${Date.now()}
+`, 0);
+  } catch {
+  }
+}
 function acquireIndexLock() {
   const lockPath = indexLockPath();
   ensureLockDir(lockPath);
-  for (let attempt = 0; attempt < LOCK_MAX_ATTEMPTS; attempt++) {
-    let fd;
-    try {
-      fd = openSync(lockPath, "wx", 384);
-    } catch (err) {
-      if (!(err instanceof Error) || err.code !== "EEXIST") {
-        throw wrapAcquireError(err, lockPath);
-      }
-    }
-    if (fd !== void 0) {
-      const token = randomBytes3(16).toString("hex");
-      let bodyWritten = false;
-      try {
-        writeFileSync2(fd, `${token}
-${process.pid}
-${Date.now()}
-`);
-        bodyWritten = true;
-        closeSync(fd);
-      } catch (err) {
-        if (!bodyWritten) {
-          try {
-            closeSync(fd);
-          } catch {
-          }
-        }
-        try {
-          unlinkSync(lockPath);
-        } catch {
-        }
-        throw wrapAcquireError(err, lockPath);
-      }
-      return {
-        path: lockPath,
-        release: () => {
-          try {
-            const current = readLockBody(lockPath);
-            if (current && current.token === token) {
-              try {
-                unlinkSync(lockPath);
-              } catch {
-              }
+  const addon = loadIndexLock();
+  const fd = openAnchor(lockPath);
+  try {
+    for (let attempt = 0; attempt < LOCK_MAX_ATTEMPTS; attempt++) {
+      if (addon.tryLockSync(fd)) {
+        writeInfoMetadata(fd);
+        return {
+          release: () => {
+            try {
+              addon.unlockSync(fd);
+            } catch {
             }
-          } catch {
+            try {
+              closeSync(fd);
+            } catch {
+            }
           }
-        }
-      };
+        };
+      }
+      syncSleep(LOCK_RETRY_INTERVAL_MS);
     }
-    let body;
+    throw new EnigmaError({
+      code: "E_LOCK_TIMEOUT",
+      message: `Could not acquire ${lockPath} within ${LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS} ms; another process holds the index lock.`
+    });
+  } catch (err) {
     try {
-      body = readLockBody(lockPath);
-    } catch (err) {
-      throw wrapAcquireError(err, lockPath);
+      closeSync(fd);
+    } catch {
     }
-    if (!body) {
-      continue;
-    }
-    const ageMs = Date.now() - body.createdAtMs;
-    if (ageMs > LOCK_STALE_MS) {
-      const tombstone = `${lockPath}.stale-${process.pid}-${randomBytes3(4).toString("hex")}`;
-      try {
-        renameSync2(lockPath, tombstone);
-      } catch (renameErr) {
-        const code = renameErr.code;
-        if (code === "ENOENT" || code === "EEXIST") continue;
-        throw wrapAcquireError(renameErr, lockPath);
-      }
-      const tombstoneBody = readLockBody(tombstone);
-      if (tombstoneBody && Date.now() - tombstoneBody.createdAtMs <= LOCK_STALE_MS) {
-        try {
-          linkSync(tombstone, lockPath);
-        } catch {
-        }
-        try {
-          unlinkSync(tombstone);
-        } catch {
-        }
-        syncSleep(LOCK_RETRY_INTERVAL_MS);
-        continue;
-      }
-      try {
-        unlinkSync(tombstone);
-      } catch {
-      }
-      continue;
-    }
-    syncSleep(LOCK_RETRY_INTERVAL_MS);
+    if (err instanceof EnigmaError) throw err;
+    throw wrapAcquireError(err, lockPath);
   }
-  throw new EnigmaError({
-    code: "E_LOCK_TIMEOUT",
-    message: `Could not acquire ${lockPath} within ${LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS} ms; another process holds the index lock.`
-  });
 }
 function mutateIndex(delta) {
   const lock = acquireIndexLock();
@@ -43122,24 +43115,24 @@ function mutateIndex(delta) {
 }
 
 // src/storage/depositories/encrypted.ts
-import { createCipheriv, createDecipheriv, randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync3, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { createCipheriv, createDecipheriv, randomBytes as randomBytes3 } from "node:crypto";
+import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
 var ALGORITHM = "aes-256-gcm";
 var KEY_BYTES = 32;
 var IV_BYTES = 12;
 var FILE_MODE2 = 384;
 var EMPTY_SECRETS_FILE = { version: 1, entries: {} };
 function readKey() {
-  if (!existsSync3(keyPath())) return void 0;
-  const key = Buffer.from(readFileSync4(keyPath(), "utf8"), "base64");
+  if (!existsSync4(keyPath())) return void 0;
+  const key = Buffer.from(readFileSync3(keyPath(), "utf8"), "base64");
   if (key.length !== KEY_BYTES) readFailed();
   return key;
 }
 function getOrCreateKey() {
   const existing = readKey();
   if (existing) return existing;
-  const key = randomBytes4(KEY_BYTES);
-  writeFileSync3(keyPath(), key.toString("base64"), { mode: FILE_MODE2 });
+  const key = randomBytes3(KEY_BYTES);
+  writeFileSync2(keyPath(), key.toString("base64"), { mode: FILE_MODE2 });
   return key;
 }
 function readSecretsFile() {
@@ -43149,7 +43142,7 @@ function writeSecretsFile(file2) {
   writeJsonFileAtomic(secretsPath(), file2);
 }
 function encryptValue(value, key) {
-  const iv = randomBytes4(IV_BYTES);
+  const iv = randomBytes3(IV_BYTES);
   const cipher = createCipheriv(ALGORITHM, key, iv);
   const ct = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
   const tag = cipher.getAuthTag();
@@ -43213,7 +43206,7 @@ var encryptedDepositoryModule = {
 };
 
 // src/storage/depositories/env.ts
-import { existsSync as existsSync4, readFileSync as readFileSync5, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
 import { join as join3 } from "node:path";
 var BEGIN_MARKER = "# enigma:begin";
 var END_MARKER = "# enigma:end";
@@ -43290,10 +43283,10 @@ function removeManagedValue(content, name) {
 }
 function checkEnvGitignore(projectPath) {
   const gitignorePath = join3(projectPath, ".gitignore");
-  if (!existsSync4(gitignorePath)) {
+  if (!existsSync5(gitignorePath)) {
     return [".env is not gitignored: no .gitignore file found in this project"];
   }
-  const lines = readFileSync5(gitignorePath, "utf8").split(/\r?\n/);
+  const lines = readFileSync4(gitignorePath, "utf8").split(/\r?\n/);
   const covered = lines.some((raw) => {
     const line = raw.trim();
     if (!line || line.startsWith("#")) return false;
@@ -43314,13 +43307,13 @@ function requireProjectPath(ctx) {
 }
 function createEnvDepository(ctx) {
   const envFilePath = join3(requireProjectPath(ctx), ".env");
-  const readEnvFile = () => existsSync4(envFilePath) ? readFileSync5(envFilePath, "utf8") : "";
+  const readEnvFile = () => existsSync5(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
   return {
     id: "env",
     promptProfile: "none",
     // ref is the bare NAME for env — the file itself is located via DepositoryContext.projectPath.
     async set(ref, value) {
-      writeFileSync4(envFilePath, upsertManagedBlock(readEnvFile(), ref, value), { mode: FILE_MODE3 });
+      writeFileSync3(envFilePath, upsertManagedBlock(readEnvFile(), ref, value), { mode: FILE_MODE3 });
       return ref;
     },
     async resolve(ref) {
@@ -43332,7 +43325,7 @@ function createEnvDepository(ctx) {
     },
     async delete(ref) {
       const content = readEnvFile();
-      if (content) writeFileSync4(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE3 });
+      if (content) writeFileSync3(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE3 });
     },
     async has(ref) {
       return extractManagedValue(readEnvFile(), ref) !== void 0;
@@ -43358,24 +43351,24 @@ var PROBE_REF = "__enigma_detect_probe__";
 var REF_PATTERN = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH = 512;
 function runSecretTool(args) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     execFile3(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecretToolWithStdin(args, value) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const child = execFile3(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -43508,7 +43501,7 @@ var linuxSecretServiceDepositoryModule = {
 
 // src/storage/depositories/macos-keychain.ts
 import { execFile as execFile4 } from "node:child_process";
-import { existsSync as existsSync5 } from "node:fs";
+import { existsSync as existsSync6 } from "node:fs";
 var SECURITY_BIN = "/usr/bin/security";
 var SERVICE2 = "enigma";
 var EXEC_TIMEOUT_MS2 = 1e4;
@@ -43520,24 +43513,24 @@ var REF_PATTERN2 = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH2 = 512;
 var MARKER_BYTE = 1;
 function runSecurity(args) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     execFile4(SECURITY_BIN, args, { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecurityBatch(line) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const child = execFile4(SECURITY_BIN, ["-i"], { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -43675,7 +43668,7 @@ var macosKeychainDepositoryModule = {
     if (process.platform !== "darwin") {
       return { id: "keychain", promptProfile: "may-prompt", available: false, reason: "not running on macOS" };
     }
-    const available = existsSync5(SECURITY_BIN);
+    const available = existsSync6(SECURITY_BIN);
     return {
       id: "keychain",
       promptProfile: "may-prompt",
@@ -43699,24 +43692,24 @@ var REF_MAX_LENGTH3 = 512;
 var VAULT_MISSING_PATTERN = /isn't a vault|no vault named|could not find vault/i;
 var ITEM_MISSING_PATTERN = /isn't an item|could not find item|item.*not found/i;
 function runOp(args) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     execFile5(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runOpWithStdin(args, stdinData) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const child = execFile5(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve2({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -44176,7 +44169,7 @@ ${remoteNote}` : outcome.text;
 
 // src/mcp/tools/doctor.ts
 import { execFile as execFile6 } from "node:child_process";
-import { existsSync as existsSync6 } from "node:fs";
+import { existsSync as existsSync7 } from "node:fs";
 import { platform, release } from "node:os";
 import { promisify } from "node:util";
 
@@ -44295,8 +44288,8 @@ function registerDoctorTool(server) {
         `Client elicitation support: url=${supportsUrlElicitation(server.server)} form=${supportsFormElicitation(server.server)}`,
         `Config home: ${enigmaHome()}`,
         `Index: ${indexStatus}`,
-        `Vault key: ${existsSync6(keyPath()) ? "present" : "missing"}`,
-        `Vault file: ${existsSync6(secretsPath()) ? "present" : "missing"}`,
+        `Vault key: ${existsSync7(keyPath()) ? "present" : "missing"}`,
+        `Vault file: ${existsSync7(secretsPath()) ? "present" : "missing"}`,
         `Manifest gaps: ${manifestGaps.length === 0 ? "none" : manifestGaps.join(", ")}`,
         `Paths: index=${indexPath()} audit=${auditLogPath()} config=${configPath()}`
       ];
@@ -44319,7 +44312,7 @@ function registerDoctorTool(server) {
 }
 
 // src/mcp/tools/import.ts
-import { existsSync as existsSync8, readFileSync as readFileSync7 } from "node:fs";
+import { existsSync as existsSync9, readFileSync as readFileSync6 } from "node:fs";
 import { isAbsolute, join as join5 } from "node:path";
 
 // src/storage/dotenv-file.ts
@@ -44480,19 +44473,19 @@ function removeDotEnvEntries(content, names, opts = {}) {
 }
 
 // src/storage/import-commit.ts
-import { randomBytes as randomBytes5 } from "node:crypto";
-import { existsSync as existsSync7, readFileSync as readFileSync6, renameSync as renameSync3, unlinkSync as unlinkSync2, writeFileSync as writeFileSync5 } from "node:fs";
+import { randomBytes as randomBytes4 } from "node:crypto";
+import { existsSync as existsSync8, readFileSync as readFileSync5, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 var FILE_MODE4 = 384;
 function writeFileAtomic(path, content, mode) {
-  const tmpPath = `${path}.${randomBytes5(6).toString("hex")}.tmp`;
+  const tmpPath = `${path}.${randomBytes4(6).toString("hex")}.tmp`;
   try {
-    writeFileSync5(tmpPath, content, { mode });
-    renameSync3(tmpPath, path);
+    writeFileSync4(tmpPath, content, { mode });
+    renameSync2(tmpPath, path);
     return { ok: true };
   } catch (err) {
     const error62 = err instanceof Error ? err.message : String(err);
     try {
-      if (existsSync7(tmpPath)) unlinkSync2(tmpPath);
+      if (existsSync8(tmpPath)) unlinkSync(tmpPath);
       return { ok: false, error: error62 };
     } catch {
       return { ok: false, error: error62, leftoverPath: tmpPath };
@@ -44549,7 +44542,7 @@ async function commitImport(opts) {
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
-  const currentContent = existsSync7(opts.envFilePath) ? readFileSync6(opts.envFilePath, "utf8") : "";
+  const currentContent = existsSync8(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
   const valueByName = new Map(opts.entries.map((e) => [e.name, e.value]));
   const currentValueByName = new Map(parseDotEnv(currentContent).entries.map((e) => [e.name, e.value]));
   const toRemove = [];
@@ -44895,7 +44888,7 @@ var PayloadTooLargeError = class extends Error {
   }
 };
 function readBody(req, maxBytes = MAX_BODY_BYTES) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const chunks = [];
     let total = 0;
     let settled2 = false;
@@ -44916,7 +44909,7 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
     req.on("end", () => {
       if (settled2) return;
       settled2 = true;
-      resolve2(Buffer.concat(chunks));
+      resolve3(Buffer.concat(chunks));
     });
     req.on("error", settleError);
   });
@@ -47118,7 +47111,7 @@ var DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1e3;
 var state;
 var starting;
 function settled(value) {
-  return new Promise((resolve2) => resolve2(value));
+  return new Promise((resolve3) => resolve3(value));
 }
 function toHandle(s) {
   return { port: s.port, origin: `http://${s.host}:${s.port}`, close: stopServer };
@@ -47143,7 +47136,7 @@ function startServer(opts = {}) {
       (_resolve, reject) => reject(new Error(`refusing to bind ${host} over plain HTTP; pass allowInsecureHttp to override (ADR-005)`))
     );
   }
-  starting = new Promise((resolve2, reject) => {
+  starting = new Promise((resolve3, reject) => {
     const server = http.createServer((req, res) => {
       if (state) resetIdleTimer(state);
       void handleRequest(req, res);
@@ -47159,7 +47152,7 @@ function startServer(opts = {}) {
       state = newState;
       resetIdleTimer(newState);
       starting = void 0;
-      resolve2(toHandle(newState));
+      resolve3(toHandle(newState));
     });
   });
   return starting;
@@ -47169,7 +47162,7 @@ function stopServer() {
   if (!current) return settled(void 0);
   state = void 0;
   if (current.idleTimer) clearTimeout(current.idleTimer);
-  return new Promise((resolve2) => current.server.close(() => resolve2()));
+  return new Promise((resolve3) => current.server.close(() => resolve3()));
 }
 
 // src/mcp/schemas.ts
@@ -47210,10 +47203,10 @@ function registerImportTool(server) {
       const projectPath = findProjectPath(cwd);
       const pathArg = args.path ?? ".env";
       const absPath = isAbsolute(pathArg) ? pathArg : join5(cwd, pathArg);
-      if (!existsSync8(absPath)) {
+      if (!existsSync9(absPath)) {
         return errorResult(new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` }));
       }
-      const content = readFileSync7(absPath, "utf8");
+      const content = readFileSync6(absPath, "utf8");
       const parsed = parseDotEnv(content);
       if (parsed.entries.length === 0) {
         return textResult(
@@ -47363,7 +47356,7 @@ function buildHiddenAnswerScript(name, reason) {
 // src/native/exec.ts
 import { spawn as spawn3 } from "node:child_process";
 function execWithStdin(command, args, input2, opts) {
-  return new Promise((resolve2, reject) => {
+  return new Promise((resolve3, reject) => {
     const child = spawn3(command, args, { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
@@ -47405,7 +47398,7 @@ function execWithStdin(command, args, input2, opts) {
       finish(() => reject(new EnigmaError({ code: "E_UI_UNAVAILABLE", message: `${command} failed to start` })));
     });
     child.on("close", (code) => {
-      finish(() => resolve2({ code, stdout, stderr }));
+      finish(() => resolve3({ code, stdout, stderr }));
     });
     child.stdin.on("error", () => {
     });

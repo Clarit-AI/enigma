@@ -20,10 +20,14 @@
     "enigma": "plugins/enigma/dist/cli.mjs"
   },
   "files": [
-    "plugins/enigma/dist"
+    "plugins/enigma/dist",
+    "plugins/enigma/native"
   ],
   "scripts": {
     "build": "node scripts/build.mjs",
+    "build:native": "node scripts/build-native.mjs",
+    "build:native:all": "node scripts/build-native.mjs --target darwin-arm64 && node scripts/build-native.mjs --target darwin-x64 && node scripts/build-native.mjs --target linux-x64",
+    "check:native": "node scripts/check-native.mjs",
     "check-toolchain": "node scripts/check-toolchain.mjs",
     "lint": "npm run check-toolchain && eslint .",
     "typecheck": "npm run check-toolchain && tsc --noEmit",
