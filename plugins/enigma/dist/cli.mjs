@@ -5004,6 +5004,7 @@ function report(data, json, cwd, note) {
 `);
   } else {
     const lines = [];
+    if (data.error) lines.push(`${data.error.code}: ${data.error.message}`);
     if (note) lines.push(note);
     if (data.imported.length > 0 || data.failed.length > 0) {
       const results = [
@@ -5023,7 +5024,7 @@ function report(data, json, cwd, note) {
     process.stdout.write(`${lines.filter((l) => l.length > 0).join("\n")}
 `);
   }
-  return data.failed.length > 0 ? 1 : 0;
+  return data.failed.length > 0 || data.error !== void 0 ? 1 : 0;
 }
 async function runBrowserFlow(entries, opts) {
   const handle = await startServer();
@@ -5044,22 +5045,57 @@ async function runBrowserFlow(entries, opts) {
   try {
     await RequestStore.waitForFulfilled(record.id);
   } catch (err) {
-    await handle.close();
-    const note = err instanceof OutcomeUnknownError ? "Import outcome unknown: the page was used but no result was recorded. Some secrets may already be stored \u2014 run `enigma list` to check before retrying." : err instanceof RequestExpiredError ? "Import link expired before it was completed." : "Import failed unexpectedly before it was completed.";
-    return report(
-      {
-        imported: [],
-        failed: [],
-        notAttempted: entries.map((e) => e.name),
-        skippedInvalid: opts.skippedInvalid,
-        skippedMismatch: [],
-        warnings: [],
-        fileRewritten: false
-      },
-      opts.json,
-      opts.cwd,
-      note
-    );
+    try {
+      await handle.close();
+    } catch (closeErr) {
+      process.stderr.write(
+        `warning: could not close the import picker cleanly: ${closeErr instanceof Error ? closeErr.message : String(closeErr)}
+`
+      );
+    }
+    if (err instanceof OutcomeUnknownError) {
+      return report(
+        {
+          imported: [],
+          failed: [],
+          // NOT notAttempted: the form WAS used, so writes may already have
+          // happened — nothing here can claim the names were never attempted.
+          notAttempted: [],
+          skippedInvalid: opts.skippedInvalid,
+          skippedMismatch: [],
+          warnings: [],
+          fileRewritten: false,
+          error: {
+            code: "E_OUTCOME_UNKNOWN",
+            message: "the page was used but no result was recorded. Some secrets may already be stored \u2014 run `enigma list` to check before retrying."
+          }
+        },
+        opts.json,
+        opts.cwd
+      );
+    }
+    if (err instanceof RequestExpiredError) {
+      return report(
+        {
+          imported: [],
+          failed: [],
+          // Accurate here: a never-used expiry means no submission ran, so
+          // every name really was never attempted.
+          notAttempted: entries.map((e) => e.name),
+          skippedInvalid: opts.skippedInvalid,
+          skippedMismatch: [],
+          warnings: [],
+          fileRewritten: false,
+          error: {
+            code: "E_REQUEST_EXPIRED",
+            message: "the import link expired before it was completed."
+          }
+        },
+        opts.json,
+        opts.cwd
+      );
+    }
+    throw err;
   }
   await handle.close();
   const finalRecord = RequestStore.get(record.id);
