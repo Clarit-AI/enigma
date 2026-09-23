@@ -72,6 +72,8 @@ Boolean flags accept an explicit `--flag=true|false|yes|no|0|1` form too (case-i
 
 Corrupt/unparsable on-disk JSON never surfaces a raw `SyntaxError` (Issue #18): `index.json` → `E_INDEX_CORRUPT`, `secrets.enc` → `E_VAULT_CORRUPT` (naming depository `encrypted`), `config.json` and project `.enigma.json` → `E_CONFIG_CORRUPT`. Every case names the file's path and says to fix or remove it by hand; none ever include the file's actual bytes.
 
+`~/.config/enigma/index.lock` (0600; Issue #66): interprocess lock file guarding `mutateIndex`'s re-read → delta → write critical section. Body is two lines: `<pid>\n<createdAtMs>\n` (debug visibility only, never a value). Acquired with `O_EXCL`; stale (>30 s) locks are broken via tombstone rename so only one breaker wins; bounded-retry exhaustion surfaces as `E_LOCK_TIMEOUT` naming the lock path. Callers never touch this file directly — `mutateIndex` owns its entire lifecycle.
+
 `~/.config/enigma/secrets.enc` (0600): `{ "version": 1, "entries": { "<ref>": { "iv": b64, "tag": b64, "ct": b64 } } }`; key at `~/.config/enigma/enigma.key` (0600, 32 random bytes, base64).
 
 `~/.config/enigma/config.json`: `{ "defaultDepository"?: ID, "remote"?: "cloudflared"|"tailscale", "tripwire"?: { "depositories": ID[] }, "ui"?: "web"|"native" }`.
