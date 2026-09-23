@@ -30,9 +30,9 @@
 
 ## Current Status
 
-- **Last updated**: 2026-09-15
-- **Current iteration goal**: v1 — Modules 1–5 of the PRD
-- **Open PRs**: none
+- **Last updated**: 2026-09-23
+- **Current iteration goal**: v0.3.0 — milestone `v0.3.0` (Issues #66–#73): repo-level project scope + `enigma migrate-scope`, extensible request form, wake-on-submit + idle-timeout fix, #62 recovery-signal correction, release + KHA marketplace cross-listing. Plan of record: Traycer artifact `v0-3-0-plan` (epic `83430143-11ac-4d11-9ebd-bdec9d92b587`), critiqued in `v0-3-0-plan-critique`.
+- **Shipped**: `0.2.0` (`enigma--v0.2.0`).
 - **Known tech debt**: see the bottom of `docs/feature-log.md`
 
 ---
@@ -46,39 +46,62 @@
 - **API contract document**: `docs/api-contracts.md` is required and is the contract workers implement against.
 - **Code style**: `docs/style-guide.md`.
 
+### v0.3.0 decisions (confirmed 2026-09-22)
+
+- **Project identity vs location**: `projectId` hashes the repository's canonical common git dir (`findRepoIdentityPath`, pure fs, `realpath`), so every worktree of a repo shares project scope. `findProjectPath` stays lexical and still locates `projectPath`, the `env` depository `.env`, and the 1Password title folder. Ids are unchanged only for a normal clone reached through its physical path (#67).
+- **Migration, not fallback**: legacy entries are re-keyed explicitly by `enigma migrate-scope` (index-only, dry run by default), surfaced by doctor/`enigma_doctor`/SessionStart. No read-time fallback (#72).
+- **Index writes are serialized** by an `O_EXCL` lock file with a short, await-free critical section that re-reads the index (#66).
+- **Rotate replaces, then removes the old copy** in the same depository; a failed cleanup warns and audits but does not fail the rotate (#70).
+- **Request form** parses a pasted `.env` blob server-side on submit; unvalidated name text is counted, never echoed (#71).
+- **Fallback wake-up** via `GET /r/:id/status` (state only); the local server never idles out while a request is open; a used record swept without results surfaces `E_OUTCOME_UNKNOWN` (#69).
+
 ---
 
 ## Execution Routing Policy
 
 ```yaml
 implementation:
-  harness: claude
-  model: sonnet
+  harness: opencode
+  model: minimax-coding-plan:MiniMax-M3
   profile: null
-  reasoning_effort: high
+  reasoning_effort: thinking
   permission_mode: full_access
+  alternate:            # use when Claude-harness skills/hooks/tools materially help the task
+    harness: claude
+    model: sonnet
+    reasoning_effort: high
 fix:
-  harness: claude
-  model: sonnet
+  harness: opencode
+  model: minimax-coding-plan:MiniMax-M3
   profile: null
-  reasoning_effort: high
+  reasoning_effort: thinking
   permission_mode: full_access
+  alternate:
+    harness: claude
+    model: sonnet
+    reasoning_effort: high
 prototype: {}
-qa:
-  harness: qwen
-  model: gemini-3.8-flash-high
+explore:
+  harness: devin
+  model: swe-2-high     # user asked for SWE-2.5; the Devin harness lists no swe-2.5 as of 2026-09-23
   profile: null
   reasoning_effort: null
   permission_mode: full_access
+qa:
+  harness: opencode
+  model: xiaomi-token-plan-sgp:mimo-v2.6-pro
+  profile: null
+  reasoning_effort: high
+  permission_mode: full_access
 review:
   harness: codex
-  model: gpt-5.6-sol
+  model: gpt-6-sol
   profile: null
   reasoning_effort: high
   permission_mode: full_access
 ```
 
-Lanes that must run Claude-native executable skills stay on `claude`. Per the standing approval of 2026-09-08, a delegated lane may move to Opus or Fable when the task genuinely needs it; the lead states why. `full_access` is Traycer's default; QA and review are read-only by prompt and are verified by clean-worktree and unchanged-head checks.
+Routes updated by the user 2026-09-23 for v0.3.0. Lanes that must run Claude-native executable skills stay on `claude`. Per the standing approval of 2026-09-08, a delegated lane may move to Opus or Fable when the task genuinely needs it; the lead states why. `full_access` is Traycer's default; QA and review are read-only by prompt and are verified by clean-worktree and unchanged-head checks.
 
 ---
 
