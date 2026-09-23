@@ -409,7 +409,7 @@ import { dirname as dirname4 } from "node:path";
 // src/core/native-lock.ts
 import { createRequire } from "node:module";
 import { existsSync as existsSync3 } from "node:fs";
-import { dirname as dirname3, resolve as resolve2 } from "node:path";
+import { basename as basename2, dirname as dirname3, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 var SUPPORTED_NATIVE_TARGETS = ["darwin-arm64", "darwin-x64", "linux-x64"];
 var HOST_TAG = `${process.platform}-${process.arch}`;
@@ -417,15 +417,22 @@ function nativeTargetTag() {
   return HOST_TAG;
 }
 var cached;
-function candidatePaths(tag) {
-  const here = dirname3(fileURLToPath(import.meta.url));
-  const paths = [];
+function artifactLocation(tag) {
   const override = process.env.ENIGMA_NATIVE_DIR;
-  if (override) paths.push(resolve2(override, tag, "index-lock.node"));
-  paths.push(resolve2(here, "..", "native", tag, "index-lock.node"));
-  paths.push(resolve2(here, "..", "..", "plugins", "enigma", "native", tag, "index-lock.node"));
-  paths.push(resolve2(process.cwd(), "plugins", "enigma", "native", tag, "index-lock.node"));
-  return paths;
+  if (override) {
+    return { path: resolve2(override, tag, "index-lock.node"), origin: "ENIGMA_NATIVE_DIR" };
+  }
+  const here = dirname3(fileURLToPath(import.meta.url));
+  if (basename2(here) === "dist") {
+    return { path: resolve2(here, "..", "native", tag, "index-lock.node"), origin: "installed package layout" };
+  }
+  if (basename2(here) === "core" && basename2(dirname3(here)) === "src") {
+    return {
+      path: resolve2(here, "..", "..", "plugins", "enigma", "native", tag, "index-lock.node"),
+      origin: "source-tree layout"
+    };
+  }
+  return void 0;
 }
 function loadIndexLock() {
   if (cached) return cached;
@@ -436,14 +443,20 @@ function loadIndexLock() {
       message: `Enigma's index lock has no packaged native artifact for ${tag}; supported platforms: ${SUPPORTED_NATIVE_TARGETS.join(", ")}. Refusing to run without kernel-held exclusion (no fallback protocol).`
     });
   }
-  const paths = candidatePaths(tag);
-  const found = paths.find((p) => existsSync3(p));
-  if (!found) {
+  const artifact = artifactLocation(tag);
+  if (!artifact) {
     throw new EnigmaError({
       code: "E_LOCK_UNAVAILABLE",
-      message: `Enigma's index lock artifact for ${tag} is missing (looked for: ${paths.join(", ")}). Reinstall the plugin; refusing to run without kernel-held exclusion.`
+      message: `Enigma's index lock cannot locate a native artifact for ${tag}: this module (${fileURLToPath(import.meta.url)}) is not in a recognized layout (installed <pkg>/dist or the <repo>/src/core source tree). Set ENIGMA_NATIVE_DIR to the directory containing the per-platform artifacts; refusing to run without kernel-held exclusion.`
     });
   }
+  if (!existsSync3(artifact.path)) {
+    throw new EnigmaError({
+      code: "E_LOCK_UNAVAILABLE",
+      message: `Enigma's index lock artifact for ${tag} is missing (expected at ${artifact.path} via ${artifact.origin}${artifact.origin === "ENIGMA_NATIVE_DIR" ? " \u2014 the override is authoritative; no other location was searched" : ""}). Reinstall the plugin; refusing to run without kernel-held exclusion.`
+    });
+  }
+  const found = artifact.path;
   try {
     const addon = createRequire(import.meta.url)(found);
     if (typeof addon.tryLockSync !== "function" || typeof addon.unlockSync !== "function") {
@@ -1174,7 +1187,7 @@ var macosKeychainDepositoryModule = {
 
 // src/storage/depositories/onepassword.ts
 import { execFile as execFile3 } from "node:child_process";
-import { basename as basename2 } from "node:path";
+import { basename as basename3 } from "node:path";
 var OP_BIN = "op";
 var VAULT = "Enigma";
 var MIN_MAJOR_VERSION = 2;
@@ -1280,7 +1293,7 @@ function buildTitle(ref, ctx) {
   const name = nameFromRef(ref);
   const isGlobal = ref === name || ref.startsWith("global/");
   if (isGlobal || !ctx.projectPath) return name;
-  return `${name} \xB7 ${basename2(ctx.projectPath)}`;
+  return `${name} \xB7 ${basename3(ctx.projectPath)}`;
 }
 function itemTemplate(title, value) {
   return JSON.stringify({
