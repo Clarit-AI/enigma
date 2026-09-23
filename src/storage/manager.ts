@@ -210,11 +210,19 @@ export async function deleteSecret(name: string, opts: DeleteSecretOptions): Pro
 
   try {
     mutateIndex((current) => {
-      // Issue #66: re-check E_NOT_FOUND inside the lock so a concurrent
-      // writer that already removed this entry between our initial read and
-      // the lock acquire is reported as such instead of being silently lost.
-      const currentRemoved = resolveIndexEntry(current, name, opts.scope, pid);
-      if (!currentRemoved) {
+      // Issue #66 (PR #77 review): remove exactly the entry we resolved and
+      // deleted from the depository before the await — matched by
+      // name+scope+projectId AND ref, not a fresh scope resolution. A fresh
+      // `resolveIndexEntry(current, name, opts.scope, pid)` re-applies D1.5
+      // shadowing against the *current* index: if a same-name project
+      // `setSecret` committed during the `depository.delete` await, an
+      // omitted-scope global delete would resolve to (and remove) that new
+      // project entry instead of refusing, leaving the just-deleted global
+      // entry dangling. Matching the original entry's identity, including
+      // `ref`, ensures we only ever remove the entry that was actually
+      // deleted — never guess at a different one.
+      const currentRemoved = findIndexEntry(current, removed.name, removed.scope, removed.projectId);
+      if (!currentRemoved || currentRemoved.ref !== removed.ref) {
         throw new EnigmaError({ code: 'E_NOT_FOUND', message: `${name} not found`, secretName: name });
       }
       return { ...current, entries: current.entries.filter((e) => e !== currentRemoved) };
