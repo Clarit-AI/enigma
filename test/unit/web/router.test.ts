@@ -42,6 +42,26 @@ describe('router', () => {
     expect(resp.status).toBe(404);
   });
 
+  it('serves /static/request-form.js as JavaScript with the security headers (Issue #71)', async () => {
+    const resp = await fetch(`${origin}/static/request-form.js`);
+    expect(resp.status).toBe(200);
+    expect(resp.headers.get('content-type')).toContain('javascript');
+    expect(resp.headers.get('content-security-policy')).toBe(
+      "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'",
+    );
+    expect(resp.headers.get('x-frame-options')).toBe('DENY');
+    expect(resp.headers.get('cache-control')).toBe('no-store');
+    const js = await resp.text();
+    expect(js).toContain('add-secret');
+    expect(js).toContain('extra_name_');
+    expect(js).toContain('extra_value_');
+  });
+
+  it('does not serve /static/request-form.js for a non-GET method', async () => {
+    const resp = await fetch(`${origin}/static/request-form.js`, { method: 'POST' });
+    expect(resp.status).toBe(404);
+  });
+
   it('serves /static/reveal.js as JavaScript', async () => {
     const resp = await fetch(`${origin}/static/reveal.js`);
     expect(resp.status).toBe(200);
