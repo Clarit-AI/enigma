@@ -25,6 +25,14 @@ interface ImportReport {
   warnings: string[];
   fileRewritten: boolean;
   depository?: DepositoryId;
+  /**
+   * A request-level failure that ended the browser flow before per-name
+   * results existed (e.g. the link expired unused, or the outcome is
+   * unknown). Carried as a structured field — not the text-only `note` —
+   * so --json surfaces a stable, distinguishable code and the exit code
+   * below is nonzero: a waiter rejection is never a success.
+   */
+  error?: { code: string; message: string };
 }
 
 function report(data: ImportReport, json: boolean, cwd: string, note?: string): number {
@@ -32,6 +40,7 @@ function report(data: ImportReport, json: boolean, cwd: string, note?: string): 
     process.stdout.write(`${JSON.stringify(data)}\n`);
   } else {
     const lines: string[] = [];
+    if (data.error) lines.push(`${data.error.code}: ${data.error.message}`);
     if (note) lines.push(note);
     if (data.imported.length > 0 || data.failed.length > 0) {
       const results: RequestNameResult[] = [
@@ -50,7 +59,7 @@ function report(data: ImportReport, json: boolean, cwd: string, note?: string): 
     }
     process.stdout.write(`${lines.filter((l) => l.length > 0).join('\n')}\n`);
   }
-  return data.failed.length > 0 ? 1 : 0;
+  return data.failed.length > 0 || data.error !== undefined ? 1 : 0;
 }
 
 async function runBrowserFlow(
@@ -81,36 +90,69 @@ async function runBrowserFlow(
   try {
     await RequestStore.waitForFulfilled(record.id);
   } catch (err) {
-    await handle.close();
+    // The waiter rejection is the primary error the user must see; a close
+    // failure on the way out is secondary cleanup — warn on stderr, never
+    // let it mask or replace the primary error.
+    try {
+      await handle.close();
+    } catch (closeErr) {
+      process.stderr.write(
+        `warning: could not close the import picker cleanly: ${closeErr instanceof Error ? closeErr.message : String(closeErr)}\n`,
+      );
+    }
     // Issue #69 AC #5: distinguish a record that was used (the human opened
     // and submitted the form) but never produced results — the names may
     // already be stored — from one that was never used at all (a plain
-    // expiry). The MCP tools map this to `E_OUTCOME_UNKNOWN`; the CLI uses
-    // its own note here because it reports to a human via stdout, not to
-    // the model.
-    // Never-used expiry is typed (Kimi QA AC5): RequestExpiredError means
-    // the link died unused — "expired". Anything else is unexpected and
-    // must NOT be misreported as an expiry (the old blanket else did).
-    const note =
-      err instanceof OutcomeUnknownError
-        ? 'Import outcome unknown: the page was used but no result was recorded. Some secrets may already be stored — run `enigma list` to check before retrying.'
-        : err instanceof RequestExpiredError
-          ? 'Import link expired before it was completed.'
-          : 'Import failed unexpectedly before it was completed.';
-    return report(
-      {
-        imported: [],
-        failed: [],
-        notAttempted: entries.map((e) => e.name),
-        skippedInvalid: opts.skippedInvalid,
-        skippedMismatch: [],
-        warnings: [],
-        fileRewritten: false,
-      },
-      opts.json,
-      opts.cwd,
-      note,
-    );
+    // expiry). Both are EXPECTED rejections and map to stable error codes
+    // in the report's `error` field — nonzero exit, and a distinguishable
+    // diagnostic in --json (where a text-only note would be dropped).
+    // Anything else is unexpected and propagates unchanged — never
+    // misreported as an expiry or a fabricated success (the old code
+    // returned report({failed: []}) for every rejection, exiting 0).
+    if (err instanceof OutcomeUnknownError) {
+      return report(
+        {
+          imported: [],
+          failed: [],
+          // NOT notAttempted: the form WAS used, so writes may already have
+          // happened — nothing here can claim the names were never attempted.
+          notAttempted: [],
+          skippedInvalid: opts.skippedInvalid,
+          skippedMismatch: [],
+          warnings: [],
+          fileRewritten: false,
+          error: {
+            code: 'E_OUTCOME_UNKNOWN',
+            message:
+              'the page was used but no result was recorded. Some secrets may already be stored — run `enigma list` to check before retrying.',
+          },
+        },
+        opts.json,
+        opts.cwd,
+      );
+    }
+    if (err instanceof RequestExpiredError) {
+      return report(
+        {
+          imported: [],
+          failed: [],
+          // Accurate here: a never-used expiry means no submission ran, so
+          // every name really was never attempted.
+          notAttempted: entries.map((e) => e.name),
+          skippedInvalid: opts.skippedInvalid,
+          skippedMismatch: [],
+          warnings: [],
+          fileRewritten: false,
+          error: {
+            code: 'E_REQUEST_EXPIRED',
+            message: 'the import link expired before it was completed.',
+          },
+        },
+        opts.json,
+        opts.cwd,
+      );
+    }
+    throw err;
   }
   await handle.close();
 
