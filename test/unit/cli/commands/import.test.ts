@@ -420,4 +420,35 @@ describe('cmdImport', () => {
     expect(errOut).toContain('warning');
     expect(serverMock.closeCount).toBe(1);
   });
+
+  it('a .env over the 200-name import cap fails bounded — the acquired server handle is still closed exactly once (PR #78 review: setup throws leaked the socket)', async () => {
+    // 201 distinct, individually-valid names: parseDotEnv accepts them all and
+    // RequestStore.create throws the real capacity error AFTER startServer().
+    const lines = Array.from({ length: 201 }, (_, i) => `KEY_${String(i).padStart(3, '0')}=v${i}\n`);
+    writeFileSync(envFilePath, lines.join(''));
+
+    await expect(cmdImport(['.env'])).rejects.toThrow('between 1 and 200');
+
+    // The handle WAS opened (no pre-acquisition validation) — so the proof is
+    // that it was closed exactly once even though create threw before the wait.
+    expect(serverMock.closeCount).toBe(1);
+    expect(stdoutText()).toBe('');
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+  });
+
+  it('an injected RequestStore.create failure after start still closes the handle — and the primary error survives even when close also fails', async () => {
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
+    const boom = new Error('create boom');
+    vi.spyOn(RequestStore, 'create').mockImplementationOnce(() => {
+      throw boom;
+    });
+    serverMock.failNextClose = true;
+
+    await expect(cmdImport(['.env'])).rejects.toBe(boom);
+
+    expect(serverMock.closeCount).toBe(1);
+    const errOut = stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    expect(errOut).toContain('warning');
+    expect(stdoutText()).toBe('');
+  });
 });
