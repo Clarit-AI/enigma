@@ -42220,7 +42220,7 @@ function expireRecord(id) {
   records.delete(id);
   const waiter = waiters.get(id);
   if (waiter) {
-    waiter.reject(new Error("request expired"));
+    waiter.reject(new RequestExpiredError());
     waiters.delete(id);
   }
 }
@@ -42229,6 +42229,13 @@ function startSweeper() {
   sweepTimer = setInterval(sweep, SWEEP_INTERVAL_MS);
   sweepTimer.unref();
 }
+var RequestExpiredError = class _RequestExpiredError extends Error {
+  constructor(message = "request expired") {
+    super(message);
+    this.name = "RequestExpiredError";
+    Object.setPrototypeOf(this, _RequestExpiredError.prototype);
+  }
+};
 var OutcomeUnknownError = class _OutcomeUnknownError extends Error {
   names;
   constructor(names) {
@@ -42326,8 +42333,9 @@ var RequestStore = {
    * delete the record silently and leave `enigma_await` waiting forever.
    * The `usedAt` check runs FIRST: a used record is never a single-use
    * candidate anyway, and routing a used-but-expired record through
-   * `expireRecord` would reject its in-flight write's waiter with the plain
-   * expiry error — the wrong code. That record belongs to the sweeper's
+   * `expireRecord` would reject its in-flight write's waiter with the
+   * never-used expiry error (`RequestExpiredError`) — the wrong code. That
+   * record belongs to the sweeper's
    * used-grace path, which produces `OutcomeUnknownError` when `results`
    * never landed (a submitted write may have partially completed).
    */
@@ -42369,7 +42377,7 @@ var RequestStore = {
    */
   waitForFulfilled(id) {
     const record2 = records.get(id);
-    if (!record2) return Promise.reject(new Error("request not found"));
+    if (!record2) return Promise.reject(new RequestExpiredError("request not found"));
     if (record2.results !== void 0) return Promise.resolve("fulfilled");
     let waiter = waiters.get(id);
     if (!waiter) {
@@ -44033,6 +44041,12 @@ async function resolveRequestOutcome(id, cwd) {
         message: `request ${id} was swept before its outcome was recorded; ${err.names.join(", ")} may already be stored \u2014 run \`enigma list\` to check before retrying`
       });
     }
+    if (err instanceof RequestExpiredError) {
+      throw new EnigmaError({
+        code: "E_REQUEST_EXPIRED",
+        message: `request ${id} is unknown or has expired`
+      });
+    }
     throw err;
   }
   const results = RequestStore.consumeOutcome(id) ?? [];
@@ -44065,9 +44079,7 @@ ${remoteNote}` : outcome.text;
         return textResult(text, outcome.isError);
       } catch (err) {
         if (err instanceof EnigmaError) return errorResult(err);
-        return errorResult(
-          new EnigmaError({ code: "E_REQUEST_EXPIRED", message: `request ${args.request_id} expired before it was fulfilled` })
-        );
+        throw err;
       }
     }
   );

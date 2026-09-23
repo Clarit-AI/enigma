@@ -1612,7 +1612,7 @@ function expireRecord(id) {
   records.delete(id);
   const waiter = waiters.get(id);
   if (waiter) {
-    waiter.reject(new Error("request expired"));
+    waiter.reject(new RequestExpiredError());
     waiters.delete(id);
   }
 }
@@ -1621,6 +1621,13 @@ function startSweeper() {
   sweepTimer = setInterval(sweep, SWEEP_INTERVAL_MS);
   sweepTimer.unref();
 }
+var RequestExpiredError = class _RequestExpiredError extends Error {
+  constructor(message = "request expired") {
+    super(message);
+    this.name = "RequestExpiredError";
+    Object.setPrototypeOf(this, _RequestExpiredError.prototype);
+  }
+};
 var OutcomeUnknownError = class _OutcomeUnknownError extends Error {
   names;
   constructor(names) {
@@ -1718,8 +1725,9 @@ var RequestStore = {
    * delete the record silently and leave `enigma_await` waiting forever.
    * The `usedAt` check runs FIRST: a used record is never a single-use
    * candidate anyway, and routing a used-but-expired record through
-   * `expireRecord` would reject its in-flight write's waiter with the plain
-   * expiry error — the wrong code. That record belongs to the sweeper's
+   * `expireRecord` would reject its in-flight write's waiter with the
+   * never-used expiry error (`RequestExpiredError`) — the wrong code. That
+   * record belongs to the sweeper's
    * used-grace path, which produces `OutcomeUnknownError` when `results`
    * never landed (a submitted write may have partially completed).
    */
@@ -1761,7 +1769,7 @@ var RequestStore = {
    */
   waitForFulfilled(id) {
     const record = records.get(id);
-    if (!record) return Promise.reject(new Error("request not found"));
+    if (!record) return Promise.reject(new RequestExpiredError("request not found"));
     if (record.results !== void 0) return Promise.resolve("fulfilled");
     let waiter = waiters.get(id);
     if (!waiter) {
@@ -4845,7 +4853,7 @@ async function runBrowserFlow(entries, opts) {
     await RequestStore.waitForFulfilled(record.id);
   } catch (err) {
     await handle.close();
-    const note = err instanceof OutcomeUnknownError ? "Import outcome unknown: the page was used but no result was recorded. Some secrets may already be stored \u2014 run `enigma list` to check before retrying." : "Import link expired before it was completed.";
+    const note = err instanceof OutcomeUnknownError ? "Import outcome unknown: the page was used but no result was recorded. Some secrets may already be stored \u2014 run `enigma list` to check before retrying." : err instanceof RequestExpiredError ? "Import link expired before it was completed." : "Import failed unexpectedly before it was completed.";
     return report(
       {
         imported: [],
