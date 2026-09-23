@@ -57,4 +57,5 @@ Match this against the `usage` you pass to `enigma_request`:
 | See what's registered | `enigma_list` (or `/enigma:list`) |
 | Check local setup/health | `enigma_doctor` (or `/enigma:doctor`) |
 | Move values out of a `.env` file | `/enigma:import` (human-initiated — it rewrites the file) |
+| Delete a secret | `enigma_remove` (or `/enigma:remove NAME [scope]`, human-initiated — destructive, cannot be undone) |
 | A tool call was denied | Read the denial message and do what it says — don't route around it |
