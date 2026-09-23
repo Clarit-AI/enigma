@@ -2,6 +2,7 @@ import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { EnigmaError } from '../core/errors.js';
 import type { IndexEntryView } from '../core/index-store.js';
 import type { RequestNameResult } from '../request/store.js';
+import { getSkippedNameCount } from '../request/store.js';
 import { listSecrets } from '../storage/manager.js';
 
 export function textResult(text: string, isError = false): CallToolResult {
@@ -41,6 +42,13 @@ export function renderStoredLine(name: string, cwd: string): string {
 
 export function renderStoredLines(names: string[], cwd: string): string[] {
   return names.map((name) => renderStoredLine(name, cwd));
+}
+
+/** Appended to any result line for a name the human added to the request form (Issue #71), so the agent never mistakes it for one it asked for. */
+const ADDED_BY_USER_SUFFIX = ' — added by user';
+
+function addedByUserSuffix(result: RequestNameResult): string {
+  return result.addedByUser ? ADDED_BY_USER_SUFFIX : '';
 }
 
 export interface Outcome {
@@ -83,12 +91,21 @@ export function renderOutcome(results: RequestNameResult[], cwd: string): Outcom
   const unknown = results.filter((r) => !r.ok && r.errorCode === 'E_OUTCOME_UNKNOWN');
   const succeeded = results.filter((r) => r.ok);
   const lines = [
-    ...failed.map((r) => (r.reason ? `${r.name}: failed (${r.errorCode ?? 'E_UNKNOWN'}) — ${r.reason}` : `${r.name}: failed (${r.errorCode ?? 'E_UNKNOWN'})`)),
-    ...unknown.map((r) => `${r.name}: outcome unknown (E_OUTCOME_UNKNOWN)`),
-    ...renderStoredLines(succeeded.map((r) => r.name), cwd),
+    ...failed.map(
+      (r) =>
+        (r.reason ? `${r.name}: failed (${r.errorCode ?? 'E_UNKNOWN'}) — ${r.reason}` : `${r.name}: failed (${r.errorCode ?? 'E_UNKNOWN'})`) +
+        addedByUserSuffix(r),
+    ),
+    ...unknown.map((r) => `${r.name}: outcome unknown (E_OUTCOME_UNKNOWN)${addedByUserSuffix(r)}`),
+    ...succeeded.map((r) => renderStoredLine(r.name, cwd) + addedByUserSuffix(r)),
   ];
   if (unknown.length > 0) {
     lines.push('Some secrets may already be stored — run `enigma list` or `enigma doctor` to check before retrying.');
+  }
+  // Invalid names the human typed or pasted are counted, never named (Issue #71).
+  const skipped = getSkippedNameCount(results);
+  if (skipped > 0) {
+    lines.push(`${skipped} invalid ${skipped === 1 ? 'name' : 'names'} skipped`);
   }
   return { text: lines.join('\n'), isError: succeeded.length === 0 };
 }
