@@ -1018,6 +1018,14 @@ var sweepTimer;
 function isExpired(record, now) {
   return now > record.expiresAt;
 }
+function expireRecord(id) {
+  records.delete(id);
+  const waiter = waiters.get(id);
+  if (waiter) {
+    waiter.reject(new Error("request expired"));
+    waiters.delete(id);
+  }
+}
 function startSweeper() {
   if (sweepTimer) return;
   sweepTimer = setInterval(sweep, SWEEP_INTERVAL_MS);
@@ -1049,12 +1057,7 @@ function sweep() {
       continue;
     }
     if (isExpired(record, now)) {
-      records.delete(id);
-      const waiter = waiters.get(id);
-      if (waiter) {
-        waiter.reject(new Error("request expired"));
-        waiters.delete(id);
-      }
+      expireRecord(id);
     }
   }
 }
@@ -1092,11 +1095,20 @@ var RequestStore = {
     startSweeper();
     return record;
   },
-  /** Expiry-aware lookup. Returns the record while it is used-and-within-grace even past its TTL, so a 410 (not 404) can be rendered. */
+  /**
+   * Expiry-aware lookup. Returns the record while it is used-and-within-grace
+   * even past its TTL, so a 410 (not 404) can be rendered. An unused record
+   * found expired is removed via `expireRecord` (PR #78 review, finding 2)
+   * rather than merely hidden, so a waiter already attached via
+   * `waitForFulfilled` is rejected here too, not only on the next sweep.
+   */
   get(id) {
     const record = records.get(id);
     if (!record) return void 0;
-    if (record.usedAt === void 0 && isExpired(record, Date.now())) return void 0;
+    if (record.usedAt === void 0 && isExpired(record, Date.now())) {
+      expireRecord(id);
+      return void 0;
+    }
     return record;
   },
   /**
@@ -1107,15 +1119,28 @@ var RequestStore = {
    * marking a token used and reporting what happened are two different
    * moments (see `fulfill`); a caller that wrote a value after this call
    * returns is still free to fail before ever calling `fulfill`.
+   *
+   * An id found expired here is removed via `expireRecord` (PR #78 review,
+   * finding 2), which also rejects any waiter already attached via
+   * `waitForFulfilled` — closing the hang where a TTL elapsed in the window
+   * between the web layer's initial `get(id)` lookup and this call (body
+   * parsing and depository detection both happen in between), which used to
+   * delete the record silently and leave `enigma_await` waiting forever.
+   * The `usedAt` check runs FIRST: a used record is never a single-use
+   * candidate anyway, and routing a used-but-expired record through
+   * `expireRecord` would reject its in-flight write's waiter with the plain
+   * expiry error — the wrong code. That record belongs to the sweeper's
+   * used-grace path, which produces `OutcomeUnknownError` when `results`
+   * never landed (a submitted write may have partially completed).
    */
   tryMarkUsed(id) {
     const record = records.get(id);
     if (!record) return void 0;
+    if (record.usedAt !== void 0) return void 0;
     if (isExpired(record, Date.now())) {
-      records.delete(id);
+      expireRecord(id);
       return void 0;
     }
-    if (record.usedAt !== void 0) return void 0;
     record.usedAt = Date.now();
     return record;
   },
@@ -1203,24 +1228,27 @@ var RequestStore = {
   },
   /**
    * Names-free query for the smallest `expiresAt` of any record that is
-   * currently `open` (Issue #69 AC #3 + §3): `usedAt === undefined &&
-   * now < expiresAt`. The strict `<` matters because `isExpired` uses
-   * `now > expiresAt`, so at exactly `now === expiresAt` a record is open
-   * (not yet expired) and the server's idle timer must re-arm with a
-   * positive delay rather than spin — a plain `<=` would drop that
-   * boundary record at the instant the timer fires (AC #9). Used by
-   * `src/web/server.ts` to decide whether to close or re-arm the idle
-   * timer. Returns `undefined` when no record is open, so the server
-   * falls back to its existing close behavior. Deliberately returns a
-   * timestamp and not a record: the server only needs the moment to
-   * close at, and exposing a record here would risk names or values
-   * ever reaching it through a future caller.
+   * currently `open` (Issue #69 AC #3 + §3, boundary decided on PR #78
+   * review): `usedAt === undefined && !isExpired(record, now)`, i.e.
+   * `now <= expiresAt`. This matches `isExpired`'s own `now > expiresAt`
+   * exactly — `isExpired` treats `now === expiresAt` as still valid (the
+   * request-form link still works at that instant), so a record is open at
+   * that boundary too, and the server's idle timer must re-arm with a
+   * positive delay rather than close early (AC #9's `MIN_REARM_DELAY_MS`
+   * floor in `src/web/server.ts` is what keeps that delay positive — at
+   * exactly the boundary `expiry - now + 1` is `1`, so the floor is what
+   * actually supplies the re-arm delay). Used by `src/web/server.ts` to
+   * decide whether to close or re-arm the idle timer. Returns `undefined`
+   * when no record is open, so the server falls back to its existing close
+   * behavior. Deliberately returns a timestamp and not a record: the server
+   * only needs the moment to close at, and exposing a record here would
+   * risk names or values ever reaching it through a future caller.
    */
   earliestOpenExpiry(now) {
     let earliest;
     for (const record of records.values()) {
       if (record.usedAt !== void 0) continue;
-      if (now >= record.expiresAt) continue;
+      if (isExpired(record, now)) continue;
       if (earliest === void 0 || record.expiresAt < earliest) {
         earliest = record.expiresAt;
       }
