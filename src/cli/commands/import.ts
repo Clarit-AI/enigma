@@ -67,32 +67,113 @@ async function runBrowserFlow(
   opts: { cwd: string; absPath: string; json: boolean; skippedInvalid: string[] },
 ): Promise<number> {
   const handle = await startServer();
-  const record = RequestStore.create({
-    kind: 'import',
-    names: entries.map((e) => e.name),
-    values: Object.fromEntries(entries.map((e) => [e.name, e.value])),
-    ambiguousNames: entries.filter((e) => e.ambiguous).map((e) => e.name),
-    ambiguousReasons: Object.fromEntries(entries.filter((e) => e.ambiguous && e.ambiguousReason).map((e) => [e.name, e.ambiguousReason!])),
-    scope: 'project',
-    envFilePath: opts.absPath,
-  });
-  const url = `${handle.origin}/i/${record.id}`;
-  process.stderr.write(
-    `Open ${url} to choose where to store ${entries.length} secret(s): ${entries.map((e) => e.name).join(', ')}\n`,
-  );
-
   // The CLI is a one-shot process holding a listening socket for the first time in this
   // codebase (every other command is request/response, nothing keeps the event loop
   // alive) — cmdImport's caller only sets process.exitCode, which waits for the loop to
   // drain rather than forcing it, so this handle MUST be closed on every path out of the
-  // wait, success or expiry, or the process idles out the full 10-minute server timeout
-  // instead of exiting (Issue #13 review, round 4, finding 1).
+  // function — including setup failures before the wait begins (e.g. an over-capacity
+  // .env makes RequestStore.create throw), not only the waiter's success or rejection —
+  // or the process idles out the full 10-minute server timeout instead of exiting
+  // (Issue #13 review, round 4, finding 1; PR #78 review: the try previously covered
+  // only the waiter await, so a create/setup throw leaked the socket).
   try {
-    await RequestStore.waitForFulfilled(record.id);
-  } catch (err) {
-    // The waiter rejection is the primary error the user must see; a close
-    // failure on the way out is secondary cleanup — warn on stderr, never
-    // let it mask or replace the primary error.
+    const record = RequestStore.create({
+      kind: 'import',
+      names: entries.map((e) => e.name),
+      values: Object.fromEntries(entries.map((e) => [e.name, e.value])),
+      ambiguousNames: entries.filter((e) => e.ambiguous).map((e) => e.name),
+      ambiguousReasons: Object.fromEntries(entries.filter((e) => e.ambiguous && e.ambiguousReason).map((e) => [e.name, e.ambiguousReason!])),
+      scope: 'project',
+      envFilePath: opts.absPath,
+    });
+    const url = `${handle.origin}/i/${record.id}`;
+    process.stderr.write(
+      `Open ${url} to choose where to store ${entries.length} secret(s): ${entries.map((e) => e.name).join(', ')}\n`,
+    );
+
+    try {
+      await RequestStore.waitForFulfilled(record.id);
+    } catch (err) {
+      // Issue #69 AC #5: distinguish a record that was used (the human opened
+      // and submitted the form) but never produced results — the names may
+      // already be stored — from one that was never used at all (a plain
+      // expiry). Both are EXPECTED rejections and map to stable error codes
+      // in the report's `error` field — nonzero exit, and a distinguishable
+      // diagnostic in --json (where a text-only note would be dropped).
+      // Anything else is unexpected and propagates unchanged — never
+      // misreported as an expiry or a fabricated success (the old code
+      // returned report({failed: []}) for every rejection, exiting 0).
+      if (err instanceof OutcomeUnknownError) {
+        return report(
+          {
+            imported: [],
+            failed: [],
+            // NOT notAttempted: the form WAS used, so writes may already have
+            // happened — nothing here can claim the names were never attempted.
+            notAttempted: [],
+            skippedInvalid: opts.skippedInvalid,
+            skippedMismatch: [],
+            warnings: [],
+            fileRewritten: false,
+            error: {
+              code: 'E_OUTCOME_UNKNOWN',
+              message:
+                'the page was used but no result was recorded. Some secrets may already be stored — run `enigma list` to check before retrying.',
+            },
+          },
+          opts.json,
+          opts.cwd,
+        );
+      }
+      if (err instanceof RequestExpiredError) {
+        return report(
+          {
+            imported: [],
+            failed: [],
+            // Accurate here: a never-used expiry means no submission ran, so
+            // every name really was never attempted.
+            notAttempted: entries.map((e) => e.name),
+            skippedInvalid: opts.skippedInvalid,
+            skippedMismatch: [],
+            warnings: [],
+            fileRewritten: false,
+            error: {
+              code: 'E_REQUEST_EXPIRED',
+              message: 'the import link expired before it was completed.',
+            },
+          },
+          opts.json,
+          opts.cwd,
+        );
+      }
+      throw err;
+    }
+
+    const finalRecord = RequestStore.get(record.id);
+    const results = finalRecord?.results ?? [];
+    const outcome = finalRecord?.importOutcome;
+
+    return report(
+      {
+        imported: results.filter((r) => r.ok).map((r) => r.name),
+        failed: results
+          .filter((r) => !r.ok && r.errorCode !== 'E_NOT_ATTEMPTED')
+          .map((r) => ({ name: r.name, errorCode: r.errorCode ?? 'E_UNKNOWN', message: r.reason })),
+        notAttempted: results.filter((r) => r.errorCode === 'E_NOT_ATTEMPTED').map((r) => r.name),
+        skippedInvalid: opts.skippedInvalid,
+        skippedMismatch: outcome?.skippedMismatch ?? [],
+        warnings: outcome?.warnings ?? [],
+        fileRewritten: outcome?.fileRewritten ?? false,
+        depository: outcome?.depository,
+      },
+      opts.json,
+      opts.cwd,
+    );
+  } finally {
+    // Exactly once on every path above — success, typed waiter rejection,
+    // unexpected error, and setup/create failure alike. A cleanup failure is
+    // never the primary error: warn on stderr and let the original result or
+    // exception stand (PR #78 review).
     try {
       await handle.close();
     } catch (closeErr) {
@@ -100,82 +181,7 @@ async function runBrowserFlow(
         `warning: could not close the import picker cleanly: ${closeErr instanceof Error ? closeErr.message : String(closeErr)}\n`,
       );
     }
-    // Issue #69 AC #5: distinguish a record that was used (the human opened
-    // and submitted the form) but never produced results — the names may
-    // already be stored — from one that was never used at all (a plain
-    // expiry). Both are EXPECTED rejections and map to stable error codes
-    // in the report's `error` field — nonzero exit, and a distinguishable
-    // diagnostic in --json (where a text-only note would be dropped).
-    // Anything else is unexpected and propagates unchanged — never
-    // misreported as an expiry or a fabricated success (the old code
-    // returned report({failed: []}) for every rejection, exiting 0).
-    if (err instanceof OutcomeUnknownError) {
-      return report(
-        {
-          imported: [],
-          failed: [],
-          // NOT notAttempted: the form WAS used, so writes may already have
-          // happened — nothing here can claim the names were never attempted.
-          notAttempted: [],
-          skippedInvalid: opts.skippedInvalid,
-          skippedMismatch: [],
-          warnings: [],
-          fileRewritten: false,
-          error: {
-            code: 'E_OUTCOME_UNKNOWN',
-            message:
-              'the page was used but no result was recorded. Some secrets may already be stored — run `enigma list` to check before retrying.',
-          },
-        },
-        opts.json,
-        opts.cwd,
-      );
-    }
-    if (err instanceof RequestExpiredError) {
-      return report(
-        {
-          imported: [],
-          failed: [],
-          // Accurate here: a never-used expiry means no submission ran, so
-          // every name really was never attempted.
-          notAttempted: entries.map((e) => e.name),
-          skippedInvalid: opts.skippedInvalid,
-          skippedMismatch: [],
-          warnings: [],
-          fileRewritten: false,
-          error: {
-            code: 'E_REQUEST_EXPIRED',
-            message: 'the import link expired before it was completed.',
-          },
-        },
-        opts.json,
-        opts.cwd,
-      );
-    }
-    throw err;
   }
-  await handle.close();
-
-  const finalRecord = RequestStore.get(record.id);
-  const results = finalRecord?.results ?? [];
-  const outcome = finalRecord?.importOutcome;
-
-  return report(
-    {
-      imported: results.filter((r) => r.ok).map((r) => r.name),
-      failed: results
-        .filter((r) => !r.ok && r.errorCode !== 'E_NOT_ATTEMPTED')
-        .map((r) => ({ name: r.name, errorCode: r.errorCode ?? 'E_UNKNOWN', message: r.reason })),
-      notAttempted: results.filter((r) => r.errorCode === 'E_NOT_ATTEMPTED').map((r) => r.name),
-      skippedInvalid: opts.skippedInvalid,
-      skippedMismatch: outcome?.skippedMismatch ?? [],
-      warnings: outcome?.warnings ?? [],
-      fileRewritten: outcome?.fileRewritten ?? false,
-      depository: outcome?.depository,
-    },
-    opts.json,
-    opts.cwd,
-  );
 }
 
 export async function cmdImport(argv: string[]): Promise<number> {
