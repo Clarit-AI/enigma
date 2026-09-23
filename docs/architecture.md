@@ -22,6 +22,10 @@ Decision ids reference [PRD.md](../PRD.md).
 - Every OS integration receives the value on stdin: `security -i` (macOS), `secret-tool store` (Linux), `op item create` with a JSON template on stdin, `osascript` script on stdin.
 - Reads fail fast with no cross-depository fallback; `enigma move` is the remedy.
 
+### Index write serialization (Issue #66)
+
+Every index write goes through `mutateIndex(delta)` in `src/core/index-store.ts`, which holds an interprocess file lock at `<ENIGMA_HOME>/index.lock` (mode 0600) for the duration of a synchronous re-read → delta → atomic-rename critical section. The lock is created with `O_EXCL`, broken-and-re-acquired after a 30 s stale threshold (tombstone rename so only one breaker wins), and bounded to ~500 ms of retries before throwing `E_LOCK_TIMEOUT` — never a silent overwrite. The four index writers — `setSecret`, `deleteSecret`, `move` (transitively via `setSecret(..., rotate: true)`), and `import-commit` (transitively via per-entry `setSecret`) — all reach it. Slow depository I/O (1Password prompts, keychain operations) stays outside the lock; only the in-process index read/apply/write is inside. A known limitation: two concurrent `set` calls with `rotate=false` for the same name may leave the loser's value as an orphan in the depository (the index reflects the winner). Issue #70 (rotate cleanup) builds on this helper and is the right place to address the orphan.
+
 ## ADR-004 — Hooks are the enforcement layer MCP cannot provide (D3.3–D3.4)
 - PreToolUse read-guard denies reads of `.env*`, Enigma's config directory, `env`/`printenv`, `echo $NAME` for known names, `enigma get|env`, `security find-generic-password`, `op read`.
 - PostToolUse tripwire scans tool output for values from `encrypted` and `env` by default (keychain opt-in, 1Password never, to respect prompt profiles), writes audit op `leak`, and returns a `systemMessage`. Claude Code has no output-rewrite hook, so the tripwire warns rather than redacts.
