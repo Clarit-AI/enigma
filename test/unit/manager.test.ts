@@ -24,7 +24,13 @@ interface FakeCall {
   stdinData: string;
 }
 const opCalls: FakeCall[] = [];
-let respondToOp: (call: FakeCall) => { stdout?: string; stderr?: string; fail?: boolean };
+/**
+ * `respondToOp` may return either a sync response or a Promise — the async
+ * shape is used by the AC #6 / AC #7 race tests below to defer one
+ * `setSecret`'s depository write past another `setSecret`'s index commit,
+ * which is the exact interleaving that exposed the lost-update bug.
+ */
+let respondToOp: (call: FakeCall) => { stdout?: string; stderr?: string; fail?: boolean } | Promise<{ stdout?: string; stderr?: string; fail?: boolean }>;
 
 vi.mock('node:child_process', () => ({
   execFile: (_file: string, args: string[], _options: unknown, callback: (...cbArgs: unknown[]) => void) => {
@@ -36,13 +42,27 @@ vi.mock('node:child_process', () => ({
     };
     stdin.end = () => {};
     opCalls.push(call);
-    const result = respondToOp(call);
+    // Defer respondToOp until after the caller's `child.stdin.write(...)` has
+    // populated `call.stdinData` — the AC #6 / AC #7 race tests need to read
+    // the title (which lives in the JSON template on stdin) to know which
+    // op call is which.
     queueMicrotask(() => {
-      if (result.fail) {
-        callback(Object.assign(new Error('op failure'), {}), result.stdout ?? '', result.stderr ?? '');
-      } else {
-        callback(null, result.stdout ?? '', result.stderr ?? '');
+      let result: { stdout?: string; stderr?: string; fail?: boolean } | Promise<{ stdout?: string; stderr?: string; fail?: boolean }>;
+      try {
+        result = respondToOp(call);
+      } catch (err) {
+        callback(err, '', '');
+        return;
       }
+      Promise.resolve(result).then((r) => {
+        if (r.fail) {
+          callback(Object.assign(new Error('op failure'), {}), r.stdout ?? '', r.stderr ?? '');
+        } else {
+          callback(null, r.stdout ?? '', r.stderr ?? '');
+        }
+      }).catch((err: unknown) => {
+        callback(err, '', '');
+      });
     });
     const child = new EventEmitter() as EventEmitter & { stdin: typeof stdin; kill: () => void };
     child.stdin = stdin;
@@ -52,6 +72,8 @@ vi.mock('node:child_process', () => ({
 }));
 
 const { deleteSecret, hasSecret, listSecrets, resolveSecret, setSecret } = await import('../../src/storage/manager.js');
+const { cmdMove } = await import('../../src/cli/commands/move.js');
+const indexStoreModule = await import('../../src/core/index-store.js');
 
 describe('storage manager', () => {
   let tmpHome: string;
@@ -266,5 +288,201 @@ describe('storage manager', () => {
     expect(opCalls.filter((c) => c.args[0] === 'vault' && c.args[1] === 'create')).toHaveLength(1);
     const [entry] = listSecrets({ scope: 'global' });
     expect(entry?.ref).toBe('opitemid');
+  });
+
+  it('Issue #66 AC #5: `enigma move` reaches the index only through mutateIndex (the locked helper), not via a direct writeIndex call', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
+
+    const spy = vi.spyOn(indexStoreModule, 'mutateIndex');
+
+    const exitCode = await cmdMove(['OPENAI_API_KEY', '--to', '1password']);
+
+    expect(exitCode).toBe(0);
+    expect(spy).toHaveBeenCalled();
+    // The delta must see the post-lock authoritative state — it reads the
+    // index (not a stale snapshot from before the lock), which is the whole
+    // point of routing every write through mutateIndex.
+    const delta = spy.mock.calls[0]?.[0];
+    expect(typeof delta).toBe('function');
+    // Calling the delta with the current index must yield the moved entry
+    // pointed at the 1Password ref the depository just returned.
+    const before = JSON.parse(JSON.stringify(indexStoreModule.readIndex())) as { entries: Array<{ name: string; depository: string; ref: string }> };
+    const next = delta!(before as never);
+    expect(next.entries.some((e) => e.name === 'OPENAI_API_KEY' && e.depository === '1password')).toBe(true);
+
+    spy.mockRestore();
+  });
+
+  it('Issue #66 AC #6 (setSecret level): two interleaved setSecret calls for DIFFERENT names, where the first call\'s depository write resolves after the second call\'s — both entries survive in the index', async () => {
+    // Reproduce the exact interleaving the Issue calls out: A starts, its
+    // depository.set is held, B starts and finishes end-to-end (writing its
+    // index entry), then A's depository.set resolves. Under the OLD
+    // (stale-snapshot) writeIndex, A's writeIndex overwrites B's just-committed
+    // entry with A's old snapshot. Under mutateIndex, A re-reads inside the
+    // lock and sees B's entry; A's delta adds a different name, so both names
+    // survive.
+    let releaseA: () => void = () => {};
+    const aHeld = new Promise<void>((resolve) => { releaseA = resolve; });
+    const aCalls: FakeCall[] = [];
+
+    respondToOp = (call) => {
+      if (call.args[0] === 'item' && call.args[1] === 'create') {
+        aCalls.push(call);
+        const template = JSON.parse(call.stdinData) as { title: string };
+        // Global-scope entries use the bare NAME as the title (no " · <project>").
+        if (template.title === 'NAME_A') {
+          return aHeld.then(() => ({
+            stdout: JSON.stringify({ id: 'opid_a', title: template.title, category: 'API_CREDENTIAL' }),
+          }));
+        }
+        return { stdout: JSON.stringify({ id: 'opid_b', title: template.title, category: 'API_CREDENTIAL' }) };
+      }
+      return { stdout: '' };
+    };
+
+    const aPromise = setSecret({ name: 'NAME_A', value: SENTINEL, scope: 'global', depository: '1password', actor: 'cli' });
+    // Let A reach its deferred execFile — one microtask tick is enough for
+    // the synchronous pre-checks in setSecret plus the mock's own microtask.
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // B completes end-to-end while A is still blocked on its depository write.
+    await setSecret({ name: 'NAME_B', value: SENTINEL, scope: 'global', depository: '1password', actor: 'cli' });
+
+    // Sanity: both op calls have been recorded by the mock. A's response
+    // is still held (the deferred Promise hasn't resolved), so the depository
+    // write for A hasn't happened yet — B's response already fired inside
+    // its `await depository.set(...)` and B's index entry is already
+    // committed via mutateIndex.
+    expect(aCalls).toHaveLength(2);
+    const aCallIdx = aCalls.findIndex((c) => JSON.parse(c.stdinData).title === 'NAME_A');
+    const bCallIdx = aCalls.findIndex((c) => JSON.parse(c.stdinData).title === 'NAME_B');
+    expect(aCallIdx).toBeGreaterThanOrEqual(0);
+    expect(bCallIdx).toBeGreaterThanOrEqual(0);
+
+    // Release A — its depository.set resolves, and setSecret proceeds to
+    // mutateIndex. Under mutateIndex, A re-reads inside the lock and sees
+    // B's entry; A's delta adds NAME_A on top, so both names persist.
+    releaseA();
+    await aPromise;
+
+    const names = listSecrets({ scope: 'global' }).map((e) => e.name).sort();
+    expect(names).toEqual(['NAME_A', 'NAME_B']);
+  });
+
+  it('Issue #66 AC #7 (manager level): a `deleteSecret` interleaved with a `setSecret` of a DIFFERENT name, where the set\'s depository write is held — both effects persist', async () => {
+    // Seed NAME_X so the delete has something to remove.
+    await setSecret({ name: 'NAME_X', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
+
+    // Hold NAME_Y's depository write until deleteSecret has finished.
+    let releaseY: () => void = () => {};
+    const yHeld = new Promise<void>((resolve) => { releaseY = resolve; });
+
+    respondToOp = (call) => {
+      if (call.args[0] === 'item' && call.args[1] === 'create') {
+        const template = JSON.parse(call.stdinData) as { title: string };
+        if (template.title === 'NAME_Y') {
+          return yHeld.then(() => ({
+            stdout: JSON.stringify({ id: 'opid_y', title: template.title, category: 'API_CREDENTIAL' }),
+          }));
+        }
+      }
+      // `op item delete` returns empty stdout on success.
+      return { stdout: '' };
+    };
+
+    // Start the set; it parks on its deferred execFile.
+    const yPromise = setSecret({ name: 'NAME_Y', value: SENTINEL, scope: 'global', depository: '1password', actor: 'cli' });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // While NAME_Y is parked, run deleteSecret(NAME_X) end-to-end.
+    await deleteSecret('NAME_X', { scope: 'global', actor: 'cli' });
+
+    // Sanity: NAME_X is gone from the index; NAME_Y is NOT yet there.
+    const midNames = listSecrets({ scope: 'global' }).map((e) => e.name).sort();
+    expect(midNames).toEqual([]);
+
+    // Release NAME_Y's depository.set. Under mutateIndex, the delta re-reads
+    // inside the lock — sees the post-delete state (empty) — and adds NAME_Y.
+    releaseY();
+    await yPromise;
+
+    const finalNames = listSecrets({ scope: 'global' }).map((e) => e.name).sort();
+    expect(finalNames).toEqual(['NAME_Y']);
+  });
+
+  it('PR #77 review: deleteSecret with an omitted scope removes exactly the GLOBAL entry it resolved before the depository await, even when a same-name PROJECT set commits during that await', async () => {
+    // Seed the global entry via 1password so its `op item delete` can be
+    // held open — the exact interleaving the review describes.
+    await setSecret({ name: 'NAME_SHARED', value: SENTINEL, scope: 'global', depository: '1password', actor: 'cli' });
+
+    let releaseDelete: () => void = () => {};
+    const deleteHeld = new Promise<void>((resolve) => { releaseDelete = resolve; });
+
+    respondToOp = (call) => {
+      if (call.args[0] === 'item' && call.args[1] === 'delete') {
+        return deleteHeld.then(() => ({ stdout: '' }));
+      }
+      return { stdout: '' };
+    };
+
+    // Scope OMITTED: at the moment `deleteSecret` resolves which entry to
+    // remove, only the global entry exists, so D1.5 shadowing is a
+    // non-issue and it unambiguously resolves the global entry — then
+    // parks on `depository.delete`.
+    const deletePromise = deleteSecret('NAME_SHARED', { cwd: tmpProject, actor: 'cli' });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // While the delete is parked, commit a same-name PROJECT set. Under
+    // the pre-fix code (a fresh `resolveIndexEntry(current, name,
+    // opts.scope, pid)` re-applying D1.5 *inside* the lock), this new
+    // project entry is what the delta would find and wrongly remove,
+    // leaving the already-deleted global entry dangling in the index.
+    await setSecret({ name: 'NAME_SHARED', value: SENTINEL, scope: 'project', cwd: tmpProject, depository: 'encrypted', actor: 'cli' });
+
+    releaseDelete();
+    await deletePromise;
+
+    // The global entry (whose depository value was actually deleted) is
+    // gone; the unrelated project entry created during the await survives
+    // untouched, and nothing is left dangling.
+    const globalNames = listSecrets({ scope: 'global' }).map((e) => e.name);
+    const projectNames = listSecrets({ scope: 'project', cwd: tmpProject }).map((e) => e.name);
+    expect(globalNames).toEqual([]);
+    expect(projectNames).toEqual(['NAME_SHARED']);
+    expect(listSecrets({ scope: 'all' })).toHaveLength(1);
+  });
+
+  it('deleteSecret refuses (E_NOT_FOUND) rather than removing a different entry when the originally-resolved entry changed ref during the depository await', async () => {
+    // Seed a global entry via 1password, held on delete.
+    await setSecret({ name: 'NAME_CHANGED', value: SENTINEL, scope: 'global', depository: '1password', actor: 'cli' });
+
+    let releaseDelete: () => void = () => {};
+    const deleteHeld = new Promise<void>((resolve) => { releaseDelete = resolve; });
+    respondToOp = (call) => {
+      if (call.args[0] === 'item' && call.args[1] === 'delete') {
+        return deleteHeld.then(() => ({ stdout: '' }));
+      }
+      if (call.args[0] === 'item' && call.args[1] === 'create') {
+        return { stdout: JSON.stringify({ id: 'opitemid_rotated', title: 'NAME_CHANGED', category: 'API_CREDENTIAL' }) };
+      }
+      return { stdout: '' };
+    };
+
+    const deletePromise = deleteSecret('NAME_CHANGED', { scope: 'global', actor: 'cli' });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // Same name+scope re-set (rotate: true, since the pre-lock existence
+    // check would otherwise refuse before ever reaching the depository)
+    // while the delete is parked: the entry's `ref` now points at a
+    // different depository item, so it is a DIFFERENT logical entry than
+    // the one whose value was just deleted, even though name/scope/
+    // projectId still match.
+    await setSecret({ name: 'NAME_CHANGED', value: SENTINEL, scope: 'global', depository: '1password', rotate: true, actor: 'cli' });
+
+    releaseDelete();
+    await expect(deletePromise).rejects.toMatchObject({ code: 'E_NOT_FOUND' });
+
+    // The refusal must not have touched the new entry.
+    expect(listSecrets({ scope: 'global' }).map((e) => e.name)).toEqual(['NAME_CHANGED']);
   });
 });

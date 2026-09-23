@@ -234,7 +234,13 @@ describe('commitImport (fs-mocked edge cases, Issue #13 review round 2)', () => 
           actor: 'cli',
         });
 
-        expect(unlinkCalls).toHaveLength(1);
+        // Filter to the .env rewrite's own temp unlinks, the same way the
+        // renameCalls check above already does. (Since the Issue #66
+        // kernel-flock change, `mutateIndex`'s release no longer unlinks
+        // anything — the anchor persists — so the filter is purely
+        // defensive against unrelated unlinks.)
+        const envUnlinks = unlinkCalls.filter((p) => typeof p === 'string' && isOwnTempFile(p, envFilePath));
+        expect(envUnlinks).toHaveLength(1);
         const [tmpPath] = renameCalls.filter(([, to]) => to === envFilePath)[0]!;
         expect(realExistsSync(tmpPath as string)).toBe(false);
       });

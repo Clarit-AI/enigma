@@ -50,7 +50,7 @@
 
 - **Project identity vs location**: `projectId` hashes the repository's canonical common git dir (`findRepoIdentityPath`, pure fs, `realpath`), so every worktree of a repo shares project scope. `findProjectPath` stays lexical and still locates `projectPath`, the `env` depository `.env`, and the 1Password title folder. Ids are unchanged only for a normal clone reached through its physical path (#67).
 - **Migration, not fallback**: legacy entries are re-keyed explicitly by `enigma migrate-scope` (index-only, dry run by default), surfaced by doctor/`enigma_doctor`/SessionStart. No read-time fallback (#72).
-- **Index writes are serialized** by an `O_EXCL` lock file with a short, await-free critical section that re-reads the index (#66).
+- **Index writes are serialized** by a kernel `flock(2)` descriptor lock on a persistent `index.lock` anchor (first-party N-API addon under `plugins/enigma/native/`), with a short, await-free critical section that re-reads the index (#66). Supersedes the earlier `O_EXCL` + stale-threshold name-based protocol after review found its takeover window unsound; upgrade requires stopping/restarting ALL Enigma writers (no mixed-protocol guarantee).
 - **Rotate replaces, then removes the old copy** in the same depository; a failed cleanup warns and audits but does not fail the rotate (#70).
 - **Request form** parses a pasted `.env` blob server-side on submit; unvalidated name text is counted, never echoed (#71).
 - **Fallback wake-up** via `GET /r/:id/status` (state only); the local server never idles out while a request is open; a used record swept without results surfaces `E_OUTCOME_UNKNOWN` (#69).

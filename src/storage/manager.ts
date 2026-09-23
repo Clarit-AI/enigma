@@ -13,11 +13,11 @@ import {
   buildRef,
   findIndexEntry,
   listIndexEntries,
+  mutateIndex,
   readIndex,
   removeIndexEntry,
   resolveIndexEntry,
   upsertIndexEntry,
-  writeIndex,
 } from '../core/index-store.js';
 import type { IndexEntry, IndexEntryView, Scope } from '../core/index-store.js';
 import { DEPOSITORY_MODULES } from './detect.js';
@@ -143,7 +143,31 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
     createdAt: existing?.createdAt ?? now,
     updatedAt: now,
   };
-  writeIndex(upsertIndexEntry(index, entry));
+  try {
+    mutateIndex((current) => {
+      // Issue #66, AC #4/#5: re-read inside the lock so the delta sees the
+      // authoritative state at the moment the lock was acquired. A concurrent
+      // writer may have created an entry for this name/scope/projectId between
+      // our pre-lock initial read and the lock acquire; if so we surface the
+      // same E_EXISTS the pre-lock check would have. The depository write
+      // already happened — a tight race here leaves an orphan value at
+      // `entry.ref` that the index doesn't point at; this is a known
+      // limitation called out in the PR body, and Issue #70 (rotate cleanup)
+      // is where the cleanup story for same-name concurrent set is built.
+      const currentExisting = findIndexEntry(current, opts.name, opts.scope, pid);
+      if (currentExisting && !opts.rotate) {
+        throw new EnigmaError({
+          code: 'E_EXISTS',
+          message: `${opts.name} already exists in ${opts.scope} scope; pass rotate to overwrite`,
+          secretName: opts.name,
+        });
+      }
+      return upsertIndexEntry(current, entry);
+    });
+  } catch (err) {
+    auditRefusal(err, op);
+    throw err;
+  }
   appendAuditEvent({ op, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: true, error: null });
 
   const warnings = opts.depository === 'env' && projectPath ? checkEnvGitignore(projectPath) : [];
@@ -174,7 +198,7 @@ export interface DeleteSecretOptions {
 export async function deleteSecret(name: string, opts: DeleteSecretOptions): Promise<void> {
   const pid = opts.cwd ? computeProjectId(opts.cwd) : undefined;
   const index = readIndex();
-  const { index: updated, removed } = removeIndexEntry(index, name, opts.scope, pid);
+  const { removed } = removeIndexEntry(index, name, opts.scope, pid);
 
   const depository = createDepository(removed.depository, { projectPath: projectPathFor(removed, opts.cwd) });
   try {
@@ -184,7 +208,29 @@ export async function deleteSecret(name: string, opts: DeleteSecretOptions): Pro
     throw err;
   }
 
-  writeIndex(updated);
+  try {
+    mutateIndex((current) => {
+      // Issue #66 (PR #77 review): remove exactly the entry we resolved and
+      // deleted from the depository before the await — matched by
+      // name+scope+projectId AND ref, not a fresh scope resolution. A fresh
+      // `resolveIndexEntry(current, name, opts.scope, pid)` re-applies D1.5
+      // shadowing against the *current* index: if a same-name project
+      // `setSecret` committed during the `depository.delete` await, an
+      // omitted-scope global delete would resolve to (and remove) that new
+      // project entry instead of refusing, leaving the just-deleted global
+      // entry dangling. Matching the original entry's identity, including
+      // `ref`, ensures we only ever remove the entry that was actually
+      // deleted — never guess at a different one.
+      const currentRemoved = findIndexEntry(current, removed.name, removed.scope, removed.projectId);
+      if (!currentRemoved || currentRemoved.ref !== removed.ref) {
+        throw new EnigmaError({ code: 'E_NOT_FOUND', message: `${name} not found`, secretName: name });
+      }
+      return { ...current, entries: current.entries.filter((e) => e !== currentRemoved) };
+    });
+  } catch (err) {
+    appendAuditEvent({ op: 'remove', name, scope: removed.scope, depository: removed.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+    throw err;
+  }
   appendAuditEvent({ op: 'remove', name, scope: removed.scope, depository: removed.depository, actor: opts.actor, ok: true, error: null });
 }
 

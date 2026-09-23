@@ -258,6 +258,9 @@ function appendAuditEvent(event) {
   appendLineSecure(auditLogPath(), JSON.stringify(line));
 }
 
+// src/core/native-lock.ts
+var HOST_TAG = `${process.platform}-${process.arch}`;
+
 // src/core/index-store.ts
 var EMPTY_INDEX = { version: 1, entries: [] };
 function readIndex() {
@@ -279,6 +282,7 @@ function listIndexEntries(index, opts = {}) {
     return { ...entry, shadowed: Boolean(shadowedBy) };
   });
 }
+var SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 
 // src/storage/depositories/encrypted.ts
 import { createCipheriv, createDecipheriv, randomBytes as randomBytes2 } from "node:crypto";
