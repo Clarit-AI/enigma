@@ -3,6 +3,7 @@ import { applySecurityHeaders } from './headers.js';
 import { sendJson, sendStaticJs, sendErrorPage } from './responses.js';
 import { handleImportFormGet, handleImportFormPost } from './routes/import-form.js';
 import { handleRequestFormGet, handleRequestFormPost } from './routes/request-form.js';
+import { handleRequestStatusGet } from './routes/request-status.js';
 import { handleRevealGet, handleRevealPost } from './routes/reveal.js';
 import { REVEAL_CLIENT_JS } from './static/reveal-script.js';
 import { REQUEST_DONE_CLIENT_JS } from './static/request-done-script.js';
@@ -10,6 +11,7 @@ import { REQUEST_FORM_CLIENT_JS } from './static/request-form-script.js';
 
 const ID = '[0-9a-f]{32}';
 const REQUEST_PATH = new RegExp(`^/r/(${ID})$`);
+const REQUEST_STATUS_PATH = new RegExp(`^/r/(${ID})/status$`);
 const IMPORT_PATH = new RegExp(`^/i/(${ID})$`);
 const REVEAL_SHELL_PATH = new RegExp(`^/v/(${ID})$`);
 const REVEAL_ACTION_PATH = new RegExp(`^/v/(${ID})/reveal$`);
@@ -50,6 +52,11 @@ export async function handleRequest(req: IncomingMessage, res: ServerResponse): 
       const id = requestMatch[1]!;
       if (method === 'GET') return await handleRequestFormGet(res, id);
       if (method === 'POST') return await handleRequestFormPost(req, res, id);
+    }
+
+    const requestStatusMatch = pathname.match(REQUEST_STATUS_PATH);
+    if (requestStatusMatch && method === 'GET') {
+      return handleRequestStatusGet(res, requestStatusMatch[1]!);
     }
 
     const importMatch = pathname.match(IMPORT_PATH);

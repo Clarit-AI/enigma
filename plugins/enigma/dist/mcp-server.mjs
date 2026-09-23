@@ -42224,25 +42224,53 @@ var sweepTimer;
 function isExpired(record2, now) {
   return now > record2.expiresAt;
 }
+function expireRecord(id) {
+  records.delete(id);
+  const waiter = waiters.get(id);
+  if (waiter) {
+    waiter.reject(new RequestExpiredError());
+    waiters.delete(id);
+  }
+}
 function startSweeper() {
   if (sweepTimer) return;
   sweepTimer = setInterval(sweep, SWEEP_INTERVAL_MS);
   sweepTimer.unref();
 }
+var RequestExpiredError = class _RequestExpiredError extends Error {
+  constructor(message = "request expired") {
+    super(message);
+    this.name = "RequestExpiredError";
+    Object.setPrototypeOf(this, _RequestExpiredError.prototype);
+  }
+};
+var OutcomeUnknownError = class _OutcomeUnknownError extends Error {
+  names;
+  constructor(names) {
+    super("request swept without outcome");
+    this.name = "OutcomeUnknownError";
+    this.names = [...names];
+    Object.setPrototypeOf(this, _OutcomeUnknownError.prototype);
+  }
+};
 function sweep() {
   const now = Date.now();
   for (const [id, record2] of records) {
     if (record2.usedAt !== void 0) {
-      if (now - record2.usedAt > USED_GRACE_MS) records.delete(id);
+      if (now - record2.usedAt > USED_GRACE_MS) {
+        if (record2.results === void 0) {
+          const waiter = waiters.get(id);
+          if (waiter) {
+            waiter.reject(new OutcomeUnknownError(record2.names));
+            waiters.delete(id);
+          }
+        }
+        records.delete(id);
+      }
       continue;
     }
     if (isExpired(record2, now)) {
-      records.delete(id);
-      const waiter = waiters.get(id);
-      if (waiter) {
-        waiter.reject(new Error("request expired"));
-        waiters.delete(id);
-      }
+      expireRecord(id);
     }
   }
 }
@@ -42280,11 +42308,20 @@ var RequestStore = {
     startSweeper();
     return record2;
   },
-  /** Expiry-aware lookup. Returns the record while it is used-and-within-grace even past its TTL, so a 410 (not 404) can be rendered. */
+  /**
+   * Expiry-aware lookup. Returns the record while it is used-and-within-grace
+   * even past its TTL, so a 410 (not 404) can be rendered. An unused record
+   * found expired is removed via `expireRecord` (PR #78 review, finding 2)
+   * rather than merely hidden, so a waiter already attached via
+   * `waitForFulfilled` is rejected here too, not only on the next sweep.
+   */
   get(id) {
     const record2 = records.get(id);
     if (!record2) return void 0;
-    if (record2.usedAt === void 0 && isExpired(record2, Date.now())) return void 0;
+    if (record2.usedAt === void 0 && isExpired(record2, Date.now())) {
+      expireRecord(id);
+      return void 0;
+    }
     return record2;
   },
   /**
@@ -42295,15 +42332,29 @@ var RequestStore = {
    * marking a token used and reporting what happened are two different
    * moments (see `fulfill`); a caller that wrote a value after this call
    * returns is still free to fail before ever calling `fulfill`.
+   *
+   * An id found expired here is removed via `expireRecord` (PR #78 review,
+   * finding 2), which also rejects any waiter already attached via
+   * `waitForFulfilled` — closing the hang where a TTL elapsed in the window
+   * between the web layer's initial `get(id)` lookup and this call (body
+   * parsing and depository detection both happen in between), which used to
+   * delete the record silently and leave `enigma_await` waiting forever.
+   * The `usedAt` check runs FIRST: a used record is never a single-use
+   * candidate anyway, and routing a used-but-expired record through
+   * `expireRecord` would reject its in-flight write's waiter with the
+   * never-used expiry error (`RequestExpiredError`) — the wrong code. That
+   * record belongs to the sweeper's
+   * used-grace path, which produces `OutcomeUnknownError` when `results`
+   * never landed (a submitted write may have partially completed).
    */
   tryMarkUsed(id) {
     const record2 = records.get(id);
     if (!record2) return void 0;
+    if (record2.usedAt !== void 0) return void 0;
     if (isExpired(record2, Date.now())) {
-      records.delete(id);
+      expireRecord(id);
       return void 0;
     }
-    if (record2.usedAt !== void 0) return void 0;
     record2.usedAt = Date.now();
     return record2;
   },
@@ -42334,7 +42385,7 @@ var RequestStore = {
    */
   waitForFulfilled(id) {
     const record2 = records.get(id);
-    if (!record2) return Promise.reject(new Error("request not found"));
+    if (!record2) return Promise.reject(new RequestExpiredError("request not found"));
     if (record2.results !== void 0) return Promise.resolve("fulfilled");
     let waiter = waiters.get(id);
     if (!waiter) {
@@ -42417,6 +42468,35 @@ var RequestStore = {
       out.push({ id: record2.id, stored, failed, unknown: unknown2 });
     }
     return out;
+  },
+  /**
+   * Names-free query for the smallest `expiresAt` of any record that is
+   * currently `open` (Issue #69 AC #3 + §3, boundary decided on PR #78
+   * review): `usedAt === undefined && !isExpired(record, now)`, i.e.
+   * `now <= expiresAt`. This matches `isExpired`'s own `now > expiresAt`
+   * exactly — `isExpired` treats `now === expiresAt` as still valid (the
+   * request-form link still works at that instant), so a record is open at
+   * that boundary too, and the server's idle timer must re-arm with a
+   * positive delay rather than close early (AC #9's `MIN_REARM_DELAY_MS`
+   * floor in `src/web/server.ts` is what keeps that delay positive — at
+   * exactly the boundary `expiry - now + 1` is `1`, so the floor is what
+   * actually supplies the re-arm delay). Used by `src/web/server.ts` to
+   * decide whether to close or re-arm the idle timer. Returns `undefined`
+   * when no record is open, so the server falls back to its existing close
+   * behavior. Deliberately returns a timestamp and not a record: the server
+   * only needs the moment to close at, and exposing a record here would
+   * risk names or values ever reaching it through a future caller.
+   */
+  earliestOpenExpiry(now) {
+    let earliest;
+    for (const record2 of records.values()) {
+      if (record2.usedAt !== void 0) continue;
+      if (isExpired(record2, now)) continue;
+      if (earliest === void 0 || record2.expiresAt < earliest) {
+        earliest = record2.expiresAt;
+      }
+    }
+    return earliest;
   },
   /** Test-only: clears all records/waiters and stops the sweeper so state never leaks between test files. */
   __resetForTests() {
@@ -44158,7 +44238,23 @@ function renderOutcome(results, cwd) {
 
 // src/mcp/request-outcome.ts
 async function resolveRequestOutcome(id, cwd) {
-  await RequestStore.waitForFulfilled(id);
+  try {
+    await RequestStore.waitForFulfilled(id);
+  } catch (err) {
+    if (err instanceof OutcomeUnknownError) {
+      throw new EnigmaError({
+        code: "E_OUTCOME_UNKNOWN",
+        message: `request ${id} was swept before its outcome was recorded; ${err.names.join(", ")} may already be stored \u2014 run \`enigma list\` to check before retrying`
+      });
+    }
+    if (err instanceof RequestExpiredError) {
+      throw new EnigmaError({
+        code: "E_REQUEST_EXPIRED",
+        message: `request ${id} is unknown or has expired`
+      });
+    }
+    throw err;
+  }
   const results = RequestStore.consumeOutcome(id) ?? [];
   return renderOutcome(results, cwd);
 }
@@ -44187,10 +44283,9 @@ function registerAwaitTool(server) {
         const text = remoteNote ? `${outcome.text}
 ${remoteNote}` : outcome.text;
         return textResult(text, outcome.isError);
-      } catch {
-        return errorResult(
-          new EnigmaError({ code: "E_REQUEST_EXPIRED", message: `request ${args.request_id} expired before it was fulfilled` })
-        );
+      } catch (err) {
+        if (err instanceof EnigmaError) return errorResult(err);
+        throw err;
       }
     }
   );
@@ -47131,6 +47226,17 @@ async function handleRequestFormPost(req, res, id) {
   sendHtml(res, 200, renderRepeatingBlock(request_done_default, "RESULT_ROW", rows));
 }
 
+// src/web/routes/request-status.ts
+function handleRequestStatusGet(res, id) {
+  const record2 = RequestStore.get(id);
+  if (!record2 || record2.kind !== "request") {
+    sendErrorPage(res, 404, "Not found", "This link is unknown or has expired.");
+    return;
+  }
+  const state2 = record2.results !== void 0 ? "fulfilled" : "pending";
+  sendJson(res, 200, { state: state2 });
+}
+
 // src/web/routes/reveal.ts
 function handleRevealGet(res, id) {
   const record2 = RequestStore.get(id);
@@ -47255,6 +47361,7 @@ var REQUEST_FORM_CLIENT_JS = `(() => {
 // src/web/router.ts
 var ID = "[0-9a-f]{32}";
 var REQUEST_PATH = new RegExp(`^/r/(${ID})$`);
+var REQUEST_STATUS_PATH = new RegExp(`^/r/(${ID})/status$`);
 var IMPORT_PATH = new RegExp(`^/i/(${ID})$`);
 var REVEAL_SHELL_PATH = new RegExp(`^/v/(${ID})$`);
 var REVEAL_ACTION_PATH = new RegExp(`^/v/(${ID})/reveal$`);
@@ -47291,6 +47398,10 @@ async function handleRequest(req, res) {
       if (method === "GET") return await handleRequestFormGet(res, id);
       if (method === "POST") return await handleRequestFormPost(req, res, id);
     }
+    const requestStatusMatch = pathname.match(REQUEST_STATUS_PATH);
+    if (requestStatusMatch && method === "GET") {
+      return handleRequestStatusGet(res, requestStatusMatch[1]);
+    }
     const importMatch = pathname.match(IMPORT_PATH);
     if (importMatch) {
       const id = importMatch[1];
@@ -47314,6 +47425,7 @@ async function handleRequest(req, res) {
 // src/web/server.ts
 var DEFAULT_HOST = "127.0.0.1";
 var DEFAULT_IDLE_TIMEOUT_MS = 10 * 60 * 1e3;
+var MIN_REARM_DELAY_MS = 1e3;
 var state;
 var starting;
 function settled(value) {
@@ -47322,11 +47434,22 @@ function settled(value) {
 function toHandle(s) {
   return { port: s.port, origin: `http://${s.host}:${s.port}`, close: stopServer };
 }
+function onIdleTimer() {
+  const current = state;
+  if (!current) return;
+  const now = Date.now();
+  const expiry = RequestStore.earliestOpenExpiry(now);
+  if (expiry === void 0) {
+    void stopServer();
+    return;
+  }
+  const delay = Math.max(MIN_REARM_DELAY_MS, Math.min(current.idleTimeoutMs, expiry - now + 1));
+  current.idleTimer = setTimeout(onIdleTimer, delay);
+  current.idleTimer.unref();
+}
 function resetIdleTimer(s) {
   if (s.idleTimer) clearTimeout(s.idleTimer);
-  s.idleTimer = setTimeout(() => {
-    void stopServer();
-  }, s.idleTimeoutMs);
+  s.idleTimer = setTimeout(onIdleTimer, s.idleTimeoutMs);
   s.idleTimer.unref();
 }
 function startServer(opts = {}) {
@@ -47462,9 +47585,14 @@ Client does not support URL-mode elicitation. Call enigma_await with this reques
       if (result.action !== "accept") {
         return textResult(`Import cancelled for ${names.join(", ")}`, true);
       }
-      const outcome = await resolveRequestOutcome(record2.id, cwd);
-      await sendElicitationComplete(server.server, record2.id);
-      return textResult(outcome.text, outcome.isError);
+      try {
+        const outcome = await resolveRequestOutcome(record2.id, cwd);
+        await sendElicitationComplete(server.server, record2.id);
+        return textResult(outcome.text, outcome.isError);
+      } catch (err) {
+        if (err instanceof EnigmaError) return errorResult(err);
+        throw err;
+      }
     }
   );
 }
@@ -47820,12 +47948,17 @@ function registerRequestTool(server) {
       if (result.action !== "accept") {
         return textResult(`Request cancelled for ${args.names.join(", ")}`, true);
       }
-      const outcome = await resolveRequestOutcome(record2.id, cwd);
-      await sendElicitationComplete(server.server, record2.id);
-      const settledNote = takeRemoteNote(record2.id);
-      const text = settledNote ? `${outcome.text}
+      try {
+        const outcome = await resolveRequestOutcome(record2.id, cwd);
+        await sendElicitationComplete(server.server, record2.id);
+        const settledNote = takeRemoteNote(record2.id);
+        const text = settledNote ? `${outcome.text}
 ${settledNote}` : outcome.text;
-      return textResult(text, outcome.isError);
+        return textResult(text, outcome.isError);
+      } catch (err) {
+        if (err instanceof EnigmaError) return errorResult(err);
+        throw err;
+      }
     }
   );
 }

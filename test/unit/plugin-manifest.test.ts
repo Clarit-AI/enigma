@@ -119,3 +119,26 @@ describe('plugin manifests', () => {
     expect(plugin.name).toBe('enigma');
   });
 });
+
+describe('Issue #69 doc pins (AC11/AC12) — focused wording pins, not an eval harness', () => {
+  it('AC11: SKILL.md documents the Monitor/status wake-on-submit pattern and the no-watcher fallback', () => {
+    const { body } = readFrontmatter(join(PLUGIN_ROOT, 'skills/enigma/SKILL.md'));
+    expect(body).toMatch(/background-watch/);
+    expect(body).toContain('GET /r/<request_id>/status');
+    expect(body).toMatch(/`\{"state":"pending"\}`/);
+    expect(body).toMatch(/call `enigma_await` immediately/);
+    // The watch must end on ANY non-pending response — fulfilled, 404, or a
+    // connection failure — and hand off to enigma_await for the authoritative
+    // outcome; a dead link is never polled forever (PR #78 review batch).
+    expect(body).toMatch(/non-`pending`/);
+    expect(body).toMatch(/connection failure/);
+    expect(body).toMatch(/`enigma_await`[^\n]*authoritative outcome/);
+  });
+
+  it('AC12: docs/api-contracts.md documents GET /r/:id/status and E_OUTCOME_UNKNOWN', () => {
+    const apiContracts = readFileSync(join(REPO_ROOT, 'docs/api-contracts.md'), 'utf8');
+    expect(apiContracts).toContain('GET /r/:id/status');
+    expect(apiContracts).toContain('E_OUTCOME_UNKNOWN');
+    expect(apiContracts).toContain('E_REQUEST_EXPIRED');
+  });
+});

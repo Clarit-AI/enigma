@@ -22,6 +22,8 @@ export type EnigmaErrorCode =
   | 'E_CLAUDE_SETTINGS_UNWRITABLE'
   | 'E_VAULT_CORRUPT'
   | 'E_CONFIG_CORRUPT'
+  /** `enigma_await` and blocking `enigma_request` could not determine whether a request's declared names were stored: the single-use token was consumed (the human submitted the form) but `fulfill` never ran before the used-record grace period elapsed (Issue #69 AC #5). Message names the declared names and tells the agent to run `enigma list` to verify — never carries a value. Distinct from `E_REQUEST_EXPIRED`, which is reserved for a record that was never used in the first place. */
+  | 'E_OUTCOME_UNKNOWN'
   /** `enigma run` could not spawn its child because the binary does not exist on PATH (Issue #22, AC #1). Maps to exit 127 (the shell convention for "command not found"); see docs/api-contracts.md §3. */
   | 'E_BINARY_MISSING'
   /** `mutateIndex` could not acquire `<ENIGMA_HOME>/index.lock` within the bounded retry window (Issue #66, AC #2). The message names the lock file path so a reader knows what to investigate, never a value. */

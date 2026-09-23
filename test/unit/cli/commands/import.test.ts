@@ -7,6 +7,37 @@ import { RequestStore } from '../../../../src/request/store.js';
 import { listSecrets } from '../../../../src/storage/manager.js';
 import { startServer, stopServer } from '../../../../src/web/server.js';
 
+// Wraps every ServerHandle.startServer() returns so tests can count close()
+// calls and inject a close failure — the handle is created inside cmdImport,
+// so this module mock is the only way to observe it (PR #78 review blocker:
+// the handle must be closed exactly once on every path, and a close failure
+// must not mask the primary waiter error).
+const serverMock = vi.hoisted(() => ({
+  closeCount: 0,
+  failNextClose: false,
+}));
+
+vi.mock('../../../../src/web/server.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../../../src/web/server.js')>();
+  return {
+    ...actual,
+    startServer: vi.fn(async (opts?: Parameters<typeof actual.startServer>[0]) => {
+      const handle = await actual.startServer(opts);
+      return {
+        ...handle,
+        close: vi.fn(async () => {
+          serverMock.closeCount += 1;
+          if (serverMock.failNextClose) {
+            serverMock.failNextClose = false;
+            throw new Error('close boom');
+          }
+          return handle.close();
+        }),
+      };
+    }),
+  };
+});
+
 const SENTINEL = 'sk-sentinel-value-should-never-appear';
 
 describe('cmdImport', () => {
@@ -28,6 +59,8 @@ describe('cmdImport', () => {
     originalCwd = process.cwd();
     process.chdir(tmpProject);
     RequestStore.__resetForTests();
+    serverMock.closeCount = 0;
+    serverMock.failNextClose = false;
     stdoutSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
     stderrSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
   });
@@ -282,5 +315,140 @@ describe('cmdImport', () => {
 
     const handleAfter = await startServer();
     expect(handleAfter.origin).not.toBe(handle.origin);
+  });
+
+  it('waiter rejection with RequestExpiredError exits 1 with a distinguishable code in --json and closes the handle exactly once (PR #78 review blocker)', async () => {
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\nGITHUB_TOKEN=ghp-xyz\n`);
+    const { RequestExpiredError } = await import('../../../../src/request/store.js');
+    vi.spyOn(RequestStore, 'waitForFulfilled').mockRejectedValueOnce(new RequestExpiredError());
+
+    const code = await cmdImport(['.env', '--json']);
+
+    expect(code).toBe(1);
+    const parsed = JSON.parse(stdoutText()) as {
+      error?: { code: string; message: string };
+      imported: string[];
+      notAttempted: string[];
+    };
+    expect(parsed.error?.code).toBe('E_REQUEST_EXPIRED');
+    expect(parsed.imported).toEqual([]);
+    // Never-used expiry: no submission ran, so every name was genuinely not attempted.
+    expect(parsed.notAttempted.sort()).toEqual(['GITHUB_TOKEN', 'OPENAI_API_KEY']);
+    expect(stdoutText()).not.toContain(SENTINEL);
+    expect(serverMock.closeCount).toBe(1);
+    // Nothing was written through the picker path.
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+  });
+
+  it('waiter rejection with RequestExpiredError in text mode prints the E_REQUEST_EXPIRED diagnostic and exits 1', async () => {
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
+    const { RequestExpiredError } = await import('../../../../src/request/store.js');
+    vi.spyOn(RequestStore, 'waitForFulfilled').mockRejectedValueOnce(new RequestExpiredError());
+
+    const code = await cmdImport(['.env']);
+
+    expect(code).toBe(1);
+    const output = stdoutText();
+    expect(output).toContain('E_REQUEST_EXPIRED');
+    expect(output).toContain('expired');
+    expect(output).toContain('OPENAI_API_KEY');
+    expect(output).not.toContain(SENTINEL);
+    expect(serverMock.closeCount).toBe(1);
+  });
+
+  it('waiter rejection with OutcomeUnknownError exits 1 as E_OUTCOME_UNKNOWN and does NOT claim the names were never attempted (PR #78 review blocker)', async () => {
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
+    const { OutcomeUnknownError } = await import('../../../../src/request/store.js');
+    vi.spyOn(RequestStore, 'waitForFulfilled').mockRejectedValueOnce(new OutcomeUnknownError(['OPENAI_API_KEY']));
+
+    const code = await cmdImport(['.env', '--json']);
+
+    expect(code).toBe(1);
+    const parsed = JSON.parse(stdoutText()) as {
+      error?: { code: string; message: string };
+      notAttempted: string[];
+    };
+    expect(parsed.error?.code).toBe('E_OUTCOME_UNKNOWN');
+    expect(parsed.error?.message).toContain('enigma list');
+    // The form was used — writes may already have happened, so nothing may
+    // be labelled "not attempted".
+    expect(parsed.notAttempted).toEqual([]);
+    expect(stdoutText()).not.toContain(SENTINEL);
+    expect(serverMock.closeCount).toBe(1);
+  });
+
+  it('OutcomeUnknownError in text mode prints the E_OUTCOME_UNKNOWN diagnostic and exits 1', async () => {
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
+    const { OutcomeUnknownError } = await import('../../../../src/request/store.js');
+    vi.spyOn(RequestStore, 'waitForFulfilled').mockRejectedValueOnce(new OutcomeUnknownError(['OPENAI_API_KEY']));
+
+    const code = await cmdImport(['.env']);
+
+    expect(code).toBe(1);
+    const output = stdoutText();
+    expect(output).toContain('E_OUTCOME_UNKNOWN');
+    expect(output).not.toContain('not attempted');
+    expect(output).not.toContain(SENTINEL);
+    expect(serverMock.closeCount).toBe(1);
+  });
+
+  it('an unexpected waiter error propagates unchanged after the handle is closed — never fabricated into a success report', async () => {
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
+    const boom = new Error('socket exploded');
+    vi.spyOn(RequestStore, 'waitForFulfilled').mockRejectedValueOnce(boom);
+
+    await expect(cmdImport(['.env', '--json'])).rejects.toBe(boom);
+
+    // Handle still closed exactly once, and no success-shaped report was printed.
+    expect(serverMock.closeCount).toBe(1);
+    expect(stdoutText()).toBe('');
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+  });
+
+  it('a close failure during error cleanup preserves the primary waiter error (stderr warning, still the E_REQUEST_EXPIRED report)', async () => {
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
+    serverMock.failNextClose = true;
+    const { RequestExpiredError } = await import('../../../../src/request/store.js');
+    vi.spyOn(RequestStore, 'waitForFulfilled').mockRejectedValueOnce(new RequestExpiredError());
+
+    const code = await cmdImport(['.env', '--json']);
+
+    expect(code).toBe(1);
+    const parsed = JSON.parse(stdoutText()) as { error?: { code: string } };
+    expect(parsed.error?.code).toBe('E_REQUEST_EXPIRED');
+    const errOut = stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    expect(errOut).toContain('warning');
+    expect(serverMock.closeCount).toBe(1);
+  });
+
+  it('a .env over the 200-name import cap fails bounded — the acquired server handle is still closed exactly once (PR #78 review: setup throws leaked the socket)', async () => {
+    // 201 distinct, individually-valid names: parseDotEnv accepts them all and
+    // RequestStore.create throws the real capacity error AFTER startServer().
+    const lines = Array.from({ length: 201 }, (_, i) => `KEY_${String(i).padStart(3, '0')}=v${i}\n`);
+    writeFileSync(envFilePath, lines.join(''));
+
+    await expect(cmdImport(['.env'])).rejects.toThrow('between 1 and 200');
+
+    // The handle WAS opened (no pre-acquisition validation) — so the proof is
+    // that it was closed exactly once even though create threw before the wait.
+    expect(serverMock.closeCount).toBe(1);
+    expect(stdoutText()).toBe('');
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+  });
+
+  it('an injected RequestStore.create failure after start still closes the handle — and the primary error survives even when close also fails', async () => {
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
+    const boom = new Error('create boom');
+    vi.spyOn(RequestStore, 'create').mockImplementationOnce(() => {
+      throw boom;
+    });
+    serverMock.failNextClose = true;
+
+    await expect(cmdImport(['.env'])).rejects.toBe(boom);
+
+    expect(serverMock.closeCount).toBe(1);
+    const errOut = stderrSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+    expect(errOut).toContain('warning');
+    expect(stdoutText()).toBe('');
   });
 });

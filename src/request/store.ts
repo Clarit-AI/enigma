@@ -10,12 +10,16 @@ export type RequestKind = 'request' | 'reveal' | 'import';
 /**
  * Outcome of writing one name through the storage core; never a value or a
  * message that could carry one. `reason` is the one narrow, deliberate
- * exception (Issue #13 review, round 4, finding 2): kind 'import' only,
- * populated ONLY from `ParsedDotEnvEntry.ambiguousReason` — static text
+ * exception (Issue #13 review, round 4, finding 2): populated ONLY from
+ * `ParsedDotEnvEntry.ambiguousReason` — static text
  * about structure ("assigned more than once in this file", "quote the value
  * if the # belongs to it") computed by the parser before any value is
- * looked at, plus the entry's own name and file path. Never populate this
- * from an EnigmaError's `.message` in general, or from anything else
+ * looked at, plus the entry's own name and file path (the import flows, and
+ * since Issue #71 the request form's refusal path) — or, in request-form.ts
+ * only, the Issue #61-audited `EnigmaError.message` passthrough for a
+ * per-name write failure (every message reachable there is static or
+ * structural — never opts.value). Never populate this
+ * from an EnigmaError's `.message` anywhere else, or from anything else
  * derived from a parsed value — widening this field is exactly how a
  * value-carrying string gets introduced here by someone with good
  * intentions later. If you're tempted to set `reason` for a NEW error code,
@@ -156,26 +160,104 @@ function isExpired(record: RequestRecord, now: number): boolean {
   return now > record.expiresAt;
 }
 
+/**
+ * The single place a never-used record is removed from the map for having
+ * expired (PR #78 review, finding 2): deletes it AND rejects any waiter
+ * already attached via `waitForFulfilled` with a `RequestExpiredError`, the
+ * same rejection the sweeper has always produced for this case (the shared
+ * mapper in `src/mcp/request-outcome.ts` turns it into `E_REQUEST_EXPIRED`). Every such deletion path — the
+ * sweeper, `get`, and `tryMarkUsed` — routes through this helper, so a
+ * waiter attached via `enigma_await`/blocking `enigma_request` (or the
+ * tunnel-teardown listeners in remote/index.ts) is rejected the instant any
+ * one of those paths discovers the expiry, not only on the sweeper's next
+ * periodic tick. Before this helper existed, `tryMarkUsed` deleted an
+ * expired record without rejecting its waiter, so a request that expired in
+ * the window between the web layer's initial `get(id)` and its later
+ * `tryMarkUsed(id)` call left an `enigma_await` caller hanging forever.
+ * Never used for a used-but-swept-without-results record — that keeps its
+ * own `OutcomeUnknownError` rejection, written directly in `sweep` below,
+ * since it is a different outcome (Issue #69 AC #5) than a plain expiry
+ * (`RequestExpiredError`).
+ */
+function expireRecord(id: string): void {
+  records.delete(id);
+  const waiter = waiters.get(id);
+  if (waiter) {
+    waiter.reject(new RequestExpiredError());
+    waiters.delete(id);
+  }
+}
+
 function startSweeper(): void {
   if (sweepTimer) return;
   sweepTimer = setInterval(sweep, SWEEP_INTERVAL_MS);
   sweepTimer.unref();
 }
 
+/**
+ * A request id that can never be fulfilled because it was never used and is
+ * gone — either it expired unused (rejected by `expireRecord`, on every
+ * deletion path that discovers the expiry) or it is unknown to the store
+ * (rejected by `waitForFulfilled` itself). Both mean the same thing to every
+ * caller: `E_REQUEST_EXPIRED` (Issue #69 AC #5 — reserved for a record that
+ * was never used). Typed (PR #78 batch, Kimi QA AC5) so the shared mapper in
+ * `src/mcp/request-outcome.ts` can map it stably — the previous plain
+ * `Error('request expired')` could not be told apart from a genuine bug, and
+ * blocking `enigma_request`/`enigma_import` rethrown it as an unhandled
+ * tool error instead of returning `E_REQUEST_EXPIRED`. Never carries a name
+ * or value.
+ */
+export class RequestExpiredError extends Error {
+  constructor(message = 'request expired') {
+    super(message);
+    this.name = 'RequestExpiredError';
+    Object.setPrototypeOf(this, RequestExpiredError.prototype);
+  }
+}
+
+/**
+ * A request whose single-use token was already consumed (the human submitted
+ * the form, `tryMarkUsed` returned a record), but whose per-name `results`
+ * were never recorded — `fulfill` never ran for it. Distinct from
+ * `RequestExpiredError`, which is only ever produced for a record that was
+ * never used in the first place. `await.ts`/`request.ts` map
+ * this to `E_OUTCOME_UNKNOWN` (the names MAY already be stored — the
+ * web layer's independent write loop in `request-form.ts` could have
+ * completed some names before crashing); `E_REQUEST_EXPIRED` stays reserved
+ * for a record that was never used (Issue #69 AC #5).
+ */
+export class OutcomeUnknownError extends Error {
+  readonly names: string[];
+  constructor(names: string[]) {
+    super('request swept without outcome');
+    this.name = 'OutcomeUnknownError';
+    this.names = [...names];
+    Object.setPrototypeOf(this, OutcomeUnknownError.prototype);
+  }
+}
+
 function sweep(): void {
   const now = Date.now();
   for (const [id, record] of records) {
     if (record.usedAt !== undefined) {
-      if (now - record.usedAt > USED_GRACE_MS) records.delete(id);
+      // fulfill() defaults `results` to [] (a reveal calls fulfill(id)
+      // without results, since it has no per-name write outcome to report),
+      // so `results === undefined` is the single, uniform test for
+      // "fulfilled never ran" across every kind — request, reveal, import.
+      if (now - record.usedAt > USED_GRACE_MS) {
+        if (record.results === undefined) {
+          const waiter = waiters.get(id);
+          if (waiter) {
+            waiter.reject(new OutcomeUnknownError(record.names));
+            waiters.delete(id);
+          }
+        }
+        records.delete(id);
+      }
       continue;
     }
     if (isExpired(record, now)) {
-      records.delete(id);
-      const waiter = waiters.get(id);
-      if (waiter) {
-        waiter.reject(new Error('request expired'));
-        waiters.delete(id);
-      }
+      expireRecord(id);
     }
   }
 }
@@ -217,11 +299,20 @@ export const RequestStore = {
     return record;
   },
 
-  /** Expiry-aware lookup. Returns the record while it is used-and-within-grace even past its TTL, so a 410 (not 404) can be rendered. */
+  /**
+   * Expiry-aware lookup. Returns the record while it is used-and-within-grace
+   * even past its TTL, so a 410 (not 404) can be rendered. An unused record
+   * found expired is removed via `expireRecord` (PR #78 review, finding 2)
+   * rather than merely hidden, so a waiter already attached via
+   * `waitForFulfilled` is rejected here too, not only on the next sweep.
+   */
   get(id: string): RequestRecord | undefined {
     const record = records.get(id);
     if (!record) return undefined;
-    if (record.usedAt === undefined && isExpired(record, Date.now())) return undefined;
+    if (record.usedAt === undefined && isExpired(record, Date.now())) {
+      expireRecord(id);
+      return undefined;
+    }
     return record;
   },
 
@@ -233,15 +324,29 @@ export const RequestStore = {
    * marking a token used and reporting what happened are two different
    * moments (see `fulfill`); a caller that wrote a value after this call
    * returns is still free to fail before ever calling `fulfill`.
+   *
+   * An id found expired here is removed via `expireRecord` (PR #78 review,
+   * finding 2), which also rejects any waiter already attached via
+   * `waitForFulfilled` — closing the hang where a TTL elapsed in the window
+   * between the web layer's initial `get(id)` lookup and this call (body
+   * parsing and depository detection both happen in between), which used to
+   * delete the record silently and leave `enigma_await` waiting forever.
+   * The `usedAt` check runs FIRST: a used record is never a single-use
+   * candidate anyway, and routing a used-but-expired record through
+   * `expireRecord` would reject its in-flight write's waiter with the
+   * never-used expiry error (`RequestExpiredError`) — the wrong code. That
+   * record belongs to the sweeper's
+   * used-grace path, which produces `OutcomeUnknownError` when `results`
+   * never landed (a submitted write may have partially completed).
    */
   tryMarkUsed(id: string): RequestRecord | undefined {
     const record = records.get(id);
     if (!record) return undefined;
+    if (record.usedAt !== undefined) return undefined;
     if (isExpired(record, Date.now())) {
-      records.delete(id);
+      expireRecord(id);
       return undefined;
     }
-    if (record.usedAt !== undefined) return undefined;
 
     record.usedAt = Date.now();
     return record;
@@ -276,7 +381,7 @@ export const RequestStore = {
    */
   waitForFulfilled(id: string): Promise<'fulfilled'> {
     const record = records.get(id);
-    if (!record) return Promise.reject(new Error('request not found'));
+    if (!record) return Promise.reject(new RequestExpiredError('request not found'));
     if (record.results !== undefined) return Promise.resolve('fulfilled');
 
     let waiter = waiters.get(id);
@@ -362,6 +467,36 @@ export const RequestStore = {
       out.push({ id: record.id, stored, failed, unknown });
     }
     return out;
+  },
+
+  /**
+   * Names-free query for the smallest `expiresAt` of any record that is
+   * currently `open` (Issue #69 AC #3 + §3, boundary decided on PR #78
+   * review): `usedAt === undefined && !isExpired(record, now)`, i.e.
+   * `now <= expiresAt`. This matches `isExpired`'s own `now > expiresAt`
+   * exactly — `isExpired` treats `now === expiresAt` as still valid (the
+   * request-form link still works at that instant), so a record is open at
+   * that boundary too, and the server's idle timer must re-arm with a
+   * positive delay rather than close early (AC #9's `MIN_REARM_DELAY_MS`
+   * floor in `src/web/server.ts` is what keeps that delay positive — at
+   * exactly the boundary `expiry - now + 1` is `1`, so the floor is what
+   * actually supplies the re-arm delay). Used by `src/web/server.ts` to
+   * decide whether to close or re-arm the idle timer. Returns `undefined`
+   * when no record is open, so the server falls back to its existing close
+   * behavior. Deliberately returns a timestamp and not a record: the server
+   * only needs the moment to close at, and exposing a record here would
+   * risk names or values ever reaching it through a future caller.
+   */
+  earliestOpenExpiry(now: number): number | undefined {
+    let earliest: number | undefined;
+    for (const record of records.values()) {
+      if (record.usedAt !== undefined) continue;
+      if (isExpired(record, now)) continue;
+      if (earliest === undefined || record.expiresAt < earliest) {
+        earliest = record.expiresAt;
+      }
+    }
+    return earliest;
   },
 
   /** Test-only: clears all records/waiters and stops the sweeper so state never leaks between test files. */

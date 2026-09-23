@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { ElicitRequest } from '@modelcontextprotocol/sdk/types.js';
 import { connectWithCapabilities } from './harness.js';
@@ -203,6 +203,67 @@ describe('enigma_import', () => {
     expect(text).not.toContain('placeholder');
     expect(readFileSync(envFilePath, 'utf8')).toBe(original);
     expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+    await pair.close();
+  });
+
+  it('URL-mode: a never-used expiry yields structured E_REQUEST_EXPIRED via errorResult — shared import caller consistency with enigma_await/blocking enigma_request (Kimi QA AC5)', async () => {
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
+    const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+
+    pair.client.setRequestHandler(ElicitRequestSchema, async (request: { params: ElicitRequest['params'] }) => {
+      if (request.params.mode !== 'url') throw new Error('expected url mode');
+      return { action: 'accept' };
+    });
+
+    const { RequestExpiredError } = await import('../../../src/request/store.js');
+    const waiterSpy = vi
+      .spyOn(RequestStore, 'waitForFulfilled')
+      .mockImplementationOnce(() => Promise.reject(new RequestExpiredError()));
+
+    try {
+      const result = await pair.client.callTool({ name: 'enigma_import', arguments: {} });
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+      expect(result.isError).toBe(true);
+      expect(text).toContain('E_REQUEST_EXPIRED');
+      expect(text).not.toContain('E_OUTCOME_UNKNOWN');
+    } finally {
+      waiterSpy.mockRestore();
+    }
+    await pair.close();
+  });
+
+  it('URL-mode: a used-but-swept record yields E_OUTCOME_UNKNOWN via errorResult, not an unhandled rejection (PR #78 review, finding 4)', async () => {
+    writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
+    const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+
+    pair.client.setRequestHandler(ElicitRequestSchema, async (request: { params: ElicitRequest['params'] }) => {
+      if (request.params.mode !== 'url') throw new Error('expected url mode');
+      return { action: 'accept' };
+    });
+
+    // Injects the OutcomeUnknownError rejection the sweeper produces after
+    // the used-record grace period, the same way await.test.ts and
+    // request.test.ts do for the shared resolveRequestOutcome mapping —
+    // avoids a slow/brittle multi-minute fake-timer advance while still
+    // exercising the real enigma_import tool's catch around
+    // resolveRequestOutcome, which (before this fix) had none.
+    const { OutcomeUnknownError } = await import('../../../src/request/store.js');
+    const waiterSpy = vi
+      .spyOn(RequestStore, 'waitForFulfilled')
+      .mockImplementationOnce(() => Promise.reject(new OutcomeUnknownError(['OPENAI_API_KEY'])));
+
+    try {
+      const result = await pair.client.callTool({ name: 'enigma_import', arguments: {} });
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+      expect(result.isError).toBe(true);
+      expect(text).toContain('E_OUTCOME_UNKNOWN');
+      expect(text).toContain('OPENAI_API_KEY');
+      expect(text).toContain('enigma list');
+    } finally {
+      waiterSpy.mockRestore();
+    }
     await pair.close();
   });
 });

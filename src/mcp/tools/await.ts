@@ -34,10 +34,15 @@ export function registerAwaitTool(server: McpServer): void {
         const remoteNote = takeRemoteNote(args.request_id);
         const text = remoteNote ? `${outcome.text}\n${remoteNote}` : outcome.text;
         return textResult(text, outcome.isError);
-      } catch {
-        return errorResult(
-          new EnigmaError({ code: 'E_REQUEST_EXPIRED', message: `request ${args.request_id} expired before it was fulfilled` }),
-        );
+      } catch (err) {
+        // The shared mapper (resolveRequestOutcome) turns the two known
+        // store rejections into structured EnigmaErrors — used-but-swept →
+        // E_OUTCOME_UNKNOWN (Issue #69 AC #5), never-used/unknown →
+        // E_REQUEST_EXPIRED (typed RequestExpiredError, PR #78 batch AC5).
+        // Anything else is unexpected and surfaces as-is; the old blanket
+        // fallback here misclassified genuine bugs as E_REQUEST_EXPIRED.
+        if (err instanceof EnigmaError) return errorResult(err);
+        throw err;
       }
     },
   );
