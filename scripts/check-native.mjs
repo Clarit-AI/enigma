@@ -19,6 +19,7 @@ import { tmpdir } from 'node:os';
 import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { binaryArch, TARGET_ARCH } from './lib/binary-arch.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const NATIVE_SRC = join(ROOT, 'native');
@@ -66,8 +67,18 @@ for (const target of REQUIRED_TARGETS) {
     continue;
   }
 
-  // 1. Integrity of the SHIPPED bytes.
-  const actualBin = sha256(readFileSync(binPath));
+  // 1. Integrity of the SHIPPED bytes + machine-type gate (a wrong-arch
+  //    binary passes every digest check and only fails at dlopen time —
+  //    this catches it on every platform's runner).
+  const binBytes = readFileSync(binPath);
+  const actualBin = sha256(binBytes);
+  const arch = binaryArch(binBytes);
+  if (arch !== TARGET_ARCH[target]) {
+    problems.push(
+      `${target}: binary is ${arch} but the target requires ${TARGET_ARCH[target]} ` +
+        '(wrong-arch cross-build — e.g. Docker defaulted to the host arch)',
+    );
+  }
   if (actualBin !== manifest.binarySha256) {
     problems.push(
       `${target}: committed index-lock.node does not match manifest.binarySha256 ` +

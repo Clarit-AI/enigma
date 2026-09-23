@@ -1,9 +1,10 @@
 {
   "manifestVersion": 1,
   "target": "linux-x64",
+  "arch": "x64",
   "napiVersion": 8,
   "binary": "index-lock.node",
-  "binarySha256": "bb16dd33d87a930062e06facc77c6158e30b372fee04ab75b52bbecd32bc1e99",
+  "binarySha256": "3086c92c6c2ea929daf940d1db33c417e865d4d4937d2fd37d3d3490f60e6247",
   "sourceSha256": "ba713e34567192e700161b2ff2fc7486195a562eb1e50e17d1d7334bd229bfb1",
   "sourceFiles": [
     "include/js_native_api.h",
@@ -12,13 +13,13 @@
     "include/node_api_types.h",
     "index-lock.cc"
   ],
-  "builtAt": "2026-09-23T20:36:21.566Z",
+  "builtAt": "2026-09-23T20:44:28.024Z",
   "builder": "scripts/build-native.mjs",
-  "buildCommand": "docker run --rm -v /Users/bbrenner/.traycer/worktrees/clarit-ai__enigma/feat-66-index-lock:/src -v /Users/bbrenner/.traycer/worktrees/clarit-ai__enigma/feat-66-index-lock/plugins/enigma/native/linux-x64:/out -w /src node:20-bookworm gcc -x c -std=c11 -O2 -fPIC -shared -DNAPI_VERSION=8 -I native/include -o /out/index-lock.node native/index-lock.cc",
+  "buildCommand": "docker run --rm --platform linux/amd64 -v /Users/bbrenner/.traycer/worktrees/clarit-ai__enigma/feat-66-index-lock:/src -v /Users/bbrenner/.traycer/worktrees/clarit-ai__enigma/feat-66-index-lock/plugins/enigma/native/linux-x64:/out -w /src node:20-bookworm gcc -x c -std=c11 -O2 -fPIC -shared -DNAPI_VERSION=8 -I native/include -o /out/index-lock.node native/index-lock.cc",
   "toolchain": "gcc (Debian 12.2.0-14+deb12u1) 12.2.0",
-  "buildHost": "docker node:20-bookworm",
+  "buildHost": "docker --platform linux/amd64 node:20-bookworm",
   "glibc": {
-    "maxRequiredSymbolVersion": "GLIBC_2.17",
+    "maxRequiredSymbolVersion": "GLIBC_2.2.5",
     "audit": "readelf --version-info"
   },
   "neededLibs": [

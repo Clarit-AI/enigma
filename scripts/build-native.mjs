@@ -18,6 +18,7 @@ import { createHash } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { binaryArch, TARGET_ARCH } from './lib/binary-arch.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const NATIVE_SRC = join(ROOT, 'native');
@@ -100,7 +101,11 @@ if (target.startsWith('darwin-')) {
   buildHost = `host ${hostTag()}, macOS cross -arch ${arch}`;
   execFileSync('clang', args, { cwd: ROOT, stdio: 'inherit' });
 } else {
-  command = `docker run --rm -v ${ROOT}:/src -v ${outDir}:/out -w /src ${LINUX_DOCKER_IMAGE} ${linuxCompile}`;
+  // --platform linux/amd64 is MANDATORY: Docker on an Apple Silicon host
+  // defaults to arm64 containers, which would silently produce an aarch64
+  // binary in the linux-x64 target directory (check:native's arch gate
+  // would catch it, but the build should not need the gate).
+  command = `docker run --rm --platform linux/amd64 -v ${ROOT}:/src -v ${outDir}:/out -w /src ${LINUX_DOCKER_IMAGE} ${linuxCompile}`;
   // Build + dependency/symbol audits inside the container (readelf comes
   // with the image's toolchain). Output goes straight to the target dir.
   const script = [
@@ -112,20 +117,26 @@ if (target.startsWith('darwin-')) {
   ].join(' && ');
   const out = execFileSync(
     'docker',
-    ['run', '--rm', '-v', `${ROOT}:/src`, '-v', `${outDir}:/out`, '-w', '/src', LINUX_DOCKER_IMAGE,
+    ['run', '--rm', '--platform', 'linux/amd64', '-v', `${ROOT}:/src`, '-v', `${outDir}:/out`, '-w', '/src', LINUX_DOCKER_IMAGE,
       'bash', '-c', script],
     { encoding: 'utf8' },
   );
   toolchain = out.match(/TOOLCHAIN:(.*)/)?.[1]?.trim() ?? 'unknown';
   glibcAudit = out.match(/GLIBC:(.*)/)?.[1]?.trim();
   neededLibs = out.match(/NEEDED:(.*)/)?.[1]?.trim();
-  buildHost = `docker ${LINUX_DOCKER_IMAGE}`;
+  buildHost = `docker --platform linux/amd64 ${LINUX_DOCKER_IMAGE}`;
 }
 
 const binary = readFileSync(outFile);
+const arch = binaryArch(binary);
+if (arch !== TARGET_ARCH[target]) {
+  console.error(`build-native: FATAL ${target} produced a ${arch} binary — wrong-arch cross-build (missing --platform?)`);
+  process.exit(1);
+}
 const manifest = {
   manifestVersion: 1,
   target,
+  arch,
   napiVersion: 8,
   binary: 'index-lock.node',
   binarySha256: sha256(binary),
