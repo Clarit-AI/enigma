@@ -69,4 +69,98 @@ describe('parseSubmission', () => {
     expect(result.values).toEqual({ OPENAI_API_KEY: 'sk-abc' });
     expect('GITHUB_TOKEN' in result.values).toBe(false);
   });
+
+  describe('extra rows and .env blob (Issue #71)', () => {
+    const form = (pairs: Array<[string, string]>): Buffer => {
+      const params = new URLSearchParams();
+      for (const [k, v] of pairs) params.append(k, v);
+      return Buffer.from(params.toString());
+    };
+
+    it('reads extra_name_N/extra_value_N pairs in numeric row order, returning raw text', () => {
+      const result = parseSubmission(
+        'application/x-www-form-urlencoded',
+        form([
+          ['extra_name_10', 'TENTH'],
+          ['extra_value_10', 'v10'],
+          ['extra_name_2', 'SECOND'],
+          ['extra_value_2', 'v2'],
+        ]),
+        names,
+      );
+
+      expect(result.extraRows).toEqual([
+        { name: 'SECOND', value: 'v2' },
+        { name: 'TENTH', value: 'v10' },
+      ]);
+    });
+
+    it('drops a row only when BOTH fields are empty; a value without a name (or vice versa) is kept for validation', () => {
+      const result = parseSubmission(
+        'application/x-www-form-urlencoded',
+        form([
+          ['extra_name_1', ''],
+          ['extra_value_1', ''],
+          ['extra_name_2', ''],
+          ['extra_value_2', 'orphan-value'],
+          ['extra_name_3', 'NAME_ONLY'],
+        ]),
+        names,
+      );
+
+      expect(result.extraRows).toEqual([
+        { name: '', value: 'orphan-value' },
+        { name: 'NAME_ONLY', value: '' },
+      ]);
+    });
+
+    it('ignores a value field with no matching name field, and any key that is not extra_name_<digits>', () => {
+      const result = parseSubmission(
+        'application/x-www-form-urlencoded',
+        form([
+          ['extra_value_1', 'lonely'],
+          ['extra_name_x', 'NOT_A_ROW'],
+          ['extra_name_1234567', 'TOO_MANY_DIGITS'],
+          ['unrelated', 'ignored'],
+        ]),
+        names,
+      );
+
+      expect(result.extraRows).toEqual([]);
+    });
+
+    it('reads dotenv_blob verbatim without parsing it, and leaves it undefined when absent', () => {
+      const withBlob = parseSubmission('application/x-www-form-urlencoded', form([['dotenv_blob', 'A=1\nB=2']]), names);
+      const without = parseSubmission('application/x-www-form-urlencoded', form([['OPENAI_API_KEY', 'x']]), names);
+
+      expect(withBlob.dotenvBlob).toBe('A=1\nB=2');
+      expect(without.dotenvBlob).toBeUndefined();
+      expect(without.extraRows).toEqual([]);
+    });
+
+    it('never lets an extra field into `values` — the declared-names allow-list is unchanged', () => {
+      const result = parseSubmission(
+        'application/x-www-form-urlencoded',
+        form([
+          ['OPENAI_API_KEY', 'declared'],
+          ['extra_name_1', 'GITHUB_TOKEN'],
+          ['extra_value_1', 'smuggled'],
+        ]),
+        ['OPENAI_API_KEY'],
+      );
+
+      expect(result.values).toEqual({ OPENAI_API_KEY: 'declared' });
+    });
+
+    it('JSON submissions carry no extras (the extensible form is form-encoded only)', () => {
+      const result = parseSubmission(
+        'application/json',
+        Buffer.from(JSON.stringify({ values: { OPENAI_API_KEY: 'x' }, extra_name_1: 'EXTRA', extra_value_1: 'y', dotenv_blob: 'Z=1' })),
+        names,
+      );
+
+      expect(result.extraRows).toEqual([]);
+      expect(result.dotenvBlob).toBeUndefined();
+    });
+  });
 });
