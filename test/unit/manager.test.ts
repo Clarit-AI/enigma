@@ -52,6 +52,8 @@ vi.mock('node:child_process', () => ({
 }));
 
 const { deleteSecret, hasSecret, listSecrets, resolveSecret, setSecret } = await import('../../src/storage/manager.js');
+const { cmdMove } = await import('../../src/cli/commands/move.js');
+const indexStoreModule = await import('../../src/core/index-store.js');
 
 describe('storage manager', () => {
   let tmpHome: string;
@@ -266,5 +268,28 @@ describe('storage manager', () => {
     expect(opCalls.filter((c) => c.args[0] === 'vault' && c.args[1] === 'create')).toHaveLength(1);
     const [entry] = listSecrets({ scope: 'global' });
     expect(entry?.ref).toBe('opitemid');
+  });
+
+  it('Issue #66 AC #5: `enigma move` reaches the index only through mutateIndex (the locked helper), not via a direct writeIndex call', async () => {
+    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'global', depository: 'encrypted', actor: 'cli' });
+
+    const spy = vi.spyOn(indexStoreModule, 'mutateIndex');
+
+    const exitCode = await cmdMove(['OPENAI_API_KEY', '--to', '1password']);
+
+    expect(exitCode).toBe(0);
+    expect(spy).toHaveBeenCalled();
+    // The delta must see the post-lock authoritative state — it reads the
+    // index (not a stale snapshot from before the lock), which is the whole
+    // point of routing every write through mutateIndex.
+    const delta = spy.mock.calls[0]?.[0];
+    expect(typeof delta).toBe('function');
+    // Calling the delta with the current index must yield the moved entry
+    // pointed at the 1Password ref the depository just returned.
+    const before = JSON.parse(JSON.stringify(indexStoreModule.readIndex())) as { entries: Array<{ name: string; depository: string; ref: string }> };
+    const next = delta!(before as never);
+    expect(next.entries.some((e) => e.name === 'OPENAI_API_KEY' && e.depository === '1password')).toBe(true);
+
+    spy.mockRestore();
   });
 });
