@@ -49,6 +49,7 @@ Two functions, one rule each, both pure fs with no child process:
 - Templates are real HTML files bundled as text; CSP `script-src 'self'`; no inline scripts.
 - Remote access is opt-in per request: cloudflared quick tunnel or Tailscale serve, tunnel lifetime = request lifetime; QR of the public URL on the local page. Non-localhost plain HTTP is refused unless the host is in the Tailscale range (harvested `network-policy`).
 - No PIN on links in v1 (V2 candidate).
+- The request form accepts names beyond the ones the agent asked for (Issue #71): `+ Add secret` rows and a pasted `.env` blob. The blob is one form field, parsed on submit by the existing `parseDotEnv` — there is deliberately no parse-and-echo endpoint, because a JSON endpoint returning `{name, value}` would put a value in an HTTP response body (S2.4). Invariant: name text a human typed or pasted only ever reaches a response body, log, audit line or outcome text after passing `validateName`; anything else is counted and discarded. The 25-name cap and duplicate/ambiguity checks run before the request id is consumed.
 
 ## ADR-006 — Packaging (D5.1–D5.6)
 - Repo is marketplace `clarit-enigma` and npm package `@clarit.ai/enigma`; plugin at `plugins/enigma`.
