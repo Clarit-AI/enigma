@@ -43,7 +43,10 @@ export interface RequestNameResult {
 // `results` array, not the record, so the count of invalid names the web layer
 // skipped (Issue #71) travels beside that array rather than inside a
 // `RequestNameResult`: an invalid name is never a result, and its text must
-// never be stored anywhere — only how many there were.
+// never be stored anywhere — only how many there were. This depends on
+// `fulfill` storing, and `consumeOutcome` returning, the SAME array the web
+// layer annotated (neither may copy it); test/unit/request/skipped-name-count.test.ts
+// pins each hop.
 const skippedNameCounts = new WeakMap<RequestNameResult[], number>();
 
 /** Records how many submitted names were skipped as invalid; returns `results` for chaining into `fulfill`. */
