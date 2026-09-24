@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Local-only secret request/reveal for coding agents.",
-    "version": "0.2.0"
+    "version": "0.3.0"
   },
   "plugins": [
     {
       "name": "enigma",
       "description": "Local-only secret request/reveal for coding agents — no secret value ever enters the model's context.",
-      "version": "0.2.0",
+      "version": "0.3.0",
       "source": "./plugins/enigma"
     }
   ]

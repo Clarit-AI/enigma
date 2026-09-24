@@ -16,7 +16,7 @@ import { registerRevealTool } from './tools/reveal.js';
  * (ADR-001) — every tool's result is `{content:[{type:'text',...}], isError?}`.
  */
 export function createServer(): McpServer {
-  const server = new McpServer({ name: 'enigma', version: '0.2.0' });
+  const server = new McpServer({ name: 'enigma', version: '0.3.0' });
   registerListTool(server);
   registerRequestTool(server);
   registerAwaitTool(server);
