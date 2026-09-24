@@ -12,7 +12,7 @@
 // candidate per tool call. Only an actual hit gets audited here, with op `leak`.
 import { readIndex } from '../core/index-store.js';
 import { loadConfig } from '../core/config.js';
-import { appendAuditEvent } from '../core/audit.js';
+import { appendAuditEvent, auditScopeFields } from '../core/audit.js';
 import { findProjectPath, projectId as computeProjectId } from '../core/project.js';
 import { DEPOSITORY_MODULES } from '../storage/detect.js';
 import type { DepositoryId } from '../storage/interfaces.js';
@@ -95,11 +95,11 @@ async function scan(input: PostToolUseInput): Promise<PostToolUseOutput | undefi
         appendAuditEvent({
           op: 'leak',
           name: entry.name,
-          scope: entry.scope,
           depository: entry.depository,
           actor: 'hook',
           ok: true,
           error: null,
+          ...auditScopeFields(entry),
         });
       }
     } catch {

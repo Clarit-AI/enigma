@@ -359,6 +359,16 @@ function legacyScopeCountsLine(report) {
 }
 
 // src/core/audit.ts
+function auditScopeFields(source) {
+  if (source.scope !== "project") return { scope: "global" };
+  if (source.projectId === void 0) {
+    throw new EnigmaError({
+      code: "E_INDEX_CORRUPT",
+      message: "project-scoped audit source has no projectId"
+    });
+  }
+  return { scope: "project", projectId: source.projectId, projectPath: source.projectPath };
+}
 function appendAuditEvent(event) {
   const line = { ts: (/* @__PURE__ */ new Date()).toISOString(), ...event };
   appendLineSecure(auditLogPath(), JSON.stringify(line));
@@ -1661,11 +1671,11 @@ async function scan(input) {
         appendAuditEvent({
           op: "leak",
           name: entry.name,
-          scope: entry.scope,
           depository: entry.depository,
           actor: "hook",
           ok: true,
-          error: null
+          error: null,
+          ...auditScopeFields(entry)
         });
       }
     } catch {

@@ -72,9 +72,11 @@ Boolean flags accept an explicit `--flag=true|false|yes|no|0|1` form too (case-i
 
 `~/.config/enigma/audit.log` (0600, JSONL):
 ```json
-{ "ts": "ISO", "op": "set|rotated|read|reveal|remove|move|import|migrate|leak", "name": "…", "scope": "…", "depository": "…", "actor": "agent|user|cli|hook", "ok": true, "error": null, "method"?: "clipboard"|"page" }
+{ "ts": "ISO", "op": "set|rotated|read|reveal|remove|move|import|migrate|leak", "name": "…", "scope": "…", "depository": "…", "actor": "agent|user|cli|hook", "ok": true, "error": null, "method"?: "clipboard"|"page", "projectId"?: "9f3a…", "projectPath"?: "/abs/path" }
 ```
 `method` (Issue #26) is present only on a `reveal` line, naming the disclosure surface — never a value, ref, or anything derived from the secret. It's optional so every audit line written before this field existed stays valid; a reader encountering a `reveal` line without it should treat the method as "not recorded", never assume a specific one. The union only ever names a surface a reveal path actually produces — `enigma_reveal`'s own method is `page | clipboard` — so a new member is added only alongside the reveal path that emits it, never speculatively.
+
+`projectId`/`projectPath` (Issue #80) are present iff `scope` is `"project"`, attributing the line to a project — the log is one per-user file shared by every repo. `projectId` is the repo-identity id the index uses (`projectId(cwd)`, Issue #67 — not a lexical path hash); `projectPath` is the worktree path recorded in clear, exactly as `index.json` already records it (D1.1), so it discloses nothing new. Both are optional so lines written before this field existed stay valid; a reader treats an absent `projectId` as "not recorded", never as a specific project. Writers are type-enforced: `appendAuditEvent` takes a discriminated scope slice where `scope: 'project'` requires `projectId`, so a new call site that forgets it is a compile error.
 
 Corrupt/unparsable on-disk JSON never surfaces a raw `SyntaxError` (Issue #18): `index.json` → `E_INDEX_CORRUPT`, `secrets.enc` → `E_VAULT_CORRUPT` (naming depository `encrypted`), `config.json` and project `.enigma.json` → `E_CONFIG_CORRUPT`. Every case names the file's path and says to fix or remove it by hand; none ever include the file's actual bytes.
 

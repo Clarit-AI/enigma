@@ -4,10 +4,11 @@
 // src/storage/** — an allowed location for in-flight values (style-guide).
 import { randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { appendAuditEvent, auditErrorText } from '../core/audit.js';
+import { appendAuditEvent, auditErrorText, auditScopeFields } from '../core/audit.js';
 import type { AuditActor } from '../core/audit.js';
 import { EnigmaError } from '../core/errors.js';
 import type { Scope } from '../core/index-store.js';
+import { projectId as computeProjectId } from '../core/project.js';
 import { checkEnvGitignore } from './depositories/env.js';
 import { parseDotEnv, removeDotEnvEntries } from './dotenv-file.js';
 import type { ParsedDotEnvEntry } from './dotenv-file.js';
@@ -166,7 +167,19 @@ export async function commitImport(opts: ImportCommitOptions): Promise<ImportCom
         // requires a durable record for. Names and the error code only, never the value:
         // `ambiguousReason` (folded into auditErrorText via the error message) is always
         // static, structural text from the parser, never an echo of the value itself.
-        appendAuditEvent({ op: 'import', name: entry.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+        appendAuditEvent({
+          op: 'import',
+          name: entry.name,
+          depository: opts.depository,
+          actor: opts.actor,
+          ok: false,
+          error: auditErrorText(err),
+          ...auditScopeFields({
+            scope: opts.scope,
+            projectId: opts.scope === 'project' ? computeProjectId(opts.cwd) : undefined,
+            projectPath: opts.projectPath,
+          }),
+        });
         throw err;
       }
       await setSecret({

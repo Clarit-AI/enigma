@@ -26,7 +26,7 @@ Dependencies: 2 and 4 build on 1; 3 builds on 1 and 2; 5 wraps all.
 - D1.5 Project scope shadows global for reads; `list` marks shadowed rows; `remove` requires explicit scope when both exist.
 - D1.6 Canonical term **depository** (see glossary). Identifiers: `env`, `encrypted`, `keychain`, `secret-service`, `1password`. Flag `--depository`, short `--to` on move/add.
 - D1.7 `encrypted`: random 256-bit key at `~/.config/enigma/enigma.key` (0600), per-entry AES-256-GCM in `~/.config/enigma/secrets.enc`; no derivation, no keychain-held key. Threat model documented: protects against repo/backup/disk exposure, not same-user malware.
-- D1.8 Index `~/.config/enigma/index.json` (0600): name, scope, projectPath, depository, ref, description, usage, createdAt, updatedAt. Audit `~/.config/enigma/audit.log` (0600, JSONL): ts, op (set|rotated|read|reveal|remove|move|import|migrate|leak), name, scope, depository, actor (agent|user|cli|hook), ok, error. Never values.
+- D1.8 Index `~/.config/enigma/index.json` (0600): name, scope, projectPath, depository, ref, description, usage, createdAt, updatedAt. Audit `~/.config/enigma/audit.log` (0600, JSONL): ts, op (set|rotated|read|reveal|remove|move|import|migrate|leak), name, scope, depository, actor (agent|user|cli|hook), ok, error, projectId?/projectPath? (project scope only, Issue #80). Never values.
 - D1.9 Keychain: service `enigma`, account `<scope-id>/<NAME>`. 1Password: vault `Enigma` created on first use after one-time confirmation; API Credential items, value in `credential`; title `NAME` (global) or `NAME · <project folder>` (project); reads by item id from the index.
 
 **Stress-test scenarios (user confirmed; become acceptance tests)**:

@@ -105,10 +105,16 @@ export async function cmdMigrateScope(argv: string[]): Promise<number> {
     // still an operation worth recording.
     for (const item of plan.items) {
       if (item.rekeyable) {
+        // Issue #80: attributes the refused re-key to the entry's recorded
+        // project — a legacy id is still that entry's identity until it is
+        // re-keyed. `plan.projectId` is only the fallback for a legacy entry
+        // that lacks the field entirely.
         appendAuditEvent({
           op: 'migrate',
           name: item.entry.name,
           scope: 'project',
+          projectId: item.entry.projectId ?? plan.projectId,
+          projectPath: item.entry.projectPath,
           depository: item.entry.depository,
           actor: 'cli',
           ok: false,
@@ -120,10 +126,12 @@ export async function cmdMigrateScope(argv: string[]): Promise<number> {
   }
 
   for (const e of result.rekeyed) {
-    appendAuditEvent({ op: 'migrate', name: e.name, scope: 'project', depository: e.depository, actor: 'cli', ok: true, error: null });
+    // e.projectId is already the re-keyed repo id; the ?? fallback is only
+    // for the impossible-in-practice missing field.
+    appendAuditEvent({ op: 'migrate', name: e.name, scope: 'project', projectId: e.projectId ?? plan.projectId, projectPath: e.projectPath, depository: e.depository, actor: 'cli', ok: true, error: null });
   }
   for (const e of result.pruned) {
-    appendAuditEvent({ op: 'remove', name: e.name, scope: 'project', depository: e.depository, actor: 'cli', ok: true, error: null });
+    appendAuditEvent({ op: 'remove', name: e.name, scope: 'project', projectId: e.projectId ?? plan.projectId, projectPath: e.projectPath, depository: e.depository, actor: 'cli', ok: true, error: null });
   }
 
   const lines = [

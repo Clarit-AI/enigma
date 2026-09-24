@@ -2,7 +2,7 @@ import { parseArgs, parseScope, UsageError } from '../args.js';
 import { resolveSecret, setSecret } from '../../storage/manager.js';
 import { readIndex, resolveIndexEntry } from '../../core/index-store.js';
 import { projectId as computeProjectId } from '../../core/project.js';
-import { appendAuditEvent, auditErrorText, classifyCleanupError } from '../../core/audit.js';
+import { appendAuditEvent, auditErrorText, auditScopeFields, classifyCleanupError } from '../../core/audit.js';
 import { DEPOSITORY_MODULES } from '../../storage/detect.js';
 import { EnigmaError } from '../../core/errors.js';
 import type { DepositoryId } from '../../storage/interfaces.js';
@@ -35,7 +35,7 @@ export async function cmdMove(argv: string[]): Promise<number> {
   } catch (err) {
     // resolveSecret is not setSecret's concern — nothing else audits this step, so it's
     // audited here, same as before.
-    appendAuditEvent({ op: 'move', name, scope: entry.scope, depository: target, actor: 'cli', ok: false, error: auditErrorText(err) });
+    appendAuditEvent({ op: 'move', name, depository: target, actor: 'cli', ok: false, error: auditErrorText(err), ...auditScopeFields(entry) });
     throw err;
   }
 

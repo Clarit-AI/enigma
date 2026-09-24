@@ -395,6 +395,16 @@ function projectId(cwd) {
 }
 
 // src/core/audit.ts
+function auditScopeFields(source) {
+  if (source.scope !== "project") return { scope: "global" };
+  if (source.projectId === void 0) {
+    throw new EnigmaError({
+      code: "E_INDEX_CORRUPT",
+      message: "project-scoped audit source has no projectId"
+    });
+  }
+  return { scope: "project", projectId: source.projectId, projectPath: source.projectPath };
+}
 function auditErrorText(err) {
   if (err instanceof EnigmaError) return `${err.code}: ${err.message}`;
   if (err instanceof Error) return err.constructor.name;
@@ -1621,8 +1631,11 @@ function locationReclaimed(displaced) {
   );
 }
 async function setSecret(opts) {
+  const needsProjectPath = opts.scope === "project" || opts.depository === "env";
+  const projectPath = needsProjectPath ? findProjectPath(opts.cwd ?? process.cwd()) : void 0;
+  const pid = opts.scope === "project" ? projectId(opts.cwd ?? process.cwd()) : void 0;
   const auditRefusal = (err, op2) => {
-    appendAuditEvent({ op: op2, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+    appendAuditEvent({ op: op2, name: opts.name, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err), ...auditScopeFields({ scope: opts.scope, projectId: pid, projectPath }) });
   };
   try {
     validateName(opts.name);
@@ -1639,9 +1652,6 @@ async function setSecret(opts) {
     auditRefusal(err, opts.auditOp ?? "set");
     throw err;
   }
-  const needsProjectPath = opts.scope === "project" || opts.depository === "env";
-  const projectPath = needsProjectPath ? findProjectPath(opts.cwd ?? process.cwd()) : void 0;
-  const pid = opts.scope === "project" ? projectId(opts.cwd ?? process.cwd()) : void 0;
   const index = readIndex();
   const existing = findIndexEntry(index, opts.name, opts.scope, pid);
   if (existing && !opts.rotate) {
@@ -1705,7 +1715,7 @@ async function setSecret(opts) {
     auditRefusal(err, op);
     throw err;
   }
-  appendAuditEvent({ op, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: true, error: null });
+  appendAuditEvent({ op, name: opts.name, depository: opts.depository, actor: opts.actor, ok: true, error: null, ...auditScopeFields({ scope: opts.scope, projectId: pid, projectPath }) });
   const warnings = opts.depository === "env" && projectPath ? checkEnvGitignore(projectPath) : [];
   if (displaced && displaced.depository === opts.depository) {
     const locationDiffers = displaced.ref !== ref || opts.depository === "env" && canonicalPath(displaced.projectPath) !== canonicalPath(projectPath);
@@ -1723,7 +1733,7 @@ async function setSecret(opts) {
         warnings.push(
           `could not remove the old copy of ${opts.name} in ${opts.depository} (cleanup failed: ${classifyCleanupError(err)})`
         );
-        appendAuditEvent({ op: "remove", name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: classifyCleanupError(err) });
+        appendAuditEvent({ op: "remove", name: opts.name, depository: opts.depository, actor: opts.actor, ok: false, error: classifyCleanupError(err), ...auditScopeFields({ scope: opts.scope, projectId: pid, projectPath }) });
       }
     }
   }
@@ -1742,7 +1752,7 @@ async function deleteSecret(name, opts) {
   try {
     await depository.delete(removed.ref);
   } catch (err) {
-    appendAuditEvent({ op: "remove", name, scope: removed.scope, depository: removed.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+    appendAuditEvent({ op: "remove", name, depository: removed.depository, actor: opts.actor, ok: false, error: auditErrorText(err), ...auditScopeFields(removed) });
     throw err;
   }
   try {
@@ -1754,10 +1764,10 @@ async function deleteSecret(name, opts) {
       return { ...current, entries: current.entries.filter((e) => e !== currentRemoved) };
     });
   } catch (err) {
-    appendAuditEvent({ op: "remove", name, scope: removed.scope, depository: removed.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+    appendAuditEvent({ op: "remove", name, depository: removed.depository, actor: opts.actor, ok: false, error: auditErrorText(err), ...auditScopeFields(removed) });
     throw err;
   }
-  appendAuditEvent({ op: "remove", name, scope: removed.scope, depository: removed.depository, actor: opts.actor, ok: true, error: null });
+  appendAuditEvent({ op: "remove", name, depository: removed.depository, actor: opts.actor, ok: true, error: null, ...auditScopeFields(removed) });
 }
 async function resolveSecret(name, opts) {
   const pid = opts.cwd ? projectId(opts.cwd) : void 0;
@@ -1771,10 +1781,10 @@ async function resolveSecret(name, opts) {
   const depository = createDepository(entry.depository, { projectPath: projectPathFor(entry, opts.cwd) });
   try {
     const value = await depository.resolve(entry.ref);
-    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: true, error: null, method });
+    appendAuditEvent({ op, name, depository: entry.depository, actor: opts.actor, ok: true, error: null, method, ...auditScopeFields(entry) });
     return value;
   } catch (err) {
-    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: false, error: auditErrorText(err), method });
+    appendAuditEvent({ op, name, depository: entry.depository, actor: opts.actor, ok: false, error: auditErrorText(err), method, ...auditScopeFields(entry) });
     throw err;
   }
 }
@@ -2498,7 +2508,19 @@ async function commitImport(opts) {
     try {
       if (entry.ambiguous) {
         const err = ambiguousValueError(entry, opts.envFilePath);
-        appendAuditEvent({ op: "import", name: entry.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+        appendAuditEvent({
+          op: "import",
+          name: entry.name,
+          depository: opts.depository,
+          actor: opts.actor,
+          ok: false,
+          error: auditErrorText(err),
+          ...auditScopeFields({
+            scope: opts.scope,
+            projectId: opts.scope === "project" ? projectId(opts.cwd) : void 0,
+            projectPath: opts.projectPath
+          })
+        });
         throw err;
       }
       await setSecret({
@@ -5842,6 +5864,8 @@ async function cmdMigrateScope(argv) {
           op: "migrate",
           name: item.entry.name,
           scope: "project",
+          projectId: item.entry.projectId ?? plan.projectId,
+          projectPath: item.entry.projectPath,
           depository: item.entry.depository,
           actor: "cli",
           ok: false,
@@ -5852,10 +5876,10 @@ async function cmdMigrateScope(argv) {
     throw err;
   }
   for (const e of result.rekeyed) {
-    appendAuditEvent({ op: "migrate", name: e.name, scope: "project", depository: e.depository, actor: "cli", ok: true, error: null });
+    appendAuditEvent({ op: "migrate", name: e.name, scope: "project", projectId: e.projectId ?? plan.projectId, projectPath: e.projectPath, depository: e.depository, actor: "cli", ok: true, error: null });
   }
   for (const e of result.pruned) {
-    appendAuditEvent({ op: "remove", name: e.name, scope: "project", depository: e.depository, actor: "cli", ok: true, error: null });
+    appendAuditEvent({ op: "remove", name: e.name, scope: "project", projectId: e.projectId ?? plan.projectId, projectPath: e.projectPath, depository: e.depository, actor: "cli", ok: true, error: null });
   }
   const lines = [
     "enigma migrate-scope \u2014 applied",
@@ -5896,7 +5920,7 @@ async function cmdMove(argv) {
   try {
     value = await resolveSecret(name, { scope: entry.scope, cwd, actor: "cli" });
   } catch (err) {
-    appendAuditEvent({ op: "move", name, scope: entry.scope, depository: target, actor: "cli", ok: false, error: auditErrorText(err) });
+    appendAuditEvent({ op: "move", name, depository: target, actor: "cli", ok: false, error: auditErrorText(err), ...auditScopeFields(entry) });
     throw err;
   }
   await setSecret({
