@@ -28,6 +28,16 @@ export type AuditRevealMethod = 'clipboard' | 'page';
  * disclosure surface itself. A line written before Issue #26 (or any other
  * op) simply omits it; treat an absent `method` as "not recorded", never as
  * a specific method.
+ *
+ * `projectId`/`projectPath` (Issue #80) attribute the line to a project: the
+ * log is one per-user file shared by every repo, so a project-scoped line
+ * names which project it came from — the repo-identity id (`projectId(cwd)`,
+ * Issue #67, the same id the index uses, not a lexical path hash) plus the
+ * worktree path in clear, exactly as the index already records it (D1.1).
+ * Present iff `scope === 'project'` — a global line carries neither. Lines
+ * written before Issue #80 simply omit both; treat an absent `projectId` as
+ * "not recorded", never as a specific project. Enforced at write time by
+ * `AuditEventInput`/`auditScopeFields`, not by this field's optionality.
  */
 export interface AuditEvent {
   op: AuditOp;
@@ -38,10 +48,62 @@ export interface AuditEvent {
   ok: boolean;
   error: string | null;
   method?: AuditRevealMethod;
+  projectId?: string;
+  projectPath?: string;
 }
 
 interface AuditLine extends AuditEvent {
   ts: string;
+}
+
+/**
+ * The scope-paired slice of an audit line (Issue #80). A project line MUST
+ * carry `projectId` — the discriminated union makes a forgotten id a
+ * compile error at the call site, not a silently unattributed log line.
+ * `projectPath` rides along when known (it is optional because an index
+ * entry can legitimately lack a recorded path). A global line carries
+ * neither field — passing `projectId` on a `scope: 'global'` literal is an
+ * excess-property error.
+ */
+export type AuditScopeFields =
+  // `?: never` on the global member matters: TypeScript distributes a
+  // union-typed discriminant over the union members, so without it a call
+  // site passing `{ scope: <Scope>, projectId: <id> }` would type-check and
+  // could write a projectId onto a global line.
+  | { scope: 'global'; projectId?: never; projectPath?: never }
+  | { scope: 'project'; projectId: string; projectPath?: string };
+
+/**
+ * What `appendAuditEvent` accepts: the event fields plus the discriminated
+ * scope slice. Keeping `AuditEvent` itself wide preserves read-side
+ * compatibility — old log lines without the project fields still satisfy
+ * the type — while writes go through this narrowed shape.
+ */
+export type AuditEventInput = Omit<AuditEvent, 'scope' | 'projectId' | 'projectPath'> & AuditScopeFields;
+
+/**
+ * Narrows a scope-bearing source — an index entry, or a synthesized
+ * `{ scope, projectId, projectPath }` — to the slice `appendAuditEvent`
+ * requires. Every call site whose scope is a runtime `Scope` (i.e. all of
+ * them) goes through here, so the project/global pairing can never drift
+ * apart at a call site. Throws `E_INDEX_CORRUPT` when the source claims
+ * project scope but carries no `projectId`: an index entry in that state
+ * is corrupt, and writing the line unattributed would silently reproduce
+ * the exact gap Issue #80 closes.
+ */
+export function auditScopeFields(source: {
+  scope: Scope;
+  projectId?: string;
+  projectPath?: string;
+}): AuditScopeFields {
+  if (source.scope !== 'project') return { scope: 'global' };
+  if (source.projectId === undefined) {
+    throw new EnigmaError({
+      code: 'E_INDEX_CORRUPT',
+      message: 'project-scoped audit source has no projectId',
+    });
+  }
+  return { scope: 'project', projectId: source.projectId, projectPath: source.projectPath };
 }
 
 /**
@@ -75,7 +137,7 @@ export function classifyCleanupError(err: unknown): string {
   return auditErrorText(err);
 }
 
-export function appendAuditEvent(event: AuditEvent): void {
+export function appendAuditEvent(event: AuditEventInput): void {
   const line: AuditLine = { ts: new Date().toISOString(), ...event };
   appendLineSecure(auditLogPath(), JSON.stringify(line));
 }

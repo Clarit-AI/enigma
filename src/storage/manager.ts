@@ -8,7 +8,7 @@ import { realpathSync } from 'node:fs';
 import { EnigmaError } from '../core/errors.js';
 import { validateName } from '../core/naming.js';
 import { findProjectPath, projectId as computeProjectId } from '../core/project.js';
-import { appendAuditEvent, auditErrorText, classifyCleanupError } from '../core/audit.js';
+import { appendAuditEvent, auditErrorText, auditScopeFields, classifyCleanupError } from '../core/audit.js';
 import type { AuditActor, AuditEvent, AuditRevealMethod } from '../core/audit.js';
 import {
   buildRef,
@@ -106,12 +106,19 @@ export interface SetSecretResult {
 }
 
 export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult> {
+  // Issue #80: computed before the first refusal site so every audit line —
+  // including an early validateName/E_SCOPE_INVALID refusal — carries the
+  // project attribution. Pure fs reads of opts.cwd, no side effects.
+  const needsProjectPath = opts.scope === 'project' || opts.depository === 'env';
+  const projectPath = needsProjectPath ? findProjectPath(opts.cwd ?? process.cwd()) : undefined;
+  const pid = opts.scope === 'project' ? computeProjectId(opts.cwd ?? process.cwd()) : undefined;
+
   // Every refusal below — not just a depository write failure — is audited with the same
   // shape: a refusal is an operation that happened and left the world unchanged, and a
   // reader of the audit log deserves to see it (Issue #39's reasoning, applied to every
   // throw site setSecret itself owns, not only the one `commitImport` originally surfaced).
   const auditRefusal = (err: unknown, op: AuditEvent['op']): void => {
-    appendAuditEvent({ op, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+    appendAuditEvent({ op, name: opts.name, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err), ...auditScopeFields({ scope: opts.scope, projectId: pid, projectPath }) });
   };
 
   try {
@@ -130,10 +137,6 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
     auditRefusal(err, opts.auditOp ?? 'set');
     throw err;
   }
-
-  const needsProjectPath = opts.scope === 'project' || opts.depository === 'env';
-  const projectPath = needsProjectPath ? findProjectPath(opts.cwd ?? process.cwd()) : undefined;
-  const pid = opts.scope === 'project' ? computeProjectId(opts.cwd ?? process.cwd()) : undefined;
 
   const index = readIndex();
   const existing = findIndexEntry(index, opts.name, opts.scope, pid);
@@ -231,7 +234,7 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
     auditRefusal(err, op);
     throw err;
   }
-  appendAuditEvent({ op, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: true, error: null });
+  appendAuditEvent({ op, name: opts.name, depository: opts.depository, actor: opts.actor, ok: true, error: null, ...auditScopeFields({ scope: opts.scope, projectId: pid, projectPath }) });
 
   const warnings = opts.depository === 'env' && projectPath ? checkEnvGitignore(projectPath) : [];
 
@@ -274,7 +277,7 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
         warnings.push(
           `could not remove the old copy of ${opts.name} in ${opts.depository} (cleanup failed: ${classifyCleanupError(err)})`,
         );
-        appendAuditEvent({ op: 'remove', name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: classifyCleanupError(err) });
+        appendAuditEvent({ op: 'remove', name: opts.name, depository: opts.depository, actor: opts.actor, ok: false, error: classifyCleanupError(err), ...auditScopeFields({ scope: opts.scope, projectId: pid, projectPath }) });
       }
     }
   }
@@ -312,7 +315,7 @@ export async function deleteSecret(name: string, opts: DeleteSecretOptions): Pro
   try {
     await depository.delete(removed.ref);
   } catch (err) {
-    appendAuditEvent({ op: 'remove', name, scope: removed.scope, depository: removed.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+    appendAuditEvent({ op: 'remove', name, depository: removed.depository, actor: opts.actor, ok: false, error: auditErrorText(err), ...auditScopeFields(removed) });
     throw err;
   }
 
@@ -336,10 +339,10 @@ export async function deleteSecret(name: string, opts: DeleteSecretOptions): Pro
       return { ...current, entries: current.entries.filter((e) => e !== currentRemoved) };
     });
   } catch (err) {
-    appendAuditEvent({ op: 'remove', name, scope: removed.scope, depository: removed.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
+    appendAuditEvent({ op: 'remove', name, depository: removed.depository, actor: opts.actor, ok: false, error: auditErrorText(err), ...auditScopeFields(removed) });
     throw err;
   }
-  appendAuditEvent({ op: 'remove', name, scope: removed.scope, depository: removed.depository, actor: opts.actor, ok: true, error: null });
+  appendAuditEvent({ op: 'remove', name, depository: removed.depository, actor: opts.actor, ok: true, error: null, ...auditScopeFields(removed) });
 }
 
 export interface ResolveSecretOptions {
@@ -370,10 +373,10 @@ export async function resolveSecret(name: string, opts: ResolveSecretOptions): P
   const depository = createDepository(entry.depository, { projectPath: projectPathFor(entry, opts.cwd) });
   try {
     const value = await depository.resolve(entry.ref);
-    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: true, error: null, method });
+    appendAuditEvent({ op, name, depository: entry.depository, actor: opts.actor, ok: true, error: null, method, ...auditScopeFields(entry) });
     return value;
   } catch (err) {
-    appendAuditEvent({ op, name, scope: entry.scope, depository: entry.depository, actor: opts.actor, ok: false, error: auditErrorText(err), method });
+    appendAuditEvent({ op, name, depository: entry.depository, actor: opts.actor, ok: false, error: auditErrorText(err), method, ...auditScopeFields(entry) });
     throw err;
   }
 }

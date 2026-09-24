@@ -1,5 +1,5 @@
 import type { AuditActor } from '../core/audit.js';
-import { appendAuditEvent, auditErrorText } from '../core/audit.js';
+import { appendAuditEvent, auditErrorText, auditScopeFields } from '../core/audit.js';
 import { EnigmaError } from '../core/errors.js';
 import { readIndex, resolveIndexEntry } from '../core/index-store.js';
 import type { Scope } from '../core/index-store.js';
@@ -78,12 +78,12 @@ export async function clipboardReveal(name: string, opts: ClipboardRevealOptions
     appendAuditEvent({
       op: 'reveal',
       name,
-      scope: entry.scope,
       depository: entry.depository,
       actor,
       ok: false,
       error: auditErrorText(err),
       method: 'clipboard',
+      ...auditScopeFields(entry),
     });
     throw err;
   }
