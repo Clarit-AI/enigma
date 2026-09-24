@@ -81,3 +81,36 @@ publishing → add owner `Clarit-AI`, repository `enigma`, workflow path
 `.github/workflows/release.yml`, environment unset. `id-token: write` is
 already declared in the workflow and no `NPM_TOKEN` secret is used — the
 OIDC token supplies authentication for `npm publish --provenance`.
+
+## 3. Cross-listing (KHAEntertainment/marketplace)
+
+Enigma is also listed in a second marketplace repo,
+**`KHAEntertainment/marketplace`** — a different repository under a different
+GitHub account. `Clarit-AI/enigma` stays canonical; no code lives in the KHA
+repo. The listing is a single `git-subdir` entry in that repo's
+`.claude-plugin/marketplace.json`:
+
+```json
+{
+  "name": "enigma",
+  "source": {
+    "source": "git-subdir",
+    "url": "https://github.com/Clarit-AI/enigma.git",
+    "path": "plugins/enigma",
+    "ref": "enigma--v<version>"
+  },
+  "description": "Local-only secret request/reveal for coding agents — no secret value ever enters the model's context."
+}
+```
+
+Rules for this step:
+
+- **Do it only after the `enigma--v<version>` tag exists** on
+  `Clarit-AI/enigma` — the entry's `ref` pins to the release tag, never to a
+  branch like `main`. Each release adds one step here: bump `ref` to the new
+  tag in `KHAEntertainment/marketplace`.
+- **Re-read that repo's current `marketplace.json` before editing** — its
+  schema and existing entries may have changed since this was written.
+- **Push under the KHAEntertainment identity** (credential routing by URL
+  path; never `gh auth switch` globally), and only with explicit user
+  confirmation — it is a PR against a repo this repo does not control.
