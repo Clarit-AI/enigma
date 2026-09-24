@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { connectWithCapabilities } from './harness.js';
 import { RequestStore } from '../../../src/request/store.js';
+import { mutateIndex, upsertIndexEntry } from '../../../src/core/index-store.js';
 import { setSecret } from '../../../src/storage/manager.js';
 
 describe('enigma_doctor', () => {
@@ -253,5 +254,73 @@ describe('enigma_doctor', () => {
     expect(text).not.toContain('OPENAI_API_KEY');
 
     await pair.close();
+  });
+
+  describe('legacy scope entries (Issue #72)', () => {
+    function seedLegacy(name: string, projectPath: string, depository: 'encrypted' | 'keychain' | 'env' = 'encrypted'): void {
+      mutateIndex((cur) =>
+        upsertIndexEntry(cur, {
+          name,
+          scope: 'project',
+          projectId: 'deadbeef00000000',
+          projectPath,
+          depository,
+          ref: `deadbeef00000000/${name}`,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        }),
+      );
+    }
+
+    it('reports per-class counts and the exact migrate-scope command when this repo has legacy entries', async () => {
+      // projectPath exists and resolves to this repo → adoptable; dead paths → orphaned classes.
+      seedLegacy('ADOPTABLE_KEY', tmpProject);
+      seedLegacy('ORPHAN_KEY', '/definitely/gone/nowhere', 'keychain');
+      seedLegacy('ENV_GONE', '/definitely/gone/nowhere', 'env');
+      vi.spyOn(process, 'cwd').mockReturnValue(tmpProject);
+
+      const pair = await connectWithCapabilities({});
+      const result = await pair.client.callTool({ name: 'enigma_doctor', arguments: {} });
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+      expect(text).toContain('Legacy scope entries:');
+      expect(text).toContain('1 adoptable');
+      expect(text).toContain('1 orphaned-adoptable');
+      expect(text).toContain('1 orphaned-unrecoverable');
+      expect(text).toContain('enigma migrate-scope');
+      expect(text).toContain('--apply');
+
+      await pair.close();
+    });
+
+    it('adds no legacy-scope line when there are no legacy entries', async () => {
+      await setSecret({ name: 'CURRENT_KEY', value: 'sk-sentinel-value-should-never-appear', scope: 'global', depository: 'encrypted', actor: 'cli' });
+      vi.spyOn(process, 'cwd').mockReturnValue(tmpProject);
+
+      const pair = await connectWithCapabilities({});
+      const result = await pair.client.callTool({ name: 'enigma_doctor', arguments: {} });
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+      expect(text).not.toContain('Legacy scope entries');
+      expect(text).not.toContain('migrate-scope');
+      expect(text).not.toContain('sk-sentinel-value-should-never-appear');
+
+      await pair.close();
+    });
+
+    it('the legacy-scope line carries names of classes and paths only — never a value', async () => {
+      await setSecret({ name: 'CURRENT_KEY', value: 'sk-sentinel-value-should-never-appear', scope: 'global', depository: 'encrypted', actor: 'cli' });
+      seedLegacy('ADOPTABLE_KEY', tmpProject);
+      vi.spyOn(process, 'cwd').mockReturnValue(tmpProject);
+
+      const pair = await connectWithCapabilities({});
+      const result = await pair.client.callTool({ name: 'enigma_doctor', arguments: {} });
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+
+      expect(text).toContain('Legacy scope entries:');
+      expect(text).not.toContain('sk-sentinel-value-should-never-appear');
+
+      await pair.close();
+    });
   });
 });

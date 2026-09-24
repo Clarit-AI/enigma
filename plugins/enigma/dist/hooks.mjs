@@ -131,6 +131,13 @@ function loadProjectManifest(projectPath) {
   return manifest;
 }
 
+// src/core/index-store.ts
+import { chmodSync as chmodSync2, closeSync, existsSync as existsSync3, ftruncateSync, mkdirSync as mkdirSync2, openSync, writeSync } from "node:fs";
+import { dirname as dirname3, resolve as resolve2 } from "node:path";
+
+// src/core/native-lock.ts
+var HOST_TAG = `${process.platform}-${process.arch}`;
+
 // src/core/project.ts
 import { createHash } from "node:crypto";
 import { existsSync as existsSync2, readFileSync as readFileSync2, realpathSync, statSync } from "node:fs";
@@ -252,15 +259,6 @@ function projectId(cwd) {
   return createHash("sha256").update(identityPath).digest("hex").slice(0, PROJECT_ID_LENGTH);
 }
 
-// src/core/audit.ts
-function appendAuditEvent(event) {
-  const line = { ts: (/* @__PURE__ */ new Date()).toISOString(), ...event };
-  appendLineSecure(auditLogPath(), JSON.stringify(line));
-}
-
-// src/core/native-lock.ts
-var HOST_TAG = `${process.platform}-${process.arch}`;
-
 // src/core/index-store.ts
 var EMPTY_INDEX = { version: 1, entries: [] };
 function readIndex() {
@@ -283,17 +281,99 @@ function listIndexEntries(index, opts = {}) {
   });
 }
 var SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
+var ORPHAN_ADOPTABLE_DEPOSITORIES = /* @__PURE__ */ new Set([
+  "encrypted",
+  "keychain",
+  "secret-service",
+  "1password"
+]);
+function classifyLegacyScopeEntries(index, opts) {
+  const identityPath = findRepoIdentityPath(opts.cwd);
+  const pid = projectId(opts.cwd);
+  const fromResolved = opts.from === void 0 ? void 0 : resolve2(opts.from);
+  const items = [];
+  const pool = [];
+  for (const entry of index.entries) {
+    if (entry.scope !== "project" || entry.projectId === pid) continue;
+    const recordedPath = entry.projectPath;
+    if (recordedPath !== void 0 && existsSync3(recordedPath)) {
+      if (findRepoIdentityPath(recordedPath) === identityPath) pool.push({ entry, orphan: false });
+      continue;
+    }
+    if (!ORPHAN_ADOPTABLE_DEPOSITORIES.has(entry.depository)) {
+      items.push({ entry, class: "orphaned-unrecoverable", rekeyable: false, detail: `value is gone; re-request ${entry.name}` });
+      continue;
+    }
+    if (fromResolved !== void 0 && recordedPath !== void 0 && resolve2(recordedPath) === fromResolved) {
+      pool.push({ entry, orphan: true });
+    } else {
+      items.push({
+        entry,
+        class: "orphaned-adoptable",
+        rekeyable: false,
+        detail: recordedPath === void 0 ? "no recorded projectPath" : `needs --from ${recordedPath}`
+      });
+    }
+  }
+  const poolByName = /* @__PURE__ */ new Map();
+  for (const candidate of pool) {
+    const siblings = poolByName.get(candidate.entry.name) ?? [];
+    siblings.push(candidate);
+    poolByName.set(candidate.entry.name, siblings);
+  }
+  for (const [name, siblings] of poolByName) {
+    const existsAtTarget = findIndexEntry(index, name, "project", pid) !== void 0;
+    for (const candidate of siblings) {
+      if (existsAtTarget || siblings.length > 1) {
+        items.push({
+          entry: candidate.entry,
+          class: "conflict",
+          rekeyable: false,
+          detail: existsAtTarget ? "name already exists at repo scope" : "duplicate legacy entries share this name"
+        });
+      } else {
+        items.push({
+          entry: candidate.entry,
+          class: candidate.orphan ? "orphaned-adoptable" : "adoptable",
+          rekeyable: true,
+          detail: candidate.orphan ? "attested by --from" : void 0
+        });
+      }
+    }
+  }
+  items.sort((a, b) => a.entry.name.localeCompare(b.entry.name));
+  const counts = {
+    adoptable: 0,
+    "orphaned-adoptable": 0,
+    "orphaned-unrecoverable": 0,
+    conflict: 0
+  };
+  for (const item of items) counts[item.class]++;
+  return { projectId: pid, identityPath, items, counts };
+}
+function legacyScopeCountsLine(report) {
+  const total = report.items.length;
+  if (total === 0) return null;
+  const c = report.counts;
+  return `${total} project-scope ${total === 1 ? "entry" : "entries"} predate repo-scope identity (${c.adoptable} adoptable, ${c["orphaned-adoptable"]} orphaned-adoptable, ${c["orphaned-unrecoverable"]} orphaned-unrecoverable, ${c.conflict} conflict) \u2014 run \`enigma migrate-scope\` to preview, then \`enigma migrate-scope --apply\` to re-key`;
+}
+
+// src/core/audit.ts
+function appendAuditEvent(event) {
+  const line = { ts: (/* @__PURE__ */ new Date()).toISOString(), ...event };
+  appendLineSecure(auditLogPath(), JSON.stringify(line));
+}
 
 // src/storage/depositories/encrypted.ts
 import { createCipheriv, createDecipheriv, randomBytes as randomBytes2 } from "node:crypto";
-import { existsSync as existsSync3, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
+import { existsSync as existsSync4, readFileSync as readFileSync3, writeFileSync as writeFileSync2 } from "node:fs";
 var ALGORITHM = "aes-256-gcm";
 var KEY_BYTES = 32;
 var IV_BYTES = 12;
 var FILE_MODE2 = 384;
 var EMPTY_SECRETS_FILE = { version: 1, entries: {} };
 function readKey() {
-  if (!existsSync3(keyPath())) return void 0;
+  if (!existsSync4(keyPath())) return void 0;
   const key = Buffer.from(readFileSync3(keyPath(), "utf8"), "base64");
   if (key.length !== KEY_BYTES) readFailed();
   return key;
@@ -396,7 +476,7 @@ var encryptedDepositoryModule = {
 };
 
 // src/storage/depositories/env.ts
-import { existsSync as existsSync4, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
+import { existsSync as existsSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
 import { join as join4 } from "node:path";
 var BEGIN_MARKER = "# enigma:begin";
 var END_MARKER = "# enigma:end";
@@ -482,7 +562,7 @@ function requireProjectPath(ctx) {
 }
 function createEnvDepository(ctx) {
   const envFilePath = join4(requireProjectPath(ctx), ".env");
-  const readEnvFile = () => existsSync4(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
+  const readEnvFile = () => existsSync5(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
   return {
     id: "env",
     promptProfile: "none",
@@ -535,24 +615,24 @@ var PROBE_REF = "__enigma_detect_probe__";
 var REF_PATTERN = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH = 512;
 function runSecretTool(args) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     execFile(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecretToolWithStdin(args, value) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const child = execFile(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -685,7 +765,7 @@ var linuxSecretServiceDepositoryModule = {
 
 // src/storage/depositories/macos-keychain.ts
 import { execFile as execFile2 } from "node:child_process";
-import { existsSync as existsSync5 } from "node:fs";
+import { existsSync as existsSync6 } from "node:fs";
 var SECURITY_BIN = "/usr/bin/security";
 var SERVICE2 = "enigma";
 var EXEC_TIMEOUT_MS2 = 1e4;
@@ -697,24 +777,24 @@ var REF_PATTERN2 = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH2 = 512;
 var MARKER_BYTE = 1;
 function runSecurity(args) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     execFile2(SECURITY_BIN, args, { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecurityBatch(line) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const child = execFile2(SECURITY_BIN, ["-i"], { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -852,7 +932,7 @@ var macosKeychainDepositoryModule = {
     if (process.platform !== "darwin") {
       return { id: "keychain", promptProfile: "may-prompt", available: false, reason: "not running on macOS" };
     }
-    const available = existsSync5(SECURITY_BIN);
+    const available = existsSync6(SECURITY_BIN);
     return {
       id: "keychain",
       promptProfile: "may-prompt",
@@ -876,24 +956,24 @@ var REF_MAX_LENGTH3 = 512;
 var VAULT_MISSING_PATTERN = /isn't a vault|no vault named|could not find vault/i;
 var ITEM_MISSING_PATTERN = /isn't an item|could not find item|item.*not found/i;
 function runOp(args) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runOpWithStdin(args, stdinData) {
-  return new Promise((resolve3, reject) => {
+  return new Promise((resolve4, reject) => {
     const child = execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve3({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -1146,6 +1226,11 @@ function runSessionStart(input) {
       `Enigma: manifest (.enigma.json) declares ${gaps.join(", ")} but no value is stored yet \u2014 call enigma_request to collect them.`
     );
   }
+  try {
+    const legacyLine = legacyScopeCountsLine(classifyLegacyScopeEntries(readIndex(), { cwd }));
+    if (legacyLine) lines.push(`Enigma: ${legacyLine}`);
+  } catch {
+  }
   return {
     hookSpecificOutput: {
       hookEventName: "SessionStart",
@@ -1155,8 +1240,8 @@ function runSessionStart(input) {
 }
 
 // src/hooks/read-guard.ts
-import { basename as basename3, resolve as resolve2, sep } from "node:path";
-import { existsSync as existsSync6, statSync as statSync2 } from "node:fs";
+import { basename as basename3, resolve as resolve3, sep } from "node:path";
+import { existsSync as existsSync7, statSync as statSync2 } from "node:fs";
 var DOTENV_EXEMPT = /* @__PURE__ */ new Set([".env.example"]);
 var BARE_ENV_DUMP_COMMANDS = /* @__PURE__ */ new Set(["env", "printenv"]);
 var NON_READING_BASH_VERBS = /* @__PURE__ */ new Set(["rm", "mv", "touch", "chmod", "stat", "ls", "find", "test"]);
@@ -1171,8 +1256,8 @@ function targetsDotEnv(pathLike) {
   return isDotEnvBasename(basename3(pathLike.trim()));
 }
 function targetsEnigmaConfig(pathLike, cwd) {
-  const home = resolve2(enigmaHome());
-  const resolved = resolve2(cwd, pathLike.trim());
+  const home = resolve3(enigmaHome());
+  const resolved = resolve3(cwd, pathLike.trim());
   return resolved === home || resolved.startsWith(`${home}${sep}`);
 }
 function decodeAnsiCEscapes(body) {
@@ -1376,8 +1461,8 @@ var PATH_TOOL_FIELDS = {
 function isKnownNonDirectoryPath(pathLike, cwd) {
   if (!pathLike) return false;
   try {
-    const resolved = resolve2(cwd, pathLike.trim());
-    return existsSync6(resolved) && !statSync2(resolved).isDirectory();
+    const resolved = resolve3(cwd, pathLike.trim());
+    return existsSync7(resolved) && !statSync2(resolved).isDirectory();
   } catch {
     return false;
   }

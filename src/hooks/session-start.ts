@@ -12,6 +12,7 @@
 // MCP process, where the store is real) — see `src/mcp/tools/doctor.ts`
 // and the matching recovery-signal helper in `src/request/store.ts`.
 import { loadConfig, loadProjectManifest } from '../core/config.js';
+import { classifyLegacyScopeEntries, legacyScopeCountsLine, readIndex } from '../core/index-store.js';
 import { computeManifestGaps } from '../core/manifest-gaps.js';
 import { findProjectPath } from '../core/project.js';
 import type { SessionStartInput, SessionStartOutput } from './types.js';
@@ -35,6 +36,17 @@ export function runSessionStart(input: SessionStartInput): SessionStartOutput {
     lines.push(
       `Enigma: manifest (.enigma.json) declares ${gaps.join(', ')} but no value is stored yet — call enigma_request to collect them.`,
     );
+  }
+  // Issue #72: surface this repo's legacy project-scope entries (the index
+  // is on disk, so this is real here — unlike the request-store recovery
+  // signal, which stays in enigma_doctor). Per-class counts + the exact
+  // command; never a value. Fail-open: a corrupt index or fs error must
+  // never break the hook, so anything unexpected just skips the line.
+  try {
+    const legacyLine = legacyScopeCountsLine(classifyLegacyScopeEntries(readIndex(), { cwd }));
+    if (legacyLine) lines.push(`Enigma: ${legacyLine}`);
+  } catch {
+    // no legacy-scope line this run
   }
 
   return {

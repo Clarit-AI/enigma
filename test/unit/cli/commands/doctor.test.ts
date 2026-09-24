@@ -15,6 +15,8 @@ vi.mock('node:child_process', () => ({
 
 const { cmdDoctor } = await import('../../../../src/cli/commands/doctor.js');
 const { setSecret } = await import('../../../../src/storage/manager.js');
+const { mutateIndex, upsertIndexEntry } = await import('../../../../src/core/index-store.js');
+type DepositoryId = import('../../../../src/storage/interfaces.js').DepositoryId;
 
 describe('cmdDoctor', () => {
   let tmpHome: string;
@@ -153,6 +155,74 @@ describe('cmdDoctor', () => {
       writeFileSync(join(tmpProject, '.enigma.json'), JSON.stringify({ secrets: { MISSING_ONE: 'x' } }));
       await cmdDoctor([]);
       expect(stdoutSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).toContain('Manifest gaps: MISSING_ONE');
+    });
+  });
+
+  describe('legacy scope entries (Issue #72)', () => {
+    let tmpProject: string;
+    let originalCwd: string;
+
+    beforeEach(() => {
+      tmpProject = realpathSync(mkdtempSync(join(tmpdir(), 'enigma-project-')));
+      mkdirSync(join(tmpProject, '.git'));
+      originalCwd = process.cwd();
+      process.chdir(tmpProject);
+    });
+
+    afterEach(() => {
+      process.chdir(originalCwd);
+      rmSync(tmpProject, { recursive: true, force: true });
+    });
+
+    function seedLegacy(name: string, projectPath: string, depository: DepositoryId = 'encrypted'): void {
+      mutateIndex((cur) =>
+        upsertIndexEntry(cur, {
+          name,
+          scope: 'project',
+          projectId: 'deadbeef00000000',
+          projectPath,
+          depository,
+          ref: `deadbeef00000000/${name}`,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        }),
+      );
+    }
+
+    it('no extra line and a null legacyScope field when there are no legacy entries', async () => {
+      await setSecret({ name: 'CURRENT', value: 'v', scope: 'project', depository: 'encrypted', cwd: tmpProject, actor: 'cli' });
+
+      await cmdDoctor(['--json']);
+      const report = JSON.parse(String(stdoutSpy.mock.calls[0]?.[0])) as { legacyScope: unknown };
+      expect(report.legacyScope).toBeNull();
+
+      stdoutSpy.mockClear();
+      await cmdDoctor([]);
+      expect(stdoutSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('')).not.toContain('Legacy scope entries');
+    });
+
+    it('reports per-class counts and the exact migrate-scope command', async () => {
+      // projectPath still exists and resolves to this repo → adoptable.
+      seedLegacy('ADOPTABLE_KEY', tmpProject);
+      // Dead paths → orphaned classes by depository.
+      seedLegacy('ORPHAN_KEY', '/definitely/gone/nowhere', 'keychain');
+      seedLegacy('ENV_GONE', '/definitely/gone/nowhere', 'env');
+
+      await cmdDoctor([]);
+      const out = stdoutSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('');
+      expect(out).toContain('Legacy scope entries:');
+      expect(out).toContain('1 adoptable');
+      expect(out).toContain('1 orphaned-adoptable');
+      expect(out).toContain('1 orphaned-unrecoverable');
+      expect(out).toContain('enigma migrate-scope');
+      expect(out).toContain('--apply');
+
+      stdoutSpy.mockClear();
+      await cmdDoctor(['--json']);
+      const report = JSON.parse(String(stdoutSpy.mock.calls[0]?.[0])) as {
+        legacyScope: { adoptable: number; orphanedAdoptable: number; orphanedUnrecoverable: number; conflict: number };
+      };
+      expect(report.legacyScope).toEqual({ adoptable: 1, orphanedAdoptable: 1, orphanedUnrecoverable: 1, conflict: 0 });
     });
   });
 });

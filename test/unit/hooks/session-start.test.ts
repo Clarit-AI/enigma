@@ -4,6 +4,8 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { runSessionStart } from '../../../src/hooks/session-start.js';
 import { RequestStore } from '../../../src/request/store.js';
+import { mutateIndex, upsertIndexEntry } from '../../../src/core/index-store.js';
+import type { DepositoryId } from '../../../src/storage/interfaces.js';
 import { setSecret } from '../../../src/storage/manager.js';
 import { configPath } from '../../../src/core/paths.js';
 
@@ -136,6 +138,57 @@ describe('SessionStart', () => {
       expect(ctx).toContain('no secrets registered');
       expect(ctx).toContain('keychain');
       expect(ctx).toContain('MISSING_KEY');
+    });
+  });
+
+  describe('legacy scope entries (Issue #72)', () => {
+    function seedLegacy(name: string, projectPath: string, depository: DepositoryId = 'encrypted'): void {
+      mutateIndex((cur) =>
+        upsertIndexEntry(cur, {
+          name,
+          scope: 'project',
+          projectId: 'deadbeef00000000',
+          projectPath,
+          depository,
+          ref: `deadbeef00000000/${name}`,
+          createdAt: '2026-01-01T00:00:00.000Z',
+          updatedAt: '2026-01-01T00:00:00.000Z',
+        }),
+      );
+    }
+
+    it('reports per-class counts and the exact migrate-scope command when this repo has legacy entries', () => {
+      seedLegacy('ADOPTABLE_KEY', tmpProject); // path exists → adoptable
+      seedLegacy('ORPHAN_KEY', '/definitely/gone/nowhere', 'keychain');
+      seedLegacy('ENV_GONE', '/definitely/gone/nowhere', 'env');
+
+      const ctx = runSessionStart({ cwd: tmpProject }).hookSpecificOutput.additionalContext;
+
+      expect(ctx).toContain('1 adoptable');
+      expect(ctx).toContain('1 orphaned-adoptable');
+      expect(ctx).toContain('1 orphaned-unrecoverable');
+      expect(ctx).toContain('enigma migrate-scope');
+      expect(ctx).toContain('--apply');
+    });
+
+    it('adds no legacy-scope line when there are no legacy entries', async () => {
+      await setSecret({ name: 'CURRENT_KEY', value: 'sk-sentinel-value-should-never-appear', scope: 'project', depository: 'encrypted', cwd: tmpProject, actor: 'cli' });
+
+      const ctx = runSessionStart({ cwd: tmpProject }).hookSpecificOutput.additionalContext;
+
+      expect(ctx).not.toContain('migrate-scope');
+      expect(ctx).not.toContain('sk-sentinel-value-should-never-appear');
+    });
+
+    it('a corrupt index still cannot reach the transcript — dispatch fail-opens to no output', async () => {
+      // readIndex throws E_INDEX_CORRUPT (pre-existing hook behaviour); the
+      // dispatch boundary swallows it rather than surfacing a hook error.
+      writeFileSync(join(tmpHome, 'index.json'), '{ not valid json');
+      const { dispatch } = await import('../../../src/hooks/index.js');
+
+      const output = await dispatch('SessionStart', { cwd: tmpProject });
+
+      expect(output).toBeUndefined();
     });
   });
 });

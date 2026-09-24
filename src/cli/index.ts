@@ -5,6 +5,7 @@ import { cmdGet } from './commands/get.js';
 import { cmdImport } from './commands/import.js';
 import { cmdInstall } from './commands/install.js';
 import { cmdList } from './commands/list.js';
+import { cmdMigrateScope } from './commands/migrate-scope.js';
 import { cmdMove } from './commands/move.js';
 import { cmdRemove } from './commands/remove.js';
 import { cmdRun } from './commands/run.js';
@@ -21,6 +22,7 @@ Commands:
   run [--only A,B] [--scope project|global] -- <command> [args...]
   get NAME [--scope project|global]
   import [PATH] [--depository ID] [--rotate] [--json]
+  migrate-scope [--from PATH] [--apply] [--prune-unrecoverable]
   doctor [--json]
   install [--uninstall]
 
@@ -37,6 +39,7 @@ const COMMANDS: Record<string, (argv: string[]) => Promise<number>> = {
   get: cmdGet,
   doctor: cmdDoctor,
   import: cmdImport,
+  'migrate-scope': cmdMigrateScope,
   install: cmdInstall,
   request: notImplemented('request'),
   reveal: notImplemented('reveal'),
