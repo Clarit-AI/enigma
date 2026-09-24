@@ -56,6 +56,25 @@ export function auditErrorText(err: unknown): string {
   return 'UnknownError';
 }
 
+/**
+ * Classify a best-effort old-location delete error into a value-free reason
+ * label (Issue #22, AC #5). The label names the failure mode (e.g.
+ * `permission-denied`) but never the value or any text the depository might
+ * have echoed. Falls back to `auditErrorText` — which by contract returns
+ * either `CODE: message` for an EnigmaError or the constructor name for
+ * anything else — so we never surface a free-form error string that could
+ * carry value-derived text. Shared by `move`'s old-depository cleanup and
+ * `setSecret`'s same-depository rotate cleanup (Issue #70).
+ */
+export function classifyCleanupError(err: unknown): string {
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  if (code === 'ENOENT') return 'ref-not-found';
+  if (code === 'EACCES' || code === 'EPERM') return 'permission-denied';
+  if (code === 'ENOTDIR' || code === 'EISDIR') return 'path-invalid';
+  if (code === 'EBUSY') return 'resource-busy';
+  return auditErrorText(err);
+}
+
 export function appendAuditEvent(event: AuditEvent): void {
   const line: AuditLine = { ts: new Date().toISOString(), ...event };
   appendLineSecure(auditLogPath(), JSON.stringify(line));

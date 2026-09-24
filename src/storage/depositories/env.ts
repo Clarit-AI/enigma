@@ -152,6 +152,16 @@ function createEnvDepository(ctx: DepositoryContext): Depository {
       if (content) writeFileSync(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE });
     },
 
+    // Issue #70: compare-and-delete in one synchronous read-modify-write, so
+    // a `.env` line repopulated since the displaced copy was captured is
+    // never removed.
+    async deleteIfUnchanged(ref, expectedValue) {
+      const content = readEnvFile();
+      if (extractManagedValue(content, ref) !== expectedValue) return false;
+      writeFileSync(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE });
+      return true;
+    },
+
     async has(ref) {
       return extractManagedValue(readEnvFile(), ref) !== undefined;
     },

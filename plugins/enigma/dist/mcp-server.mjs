@@ -12894,7 +12894,7 @@ var require_dist = __commonJS({
 });
 
 // src/mcp/server.ts
-import { realpathSync as realpathSync2 } from "node:fs";
+import { realpathSync as realpathSync3 } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 // node_modules/zod/v3/helpers/util.js
@@ -42791,6 +42791,9 @@ function registerShutdownHandlers() {
 }
 registerShutdownHandlers();
 
+// src/storage/manager.ts
+import { realpathSync as realpathSync2 } from "node:fs";
+
 // src/core/naming.ts
 var NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
 function validateName(name) {
@@ -42992,6 +42995,14 @@ function auditErrorText(err) {
   if (err instanceof EnigmaError) return `${err.code}: ${err.message}`;
   if (err instanceof Error) return err.constructor.name;
   return "UnknownError";
+}
+function classifyCleanupError(err) {
+  const code = err?.code;
+  if (code === "ENOENT") return "ref-not-found";
+  if (code === "EACCES" || code === "EPERM") return "permission-denied";
+  if (code === "ENOTDIR" || code === "EISDIR") return "path-invalid";
+  if (code === "EBUSY") return "resource-busy";
+  return auditErrorText(err);
 }
 function appendAuditEvent(event) {
   const line = { ts: (/* @__PURE__ */ new Date()).toISOString(), ...event };
@@ -43293,6 +43304,26 @@ function createEncryptedDepository() {
         writeSecretsFile(file2);
       }
     },
+    // Issue #70: compare-and-delete in one synchronous read-modify-write. If
+    // the key's content can't be verified against the captured displaced
+    // copy (missing key material, absent entry, undecryptable entry), the
+    // conservative answer is to leave it — a skipped cleanup leaks an orphan,
+    // a wrong delete loses a live value.
+    async deleteIfUnchanged(ref, expectedValue) {
+      const key = readKey();
+      if (!key) return false;
+      const file2 = readSecretsFile();
+      const entry = file2.entries[ref];
+      if (!entry) return false;
+      try {
+        if (decryptEntry(entry, key) !== expectedValue) return false;
+      } catch {
+        return false;
+      }
+      delete file2.entries[ref];
+      writeSecretsFile(file2);
+      return true;
+    },
     async has(ref) {
       return ref in readSecretsFile().entries;
     }
@@ -43428,6 +43459,15 @@ function createEnvDepository(ctx) {
     async delete(ref) {
       const content = readEnvFile();
       if (content) writeFileSync3(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE3 });
+    },
+    // Issue #70: compare-and-delete in one synchronous read-modify-write, so
+    // a `.env` line repopulated since the displaced copy was captured is
+    // never removed.
+    async deleteIfUnchanged(ref, expectedValue) {
+      const content = readEnvFile();
+      if (extractManagedValue(content, ref) !== expectedValue) return false;
+      writeFileSync3(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE3 });
+      return true;
     },
     async has(ref) {
       return extractManagedValue(readEnvFile(), ref) !== void 0;
@@ -44058,6 +44098,19 @@ function projectPathFor(entry, cwd) {
   if (entry.scope === "project") return entry.projectPath;
   return cwd ? findProjectPath(cwd) : void 0;
 }
+function canonicalPath(p) {
+  if (p === void 0) return void 0;
+  try {
+    return realpathSync2(p);
+  } catch {
+    return p;
+  }
+}
+function locationReclaimed(displaced) {
+  return readIndex().entries.some(
+    (e) => e.depository === displaced.depository && e.ref === displaced.ref && (displaced.depository !== "env" || canonicalPath(e.projectPath) === canonicalPath(displaced.projectPath))
+  );
+}
 async function setSecret(opts) {
   const auditRefusal = (err, op2) => {
     appendAuditEvent({ op: op2, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err) });
@@ -44101,6 +44154,17 @@ async function setSecret(opts) {
     auditRefusal(err, op);
     throw err;
   }
+  let capturedOld = { kind: "none" };
+  if (existing && opts.rotate && existing.depository === opts.depository) {
+    const oldDep = createDepository(existing.depository, { projectPath: projectPathFor(existing, opts.cwd) });
+    if (oldDep.promptProfile === "none") {
+      try {
+        capturedOld = { kind: "value", value: await oldDep.resolve(existing.ref) };
+      } catch (err) {
+        if (err instanceof EnigmaError && err.code === "E_NOT_FOUND") capturedOld = { kind: "empty" };
+      }
+    }
+  }
   const now = (/* @__PURE__ */ new Date()).toISOString();
   const entry = {
     name: opts.name,
@@ -44114,6 +44178,7 @@ async function setSecret(opts) {
     createdAt: existing?.createdAt ?? now,
     updatedAt: now
   };
+  let displaced;
   try {
     mutateIndex((current) => {
       const currentExisting = findIndexEntry(current, opts.name, opts.scope, pid);
@@ -44124,6 +44189,7 @@ async function setSecret(opts) {
           secretName: opts.name
         });
       }
+      displaced = currentExisting;
       return upsertIndexEntry(current, entry);
     });
   } catch (err) {
@@ -44132,6 +44198,26 @@ async function setSecret(opts) {
   }
   appendAuditEvent({ op, name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: true, error: null });
   const warnings = opts.depository === "env" && projectPath ? checkEnvGitignore(projectPath) : [];
+  if (displaced && displaced.depository === opts.depository) {
+    const locationDiffers = displaced.ref !== ref || opts.depository === "env" && canonicalPath(displaced.projectPath) !== canonicalPath(projectPath);
+    if (locationDiffers && !locationReclaimed(displaced)) {
+      const oldDep = createDepository(displaced.depository, { projectPath: projectPathFor(displaced, opts.cwd) });
+      const capturedForDisplaced = existing !== void 0 && displaced.ref === existing.ref && (opts.depository !== "env" || canonicalPath(displaced.projectPath) === canonicalPath(existing.projectPath));
+      try {
+        if (capturedOld.kind === "empty" && capturedForDisplaced) {
+        } else if (capturedOld.kind === "value" && capturedForDisplaced && oldDep.deleteIfUnchanged) {
+          await oldDep.deleteIfUnchanged(displaced.ref, capturedOld.value);
+        } else {
+          await oldDep.delete(displaced.ref);
+        }
+      } catch (err) {
+        warnings.push(
+          `could not remove the old copy of ${opts.name} in ${opts.depository} (cleanup failed: ${classifyCleanupError(err)})`
+        );
+        appendAuditEvent({ op: "remove", name: opts.name, scope: opts.scope, depository: opts.depository, actor: opts.actor, ok: false, error: classifyCleanupError(err) });
+      }
+    }
+  }
   return { rotated: Boolean(existing), warnings };
 }
 async function hasSecret(name, opts = {}) {
@@ -48078,7 +48164,7 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
-var isMainModule = process.argv[1] !== void 0 && import.meta.url === pathToFileURL(realpathSync2(process.argv[1])).href;
+var isMainModule = process.argv[1] !== void 0 && import.meta.url === pathToFileURL(realpathSync3(process.argv[1])).href;
 if (isMainModule) {
   main().catch((err) => {
     console.error("enigma mcp server failed to start:", err instanceof Error ? err.message : err);
