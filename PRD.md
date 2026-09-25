@@ -69,7 +69,7 @@ The user approved fast-forwarding Modules 2-5 from the approved plan: the Tech L
 - D3.3 Hooks in `hooks/hooks.json`, entrypoint `dist/hooks.mjs <event>`: SessionStart (additionalContext: names available for this project, sticky default if any, manifest gaps); PreToolUse read-guard on Read/Bash/Grep/Glob (deny `.env*` except `.env.example`, `~/.config/enigma/*`, `env`/`printenv`, `echo $NAME` for known names, `enigma get|env`, `security find-generic-password`, `op read`, `cat|grep|sed|awk|head|tail` of `.env`); PostToolUse tripwire on Bash/Read/Grep and MCP tools.
 - D3.4 Tripwire scope corrected for prompt profiles: scans values from `encrypted` and `env` by default; `keychain`/`secret-service` opt-in via config; `1password` never (a scan on every tool call would trigger a biometric prompt each time). Sync, 5-s timeout, skips outputs over 1 MB, fails open, writes audit op `leak`, returns `systemMessage` naming the secret and advising `rotate: true`.
 - D3.5 Skill `skills/enigma/SKILL.md`: when a task needs a credential, never ask the user to paste; explain depository trade-offs using prompt profiles and usage; call `enigma_request`; use `enigma run --` for keychain/1Password/encrypted secrets; treat read-guard denials as instructions, not obstacles.
-- D3.6 Slash commands: `/enigma:request`, `/enigma:reveal`, `/enigma:list`, `/enigma:doctor`, `/enigma:import`; `reveal` and `import` marked `disable-model-invocation` (user-only).
+- D3.6 Slash commands: `/enigma:request`, `/enigma:reveal`, `/enigma:list`, `/enigma:remove`, `/enigma:doctor`, `/enigma:import`; `reveal` and `import` marked `disable-model-invocation` (user-only). `/enigma:remove` was added after the initial freeze, in Issue #79 (shipped 2026-09-23, PR #81) — it wraps the pre-existing `enigma_remove` MCP tool.
 
 **Acceptance scenarios**: S3.1 "add my OpenAI key" → `enigma_request` called, transcript contains no sentinel. S3.2 Bash `cat .env` → denied with reason mentioning `enigma run`. S3.3 Bash `echo <sentinel from encrypted>` → tripwire systemMessage + audit `leak`. S3.4 client without elicitation → URL + `enigma_await` path works.
 
@@ -92,8 +92,8 @@ The user approved fast-forwarding Modules 2-5 from the approved plan: the Tech L
 **Key decisions**:
 - D5.1 Repo `clarit-ai/enigma` is marketplace `clarit-enigma` (`.claude-plugin/marketplace.json` → `./plugins/enigma`) and npm package `@clarit.ai/enigma` (`bin: enigma`).
 - D5.2 Plugin ships pre-bundled `dist/{mcp-server,hooks,cli}.mjs` (esbuild, deps inlined) committed per release; `.mcp.json` and hooks use `${CLAUDE_PLUGIN_ROOT}`. No postinstall.
-- D5.3 `npx @clarit.ai/enigma install` registers the marketplace and enables the plugin (claude-mem npx pattern). GitHub dev install: clone, `npm run build`, `claude --plugin-dir plugins/enigma`.
-- D5.4 CI on every PR: lint, typecheck, unit + integration tests, static leak fence, `npm audit`. Release: `claude plugin tag --push`, npm publish from tag.
+- D5.3 `npx @clarit.ai/enigma install` registers the marketplace and enables the plugin (claude-mem npx pattern). GitHub dev install: clone, `npm run build`, `claude --plugin-dir plugins/enigma`. **The npm path is shelved** (user decision, 2026-09-25): the package has never been published and the marketplace install is the sole supported method. Revisit as support for other harnesses grows.
+- D5.4 CI on every PR: lint, typecheck, unit + integration tests, static leak fence, `npm audit`. Release: `claude plugin tag --push`; npm publish from tag remains defined but shelved with D5.3 — do not cut a `v*` tag while the channel is shelved, as it fires the release workflow and fails at publish.
 - D5.5 `claude plugin eval` suite with the S3.x cases; docs in clarit-docs-voice; `docs/SECURITY.md` threat model.
 - D5.6 Node 20+ engines field; ESM; TypeScript strict; vitest; eslint.
 

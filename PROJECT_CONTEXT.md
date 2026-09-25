@@ -30,9 +30,10 @@
 
 ## Current Status
 
-- **Last updated**: 2026-09-23
-- **Current iteration goal**: v0.3.0 — milestone `v0.3.0` (Issues #66–#73): repo-level project scope + `enigma migrate-scope`, extensible request form, wake-on-submit + idle-timeout fix, #62 recovery-signal correction, release + KHA marketplace cross-listing. Plan of record: Traycer artifact `v0-3-0-plan` (epic `83430143-11ac-4d11-9ebd-bdec9d92b587`), critiqued in `v0-3-0-plan-critique`.
-- **Shipped**: `0.2.0` (`enigma--v0.2.0`).
+- **Last updated**: 2026-09-25
+- **Current iteration goal**: none open. `v0.3.0` closed out on 2026-09-24; the next milestone is not yet scoped. Plan and critique of record for the shipped wave: Traycer artifacts `v0-3-0-plan` and `v0-3-0-plan-critique`, with the post-release resync in `v0-3-0-resync`.
+- **Shipped**: `0.3.0` (`enigma--v0.3.0`) — repo-level project scope + `enigma migrate-scope`, `flock(2)` index-write serialization, rotate-then-remove, extensible request form, wake-on-submit, `/enigma:remove`, project-scoped audit attribution, and the KHA Entertainment marketplace cross-listing. Previous: `0.2.0` (`enigma--v0.2.0`).
+- **Install channel**: the plugin marketplace is the only supported install path. The npm package `@clarit.ai/enigma` is **shelved** — never published, and `RELEASING.md` records it as such. Revisit when support for harnesses beyond Claude Code grows.
 - **Known tech debt**: see the bottom of `docs/feature-log.md`
 
 ---
