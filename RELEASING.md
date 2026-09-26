@@ -7,7 +7,15 @@ once — bump versions together, but tag each channel separately.
 | Channel | Consumers use | Tag format | Triggers |
 |---|---|---|---|
 | Plugin (marketplace) | `claude plugin marketplace add Clarit-AI/enigma` + `claude plugin install enigma` | `enigma--v<version>` (`claude plugin tag` decides this) | Nothing in CI — marketplace installs read straight from the git repo/tag, no Action involved |
-| npm package (`@clarit.ai/enigma`) | `npx @clarit.ai/enigma install` | `v<version>` | `.github/workflows/release.yml` |
+| npm package (`@clarit.ai/enigma`) — **shelved** | *(none — not published)* | `v<version>` | `.github/workflows/release.yml` |
+
+> **Status: the npm channel is shelved and has never been published.** The
+> plugin marketplace is the only supported install path today. The machinery
+> below is written and correct but unexercised — `@clarit.ai/enigma` does not
+> exist on the npm registry, so `npx @clarit.ai/enigma install` does not work
+> and must not be advertised as an install option. Revisit when support for
+> harnesses beyond Claude Code grows; the sections are kept so that resuming
+> is a matter of configuring trusted publishing, not re-deriving the process.
 
 Because `claude plugin tag`'s tag name always starts with `enigma--v`, not `v`,
 it never collides with the npm workflow's `v*` trigger. That's intentional,
@@ -53,7 +61,12 @@ enigma@clarit-enigma` → the installed copy under
 copied into an empty directory with no `node_modules` reachable works
 unmodified.
 
-## 2. npm release
+## 2. npm release — shelved, do not run
+
+Everything in this section is **on hold**. Do not cut a `v*` tag for a
+version bump while the channel is shelved: it fires the release workflow,
+which will fail at the publish step. Ship releases through the plugin tag in
+section 1 only.
 
 ```bash
 git tag v<version>
@@ -74,12 +87,13 @@ prerequisite" section below. The OIDC token comes from the workflow's
 `id-token: write` permission, so no `NPM_TOKEN` repository secret is
 required.
 
-### Trusted publishing prerequisite (required before the first real publish)
+### Trusted publishing prerequisite (deferred with the channel)
 
-On npmjs.com, open the `@clarit.ai/enigma` package → Access → Trusted
-publishing → add owner `Clarit-AI`, repository `enigma`, workflow path
+Unblocking the npm channel requires two things: creating the
+`@clarit.ai/enigma` package on npmjs.com, and configuring trusted publishing
+on it — owner `Clarit-AI`, repository `enigma`, workflow path
 `.github/workflows/release.yml`, environment unset. `id-token: write` is
-already declared in the workflow and no `NPM_TOKEN` secret is used — the
+already declared in the workflow and no `NPM_TOKEN` secret is used, so the
 OIDC token supplies authentication for `npm publish --provenance`.
 
 ## 3. Cross-listing (KHAEntertainment/marketplace)

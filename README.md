@@ -57,7 +57,7 @@ claude plugin install enigma@clarit-enigma
 
 This registers your checkout itself as a local marketplace source, so rebuilding `dist/` (`npm run build`) picks up changes without reinstalling.
 
-> **npm distribution is shelved for now.** The `npx @clarit.ai/enigma install` method (and the standalone `enigma` binary it put on `PATH`) is on hold pending npm's newer token/2FA publish model. The marketplace path above is the supported install method; it needs no npm registry access.
+> **npm distribution is shelved for now.** The `npx @clarit.ai/enigma install` method (and the standalone `enigma` binary it would put on `PATH`) is on hold — the package has never been published, and the marketplace path above is the supported install method. It needs no npm registry access. Revisit when support for harnesses beyond Claude Code grows.
 
 ## First request, step by step
 
@@ -65,6 +65,27 @@ This registers your checkout itself as a local marketplace source, so rebuilding
 2. **Fill the form, out of band.** Claude Code opens the request URL (a local page, or a native macOS dialog if you asked for that). You pick a depository from a table showing each one's prompt profile (below) and a scope (this project, or global), type the value, and submit. The value goes straight from your browser to Enigma's local server; it is never sent back through MCP.
 3. **Get a names-only confirmation.** The agent's tool call returns `"Stored OPENAI_API_KEY in encrypted (project)"`, nothing else. Nothing about the value itself ever reaches the model.
 4. **Use it.** `enigma run -- <command>` injects the real value into that one child process's environment. The agent sees the child's stdout/stderr, never the injected variable.
+
+### Slash commands
+
+The plugin ships six: `/enigma:request`, `/enigma:reveal`, `/enigma:list`,
+`/enigma:remove`, `/enigma:doctor` and `/enigma:import`.
+
+Three are **user-only** (`disable-model-invocation`) — the agent may not invoke
+them on its own judgment: `reveal` and `import`, because both are the human
+taking the value or handing data over, and `remove`, because deleting a secret
+is destructive and cannot be undone. The remaining three — `request`, `list`
+and `doctor` — are model-invokable.
+
+`/enigma:remove NAME [project|global]` wraps the `enigma_remove` MCP tool. How
+the confirmation works depends on your client: a form-capable one shows its own
+yes/no dialog, and the agent never sees that path. A client without form-mode
+elicitation gets `E_CONFIRMATION_REQUIRED` instead, and the agent must ask you
+to confirm in conversation before re-calling with `confirm: true` — invoking the
+slash command is not itself a confirmation. If you omit the scope argument and
+the name exists in *both* project and global scope, the tool returns
+`E_AMBIGUOUS_SCOPE` and the agent asks which you meant rather than guessing;
+naming the scope explicitly always resolves.
 
 ### Depositories and prompt profiles
 
