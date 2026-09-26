@@ -69,12 +69,22 @@ This registers your checkout itself as a local marketplace source, so rebuilding
 ### Slash commands
 
 The plugin ships six: `/enigma:request`, `/enigma:reveal`, `/enigma:list`,
-`/enigma:remove`, `/enigma:doctor` and `/enigma:import`. `reveal` and `import`
-are user-only (`disable-model-invocation`) — the agent may not invoke them on
-its own judgment, because both are the human taking the value or handing data
-over. The other four are safe for the agent to call. `/enigma:remove NAME
-[project|global]` wraps the `enigma_remove` MCP tool and asks for a form-mode
-yes/no confirmation before deleting anything.
+`/enigma:remove`, `/enigma:doctor` and `/enigma:import`.
+
+Three are **user-only** (`disable-model-invocation`) — the agent may not invoke
+them on its own judgment: `reveal` and `import`, because both are the human
+taking the value or handing data over, and `remove`, because deleting a secret
+is destructive and cannot be undone. The remaining three — `request`, `list`
+and `doctor` — are model-invokable.
+
+`/enigma:remove NAME [project|global]` wraps the `enigma_remove` MCP tool. How
+the confirmation works depends on your client: a form-capable one shows its own
+yes/no dialog, and the agent never sees that path. A client without form-mode
+elicitation gets `E_CONFIRMATION_REQUIRED` instead, and the agent must ask you
+to confirm in conversation before re-calling with `confirm: true` — invoking the
+slash command is not itself a confirmation. If the name exists in both project
+and global scope, the tool returns `E_AMBIGUOUS_SCOPE` and the agent asks which
+you meant rather than guessing.
 
 ### Depositories and prompt profiles
 
