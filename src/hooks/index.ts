@@ -3,6 +3,7 @@
 // non-zero or throws would surface a raw error to the transcript, which is exactly
 // the kind of leak this layer exists to prevent, and could block the user's work.
 import { readStdinJson } from './stdin.js';
+import { isMainModule } from '../core/is-main-module.js';
 import { runSessionStart } from './session-start.js';
 import { runReadGuard } from './read-guard.js';
 import { runTripwire } from './tripwire.js';
@@ -42,7 +43,7 @@ async function main(): Promise<void> {
 }
 
 /* node:coverage disable */
-if (process.argv[1] && import.meta.url === new URL(process.argv[1], 'file:').href) {
+if (isMainModule()) {
   void main();
 }
 /* node:coverage enable */

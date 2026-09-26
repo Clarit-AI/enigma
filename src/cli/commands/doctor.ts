@@ -7,6 +7,7 @@ import { detectAll } from '../../storage/detect.js';
 import { classifyLegacyScopeEntries, legacyScopeCountsLine, readIndex } from '../../core/index-store.js';
 import { computeManifestGaps } from '../../core/manifest-gaps.js';
 import { auditLogPath, configPath, enigmaHome, indexPath, keyPath, secretsPath } from '../../core/paths.js';
+import { ensureCliShim } from '../../core/shim.js';
 import { EnigmaError } from '../../core/errors.js';
 
 const execFileAsync = promisify(execFile);
@@ -62,6 +63,10 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
 
   const { gaps: manifestGaps } = computeManifestGaps(process.cwd());
 
+  // Read-only: doctor reports whether `enigma run` is actually runnable, and
+  // must not create the thing that would make it runnable.
+  const pathShim = ensureCliShim({ write: false });
+
   const report = {
     platform: `${platform()} ${release()}`,
     depositories,
@@ -78,6 +83,11 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
     vault,
     manifestGaps,
     legacyScope,
+    pathShim: {
+      status: pathShim.status,
+      target: pathShim.target,
+      detail: pathShim.detail,
+    },
   };
 
   if (json) {
@@ -97,6 +107,7 @@ export async function cmdDoctor(argv: string[]): Promise<number> {
     `Vault key: ${vault.keyPresent ? 'present' : 'missing'}`,
     `Vault file: ${vault.secretsFilePresent ? 'present' : 'missing'}`,
     `Manifest gaps: ${manifestGaps.length === 0 ? 'none' : manifestGaps.join(', ')}`,
+    `PATH shim: ${pathShim.status}${pathShim.target ? ` (${pathShim.target})` : ''}${pathShim.detail ? ` — ${pathShim.detail}` : ''}`,
   ];
   if (legacyScopeLine) {
     lines.push(`Legacy scope entries: ${legacyScopeLine}`);

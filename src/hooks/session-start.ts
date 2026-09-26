@@ -15,6 +15,7 @@ import { loadConfig, loadProjectManifest } from '../core/config.js';
 import { classifyLegacyScopeEntries, legacyScopeCountsLine, readIndex } from '../core/index-store.js';
 import { computeManifestGaps } from '../core/manifest-gaps.js';
 import { findProjectPath } from '../core/project.js';
+import { describeShim, ensureCliShim } from '../core/shim.js';
 import type { SessionStartInput, SessionStartOutput } from './types.js';
 
 export function runSessionStart(input: SessionStartInput): SessionStartOutput {
@@ -48,6 +49,16 @@ export function runSessionStart(input: SessionStartInput): SessionStartOutput {
   } catch {
     // no legacy-scope line this run
   }
+
+  // Issue #90: distribution. A marketplace install leaves the bundled CLI off PATH, which
+  // makes read-guard's own remediation advice ("use enigma run") unrunnable and
+  // is most of why the plaintext `env` depository gets chosen over `encrypted`.
+  // SessionStart is the only plugin lifecycle event that runs before the agent
+  // acts, so the shim is placed here. ensureCliShim never throws and describeShim
+  // returns null for the statuses that are not news, so this stays silent in the
+  // common case. Same "never a value" rule as every other line here.
+  const shimLine = describeShim(ensureCliShim());
+  if (shimLine) lines.push(shimLine);
 
   return {
     hookSpecificOutput: {

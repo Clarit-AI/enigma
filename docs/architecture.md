@@ -65,10 +65,29 @@ Two functions, one rule each, both pure fs with no child process:
 - No PIN on links in v1 (V2 candidate).
 - The request form accepts names beyond the ones the agent asked for (Issue #71): `+ Add secret` rows and a pasted `.env` blob. The blob is one form field, parsed on submit by the existing `parseDotEnv` — there is deliberately no parse-and-echo endpoint, because a JSON endpoint returning `{name, value}` would put a value in an HTTP response body (S2.4). Invariant: name text a human typed or pasted only ever reaches a response body, log, audit line or outcome text after passing `validateName`; anything else is counted and discarded. The 25-name cap and duplicate/ambiguity checks run before the request id is consumed.
 
-## ADR-006 — Packaging (D5.1–D5.6)
+## ADR-006 — Packaging and distribution (D5.1–D5.6)
 - Repo is marketplace `clarit-enigma` and npm package `@clarit.ai/enigma`; plugin at `plugins/enigma`.
-- Pre-bundled `dist/*.mjs` committed per release; `${CLAUDE_PLUGIN_ROOT}` in `.mcp.json` and hooks; no postinstall.
+- Pre-bundled `dist/*.mjs` committed per release; `${CLAUDE_PLUGIN_ROOT}` in `.mcp.json` and hooks; no npm `postinstall` script.
 - CI on every PR: lint, typecheck, tests, leak fence, `npm audit`.
+
+### The `enigma` PATH shim
+
+npm is not published, so a marketplace install leaves the bundled CLI off `PATH`. The consequence was not cosmetic: read-guard's own denial message tells the agent to "use `enigma run -- <command>`", and after the only supported install that command did not exist — making the one delivery path that keeps a value out of the context window unrunnable, and pushing users toward the plaintext `env` depository instead of the correct `encrypted` one.
+
+A Claude Code plugin has no `postinstall` lifecycle event, and there is no package to run one from, so the shim is placed in the **SessionStart hook** (`src/core/shim.ts`) — the only plugin lifecycle event that runs before the agent acts. It writes one symlink into a directory **already on `PATH`**: no shell rc is edited, no `PATH` variable is mutated, and nothing is left for the user to run.
+
+The write is deliberately timid, because this is a secret manager:
+
+- Only **absolute** `PATH` directories are candidates. A relative entry like `./bin` is a directory inside somebody's checkout, not ours to write into.
+- An existing `enigma` that resolves to a live file is **reported, never replaced**. The whole `PATH` is scanned before anything is created, so a real install further down `PATH` is never shadowed by a new link earlier in it.
+- Only a **dangling** symlink is re-pointed. That is safe by construction — nothing can be using a link whose target does not exist — and it is exactly what a plugin upgrade leaves behind, which is what makes the shim self-healing across versions.
+- The link is created beside its final name and renamed over it, so a concurrent reader sees the old link or the new one, never a half-written entry.
+- `ENIGMA_NO_PATH_SHIM=1` opts out entirely.
+- `ensureCliShim` never throws. No `PATH` condition — unwritable directory, occupied name, exotic entry — can break a session.
+
+`enigma doctor` and `enigma_doctor` report the state **read-only** (`write: false`, yielding `pending`): a diagnostic must not create the thing it diagnoses.
+
+**Consequence for the bundles.** A symlink is how the CLI is invoked once it is on `PATH`, and how npm's `bin` invokes it. The conventional entrypoint guard — `import.meta.url === new URL(process.argv[1], 'file:').href` — compares a *resolved* module URL against the *literal* argument, so it answers "not the entrypoint" for any symlink, and `/tmp` (itself a symlink to `/private/tmp` on macOS). The CLI then ran, received no argument list, and exited 0 having printed nothing: a silent no-op that reads as success. Both bundles therefore use `isMainModule()` (`src/core/is-main-module.ts`), which compares `realpathSync` on both sides.
 
 ## ADR-007 — ClawVault is harvested, not forked
 - Reused nearly verbatim: request store, network policy, Linux secret-service write pattern and detection probe, the audit decorator idea, the AES-256-GCM layout, the static leak-fence idea.

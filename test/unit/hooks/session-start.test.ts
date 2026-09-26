@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -189,6 +189,80 @@ describe('SessionStart', () => {
       const output = await dispatch('SessionStart', { cwd: tmpProject });
 
       expect(output).toBeUndefined();
+    });
+  });
+
+  describe('PATH shim', () => {
+    // A marketplace install leaves the bundled CLI off PATH, which makes
+    // read-guard's own remediation advice ("use enigma run") unrunnable. The
+    // shim is placed here because SessionStart is the only plugin lifecycle
+    // event that runs before the agent acts.
+    let shimRoot: string;
+    let shimBin: string;
+    let originalPath: string | undefined;
+    let originalPluginRoot: string | undefined;
+
+    beforeEach(() => {
+      shimRoot = mkdtempSync(join(tmpdir(), 'enigma-plugin-'));
+      shimBin = mkdtempSync(join(tmpdir(), 'enigma-bin-'));
+      mkdirSync(join(shimRoot, 'dist'));
+      writeFileSync(join(shimRoot, 'dist', 'cli.mjs'), '#!/usr/bin/env node\n');
+
+      originalPath = process.env.PATH;
+      originalPluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+      process.env.PATH = shimBin;
+      process.env.CLAUDE_PLUGIN_ROOT = shimRoot;
+    });
+
+    afterEach(() => {
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      if (originalPluginRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = originalPluginRoot;
+      rmSync(shimRoot, { recursive: true, force: true });
+      rmSync(shimBin, { recursive: true, force: true });
+    });
+
+    function ctx(): string {
+      return runSessionStart({ cwd: tmpProject }).hookSpecificOutput.additionalContext;
+    }
+
+    it('installs the shim and says so on the first session', () => {
+      expect(ctx()).toContain('put "enigma" on PATH');
+      expect(existsSync(join(shimBin, 'enigma'))).toBe(true);
+    });
+
+    it('says nothing about PATH once the shim is in place', () => {
+      ctx();
+
+      // The names line still fires; the shim line must not, or every session
+      // opens with a line about a symlink the user did not ask about.
+      const second = ctx();
+      expect(second).toContain('no secrets registered');
+      expect(second).not.toContain('on PATH');
+    });
+
+    it('is silent, and writes nothing, outside a plugin install', () => {
+      delete process.env.CLAUDE_PLUGIN_ROOT;
+
+      expect(ctx()).not.toContain('on PATH');
+      expect(existsSync(join(shimBin, 'enigma'))).toBe(false);
+    });
+
+    it('respects the ENIGMA_NO_PATH_SHIM opt-out', () => {
+      process.env.ENIGMA_NO_PATH_SHIM = '1';
+      try {
+        expect(ctx()).not.toContain('on PATH');
+        expect(existsSync(join(shimBin, 'enigma'))).toBe(false);
+      } finally {
+        delete process.env.ENIGMA_NO_PATH_SHIM;
+      }
+    });
+
+    it('never puts a value in the shim line', async () => {
+      await setSecret({ name: 'OPENAI_API_KEY', value: 'sk-should-never-appear', scope: 'global', depository: 'encrypted', actor: 'cli' });
+
+      expect(ctx()).not.toContain('sk-should-never-appear');
     });
   });
 });

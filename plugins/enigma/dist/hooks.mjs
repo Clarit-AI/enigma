@@ -21,6 +21,18 @@ function readStdinJson() {
   });
 }
 
+// src/core/is-main-module.ts
+import { realpathSync } from "node:fs";
+import { fileURLToPath } from "node:url";
+function isMainModule(metaUrl = import.meta.url, entry = process.argv[1]) {
+  if (!entry) return false;
+  try {
+    return realpathSync(fileURLToPath(metaUrl)) === realpathSync(entry);
+  } catch {
+    return false;
+  }
+}
+
 // src/core/config.ts
 import { join as join2 } from "node:path";
 
@@ -140,7 +152,7 @@ var HOST_TAG = `${process.platform}-${process.arch}`;
 
 // src/core/project.ts
 import { createHash } from "node:crypto";
-import { existsSync as existsSync2, readFileSync as readFileSync2, realpathSync, statSync } from "node:fs";
+import { existsSync as existsSync2, readFileSync as readFileSync2, realpathSync as realpathSync2, statSync } from "node:fs";
 import { basename, dirname as dirname2, join as join3, resolve } from "node:path";
 import * as nodePath from "node:path";
 var PROJECT_ID_LENGTH = 16;
@@ -202,7 +214,7 @@ function directoryStat(p) {
 }
 function safeRealpath(p, fallback) {
   try {
-    return realpathSync(p);
+    return realpathSync2(p);
   } catch {
     return fallback;
   }
@@ -625,24 +637,24 @@ var PROBE_REF = "__enigma_detect_probe__";
 var REF_PATTERN = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH = 512;
 function runSecretTool(args) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     execFile(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecretToolWithStdin(args, value) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = execFile(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -787,24 +799,24 @@ var REF_PATTERN2 = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH2 = 512;
 var MARKER_BYTE = 1;
 function runSecurity(args) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     execFile2(SECURITY_BIN, args, { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecurityBatch(line) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = execFile2(SECURITY_BIN, ["-i"], { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -966,24 +978,24 @@ var REF_MAX_LENGTH3 = 512;
 var VAULT_MISSING_PATTERN = /isn't a vault|no vault named|could not find vault/i;
 var ITEM_MISSING_PATTERN = /isn't an item|could not find item|item.*not found/i;
 function runOp(args) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runOpWithStdin(args, stdinData) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -1219,6 +1231,157 @@ function computeManifestGaps(cwd) {
   return { registeredNames, gaps };
 }
 
+// src/core/shim.ts
+import { accessSync, constants, existsSync as existsSync7, lstatSync, readlinkSync, renameSync as renameSync2, rmSync, symlinkSync } from "node:fs";
+import { delimiter, dirname as dirname4, isAbsolute, join as join5, resolve as resolve3 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+function pathDirs(pathEnv) {
+  const seen = /* @__PURE__ */ new Set();
+  const dirs = [];
+  for (const raw of pathEnv.split(delimiter)) {
+    const entry = raw.trim();
+    if (entry.length === 0 || !isAbsolute(entry)) continue;
+    const abs = resolve3(entry);
+    if (seen.has(abs)) continue;
+    seen.add(abs);
+    dirs.push(abs);
+  }
+  return dirs;
+}
+function isWritableDir(dir) {
+  try {
+    accessSync(dir, constants.W_OK | constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function classify(dest, cli) {
+  let stats;
+  try {
+    stats = lstatSync(dest);
+  } catch {
+    return { slot: "free", link: null };
+  }
+  if (!stats.isSymbolicLink()) return { slot: "foreign", link: null };
+  let raw;
+  try {
+    raw = readlinkSync(dest);
+  } catch {
+    return { slot: "foreign", link: null };
+  }
+  const link = isAbsolute(raw) ? resolve3(raw) : resolve3(dirname4(dest), raw);
+  let resolves = true;
+  try {
+    accessSync(link, constants.F_OK);
+  } catch {
+    resolves = false;
+  }
+  if (!resolves) return { slot: "dangling", link };
+  return link === cli ? { slot: "ours", link } : { slot: "foreign", link };
+}
+function linkShim(dest, cli) {
+  const tmp = `${dest}.enigma-tmp-${process.pid}`;
+  try {
+    rmSync(tmp, { force: true });
+    symlinkSync(cli, tmp);
+    renameSync2(tmp, dest);
+    return true;
+  } catch {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+    }
+    return false;
+  }
+}
+function defaultPluginRoot() {
+  const fromEnv = process.env.CLAUDE_PLUGIN_ROOT;
+  if (fromEnv) return fromEnv;
+  try {
+    return resolve3(dirname4(fileURLToPath2(import.meta.url)), "..");
+  } catch {
+    return null;
+  }
+}
+function ensureCliShim(options = {}) {
+  try {
+    if (process.env.ENIGMA_NO_PATH_SHIM === "1") {
+      return { status: "disabled", target: null, cli: null, link: null, detail: "ENIGMA_NO_PATH_SHIM=1 is set" };
+    }
+    const pluginRoot = options.pluginRoot === void 0 ? defaultPluginRoot() : options.pluginRoot;
+    if (!pluginRoot) {
+      return { status: "unavailable", target: null, cli: null, link: null, detail: "not running from a plugin install" };
+    }
+    const cli = resolve3(pluginRoot, "dist", "cli.mjs");
+    if (!existsSync7(cli)) {
+      return { status: "unavailable", target: null, cli: null, link: null, detail: `no CLI bundle at ${cli}` };
+    }
+    const dirs = pathDirs(options.pathEnv ?? process.env.PATH ?? "");
+    if (dirs.length === 0) {
+      return { status: "no-writable-dir", target: null, cli, link: null, detail: "PATH has no absolute directory" };
+    }
+    const write = options.write !== false;
+    let firstFree = null;
+    for (const dir of dirs) {
+      const dest = join5(dir, "enigma");
+      const { slot, link } = classify(dest, cli);
+      if (slot === "ours") return { status: "present", target: dest, cli, link, detail: null };
+      if (slot === "foreign") {
+        return { status: "occupied", target: dest, cli, link, detail: `${dest} is not a shim and was left alone` };
+      }
+      if (slot === "dangling") {
+        if (!isWritableDir(dir)) continue;
+        if (!write) return { status: "pending", target: dest, cli, link: cli, detail: "a dangling shim would be refreshed here" };
+        if (linkShim(dest, cli)) return { status: "repointed", target: dest, cli, link: cli, detail: null };
+        continue;
+      }
+      if (firstFree === null && isWritableDir(dir)) firstFree = dest;
+    }
+    if (firstFree === null) {
+      return { status: "no-writable-dir", target: null, cli, link: null, detail: "no writable directory on PATH" };
+    }
+    if (!write) return { status: "pending", target: firstFree, cli, link: null, detail: "a session would create the shim here" };
+    if (!linkShim(firstFree, cli)) {
+      return { status: "failed", target: firstFree, cli, link: null, detail: `could not create ${firstFree}` };
+    }
+    return { status: "installed", target: firstFree, cli, link: cli, detail: null };
+  } catch (err) {
+    return {
+      status: "failed",
+      target: null,
+      cli: null,
+      link: null,
+      detail: err instanceof Error ? err.message : "unknown error"
+    };
+  }
+}
+function runHint() {
+  const result = ensureCliShim({ write: false });
+  if (result.status === "present" || result.status === "repointed") return "`enigma run -- <command>`";
+  if (result.cli) return `\`node "${result.cli}" run -- <command>\``;
+  return "`enigma run -- <command>`";
+}
+function describeShim(result) {
+  switch (result.status) {
+    case "installed":
+      return `Enigma: put "enigma" on PATH at ${result.target} so "enigma run" works. If the shell has not picked it up yet, run: hash -r`;
+    case "repointed":
+      return `Enigma: refreshed the "enigma" PATH shim at ${result.target} (it pointed at a plugin version that is gone).`;
+    case "occupied":
+      return `Enigma: ${result.detail} \u2014 "enigma" on your PATH may not be this Enigma. Run this Enigma directly: node "${result.cli ?? ""}"`;
+    case "no-writable-dir":
+    case "failed":
+      return `Enigma: could not put "enigma" on PATH (${result.detail}). Run commands through: node "${result.cli ?? ""}" run -- <command>`;
+    case "disabled":
+    case "present":
+    case "unavailable":
+      return null;
+    case "pending":
+      return `Enigma: "enigma" is not on PATH yet; the next session start will create it at ${result.target}.`;
+  }
+}
+
 // src/hooks/session-start.ts
 function runSessionStart(input) {
   const cwd = input.cwd ?? process.cwd();
@@ -1241,6 +1404,8 @@ function runSessionStart(input) {
     if (legacyLine) lines.push(`Enigma: ${legacyLine}`);
   } catch {
   }
+  const shimLine = describeShim(ensureCliShim());
+  if (shimLine) lines.push(shimLine);
   return {
     hookSpecificOutput: {
       hookEventName: "SessionStart",
@@ -1250,14 +1415,14 @@ function runSessionStart(input) {
 }
 
 // src/hooks/read-guard.ts
-import { basename as basename3, resolve as resolve3, sep } from "node:path";
-import { existsSync as existsSync7, statSync as statSync2 } from "node:fs";
+import { basename as basename3, resolve as resolve4, sep } from "node:path";
+import { existsSync as existsSync8, statSync as statSync2 } from "node:fs";
 var DOTENV_EXEMPT = /* @__PURE__ */ new Set([".env.example"]);
 var BARE_ENV_DUMP_COMMANDS = /* @__PURE__ */ new Set(["env", "printenv"]);
 var NON_READING_BASH_VERBS = /* @__PURE__ */ new Set(["rm", "mv", "touch", "chmod", "stat", "ls", "find", "test"]);
 var DOTENV_EXCLUDE_GLOB = "!.env*";
 var MAX_SUBSTITUTION_DEPTH = 10;
-var USE_INSTEAD = "Use `enigma_request` to collect it from the user, or `enigma run -- <command>` to inject the real value into a child process without it ever entering this session.";
+var useInstead = () => `Use \`enigma_request\` to collect it from the user, or ${runHint()} to inject the real value into a child process without it ever entering this session.`;
 function isDotEnvBasename(name) {
   if (DOTENV_EXEMPT.has(name)) return false;
   return name === ".env" || name.startsWith(".env.");
@@ -1266,8 +1431,8 @@ function targetsDotEnv(pathLike) {
   return isDotEnvBasename(basename3(pathLike.trim()));
 }
 function targetsEnigmaConfig(pathLike, cwd) {
-  const home = resolve3(enigmaHome());
-  const resolved = resolve3(cwd, pathLike.trim());
+  const home = resolve4(enigmaHome());
+  const resolved = resolve4(cwd, pathLike.trim());
   return resolved === home || resolved.startsWith(`${home}${sep}`);
 }
 function decodeAnsiCEscapes(body) {
@@ -1471,8 +1636,8 @@ var PATH_TOOL_FIELDS = {
 function isKnownNonDirectoryPath(pathLike, cwd) {
   if (!pathLike) return false;
   try {
-    const resolved = resolve3(cwd, pathLike.trim());
-    return existsSync7(resolved) && !statSync2(resolved).isDirectory();
+    const resolved = resolve4(cwd, pathLike.trim());
+    return existsSync8(resolved) && !statSync2(resolved).isDirectory();
   } catch {
     return false;
   }
@@ -1550,7 +1715,7 @@ function runReadGuard(input) {
     const candidates = fields.map((f) => stringField(toolInput, f)).filter((v) => v !== void 0);
     for (const candidate of candidates) {
       if (targetsDotEnv(candidate)) {
-        return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${USE_INSTEAD}`);
+        return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${useInstead()}`);
       }
       if (targetsEnigmaConfig(candidate, cwd)) {
         return deny(
@@ -1570,13 +1735,13 @@ function runReadGuard(input) {
       const texts = allCommandTexts(normalizeShellEscapes(command));
       if (texts === void 0) {
         return deny(
-          "This command has command-substitution nesting too deep to safely inspect for a secret read. Simplify it, or use `enigma run -- <command>` if it needs a secret value injected."
+          `This command has command-substitution nesting too deep to safely inspect for a secret read. Simplify it, or use ${runHint()} if it needs a secret value injected.`
         );
       }
       const segments = texts.flatMap(splitSegments);
       for (const segment of segments) {
         if (segmentTargetsDotEnvByPath(segment)) {
-          return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${USE_INSTEAD}`);
+          return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${useInstead()}`);
         }
         if (segmentTargetsEnigmaConfigByPath(segment, cwd)) {
           return deny(
@@ -1585,24 +1750,24 @@ function runReadGuard(input) {
         }
         if (segmentIsBareEnvDump(segment)) {
           return deny(
-            `\`env\`/\`printenv\` can dump secret values into this session. Use \`enigma list\` to see which names exist, or \`enigma run -- <command>\` to run a command with the real values injected without you seeing them.`
+            `\`env\`/\`printenv\` can dump secret values into this session. Use \`enigma list\` to see which names exist, or ${runHint()} to run a command with the real values injected without you seeing them.`
           );
         }
         if (segmentIsEnigmaGetOrEnv(segment)) {
           return deny(
-            `\`enigma get\`/\`enigma env\` print a secret value to stdout for humans and scripts, not for the agent. ${USE_INSTEAD}`
+            `\`enigma get\`/\`enigma env\` print a secret value to stdout for humans and scripts, not for the agent. ${useInstead()}`
           );
         }
         if (segmentIsKeychainRead(segment)) {
-          return deny(`Reading the macOS Keychain directly via \`security find-generic-password\` is blocked. ${USE_INSTEAD}`);
+          return deny(`Reading the macOS Keychain directly via \`security find-generic-password\` is blocked. ${useInstead()}`);
         }
         if (segmentIsOpRead(segment)) {
-          return deny(`Reading a 1Password item directly via \`op read\` is blocked. ${USE_INSTEAD}`);
+          return deny(`Reading a 1Password item directly via \`op read\` is blocked. ${useInstead()}`);
         }
         const echoedName = segmentEchoesKnownSecret(segment, known);
         if (echoedName) {
           return deny(
-            `${echoedName} is a secret Enigma tracks; echoing it would put the value in this session. Use \`enigma run -- <command>\` to inject it into a child process instead.`
+            `${echoedName} is a secret Enigma tracks; echoing it would put the value in this session. Use ${runHint()} to inject it into a child process instead.`
           );
         }
       }
@@ -1724,7 +1889,7 @@ async function main() {
   }
   process.exit(0);
 }
-if (process.argv[1] && import.meta.url === new URL(process.argv[1], "file:").href) {
+if (isMainModule()) {
   void main();
 }
 export {

@@ -110,13 +110,13 @@ async function readWithEchoDisabled(stdin, stderr) {
   };
   let handleSignal;
   try {
-    return await new Promise((resolve4, reject) => {
+    return await new Promise((resolve5, reject) => {
       let value = "";
       const onData = (chunk) => {
         for (const ch of chunk) {
           if (ch === "\r" || ch === "\n") {
             stdin.removeListener("data", onData);
-            resolve4(value);
+            resolve5(value);
             return;
           }
           if (ch === ETX) {
@@ -1012,24 +1012,24 @@ var PROBE_REF = "__enigma_detect_probe__";
 var REF_PATTERN = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH = 512;
 function runSecretTool(args) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     execFile(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecretToolWithStdin(args, value) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = execFile(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -1174,24 +1174,24 @@ var REF_PATTERN2 = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH2 = 512;
 var MARKER_BYTE = 1;
 function runSecurity(args) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     execFile2(SECURITY_BIN, args, { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecurityBatch(line) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = execFile2(SECURITY_BIN, ["-i"], { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -1353,24 +1353,24 @@ var REF_MAX_LENGTH3 = 512;
 var VAULT_MISSING_PATTERN = /isn't a vault|no vault named|could not find vault/i;
 var ITEM_MISSING_PATTERN = /isn't an item|could not find item|item.*not found/i;
 function runOp(args) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runOpWithStdin(args, stdinData) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -1839,7 +1839,7 @@ async function cmdAdd(argv, streams = {}) {
 
 // src/cli/commands/doctor.ts
 import { execFile as execFile4 } from "node:child_process";
-import { existsSync as existsSync8 } from "node:fs";
+import { existsSync as existsSync9 } from "node:fs";
 import { platform, release } from "node:os";
 import { promisify } from "node:util";
 
@@ -1855,6 +1855,132 @@ function computeManifestGaps(cwd) {
   const known = new Set(registeredNames);
   const gaps = Object.keys(manifest.secrets).filter((name) => !known.has(name)).sort();
   return { registeredNames, gaps };
+}
+
+// src/core/shim.ts
+import { accessSync, constants, existsSync as existsSync8, lstatSync, readlinkSync, renameSync as renameSync2, rmSync, symlinkSync } from "node:fs";
+import { delimiter, dirname as dirname5, isAbsolute, join as join5, resolve as resolve4 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+function pathDirs(pathEnv) {
+  const seen = /* @__PURE__ */ new Set();
+  const dirs = [];
+  for (const raw of pathEnv.split(delimiter)) {
+    const entry = raw.trim();
+    if (entry.length === 0 || !isAbsolute(entry)) continue;
+    const abs = resolve4(entry);
+    if (seen.has(abs)) continue;
+    seen.add(abs);
+    dirs.push(abs);
+  }
+  return dirs;
+}
+function isWritableDir(dir) {
+  try {
+    accessSync(dir, constants.W_OK | constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function classify(dest, cli) {
+  let stats;
+  try {
+    stats = lstatSync(dest);
+  } catch {
+    return { slot: "free", link: null };
+  }
+  if (!stats.isSymbolicLink()) return { slot: "foreign", link: null };
+  let raw;
+  try {
+    raw = readlinkSync(dest);
+  } catch {
+    return { slot: "foreign", link: null };
+  }
+  const link = isAbsolute(raw) ? resolve4(raw) : resolve4(dirname5(dest), raw);
+  let resolves = true;
+  try {
+    accessSync(link, constants.F_OK);
+  } catch {
+    resolves = false;
+  }
+  if (!resolves) return { slot: "dangling", link };
+  return link === cli ? { slot: "ours", link } : { slot: "foreign", link };
+}
+function linkShim(dest, cli) {
+  const tmp = `${dest}.enigma-tmp-${process.pid}`;
+  try {
+    rmSync(tmp, { force: true });
+    symlinkSync(cli, tmp);
+    renameSync2(tmp, dest);
+    return true;
+  } catch {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+    }
+    return false;
+  }
+}
+function defaultPluginRoot() {
+  const fromEnv = process.env.CLAUDE_PLUGIN_ROOT;
+  if (fromEnv) return fromEnv;
+  try {
+    return resolve4(dirname5(fileURLToPath2(import.meta.url)), "..");
+  } catch {
+    return null;
+  }
+}
+function ensureCliShim(options = {}) {
+  try {
+    if (process.env.ENIGMA_NO_PATH_SHIM === "1") {
+      return { status: "disabled", target: null, cli: null, link: null, detail: "ENIGMA_NO_PATH_SHIM=1 is set" };
+    }
+    const pluginRoot = options.pluginRoot === void 0 ? defaultPluginRoot() : options.pluginRoot;
+    if (!pluginRoot) {
+      return { status: "unavailable", target: null, cli: null, link: null, detail: "not running from a plugin install" };
+    }
+    const cli = resolve4(pluginRoot, "dist", "cli.mjs");
+    if (!existsSync8(cli)) {
+      return { status: "unavailable", target: null, cli: null, link: null, detail: `no CLI bundle at ${cli}` };
+    }
+    const dirs = pathDirs(options.pathEnv ?? process.env.PATH ?? "");
+    if (dirs.length === 0) {
+      return { status: "no-writable-dir", target: null, cli, link: null, detail: "PATH has no absolute directory" };
+    }
+    const write = options.write !== false;
+    let firstFree = null;
+    for (const dir of dirs) {
+      const dest = join5(dir, "enigma");
+      const { slot, link } = classify(dest, cli);
+      if (slot === "ours") return { status: "present", target: dest, cli, link, detail: null };
+      if (slot === "foreign") {
+        return { status: "occupied", target: dest, cli, link, detail: `${dest} is not a shim and was left alone` };
+      }
+      if (slot === "dangling") {
+        if (!isWritableDir(dir)) continue;
+        if (!write) return { status: "pending", target: dest, cli, link: cli, detail: "a dangling shim would be refreshed here" };
+        if (linkShim(dest, cli)) return { status: "repointed", target: dest, cli, link: cli, detail: null };
+        continue;
+      }
+      if (firstFree === null && isWritableDir(dir)) firstFree = dest;
+    }
+    if (firstFree === null) {
+      return { status: "no-writable-dir", target: null, cli, link: null, detail: "no writable directory on PATH" };
+    }
+    if (!write) return { status: "pending", target: firstFree, cli, link: null, detail: "a session would create the shim here" };
+    if (!linkShim(firstFree, cli)) {
+      return { status: "failed", target: firstFree, cli, link: null, detail: `could not create ${firstFree}` };
+    }
+    return { status: "installed", target: firstFree, cli, link: cli, detail: null };
+  } catch (err) {
+    return {
+      status: "failed",
+      target: null,
+      cli: null,
+      link: null,
+      detail: err instanceof Error ? err.message : "unknown error"
+    };
+  }
 }
 
 // src/cli/commands/doctor.ts
@@ -1897,10 +2023,11 @@ async function cmdDoctor(argv) {
     index = { ok: false, error: err instanceof EnigmaError ? err.code : "unknown error" };
   }
   const vault = {
-    keyPresent: existsSync8(keyPath()),
-    secretsFilePresent: existsSync8(secretsPath())
+    keyPresent: existsSync9(keyPath()),
+    secretsFilePresent: existsSync9(secretsPath())
   };
   const { gaps: manifestGaps } = computeManifestGaps(process.cwd());
+  const pathShim = ensureCliShim({ write: false });
   const report2 = {
     platform: `${platform()} ${release()}`,
     depositories,
@@ -1916,7 +2043,12 @@ async function cmdDoctor(argv) {
     index,
     vault,
     manifestGaps,
-    legacyScope
+    legacyScope,
+    pathShim: {
+      status: pathShim.status,
+      target: pathShim.target,
+      detail: pathShim.detail
+    }
   };
   if (json) {
     process.stdout.write(`${JSON.stringify(report2)}
@@ -1934,7 +2066,8 @@ async function cmdDoctor(argv) {
     `Index: ${index.ok ? `ok (${index.entries} entries)` : `ERROR: ${index.error}`}`,
     `Vault key: ${vault.keyPresent ? "present" : "missing"}`,
     `Vault file: ${vault.secretsFilePresent ? "present" : "missing"}`,
-    `Manifest gaps: ${manifestGaps.length === 0 ? "none" : manifestGaps.join(", ")}`
+    `Manifest gaps: ${manifestGaps.length === 0 ? "none" : manifestGaps.join(", ")}`,
+    `PATH shim: ${pathShim.status}${pathShim.target ? ` (${pathShim.target})` : ""}${pathShim.detail ? ` \u2014 ${pathShim.detail}` : ""}`
   ];
   if (legacyScopeLine) {
     lines.push(`Legacy scope entries: ${legacyScopeLine}`);
@@ -1962,8 +2095,8 @@ async function cmdGet(argv) {
 }
 
 // src/cli/commands/import.ts
-import { existsSync as existsSync10, readFileSync as readFileSync6 } from "node:fs";
-import { isAbsolute, join as join5 } from "node:path";
+import { existsSync as existsSync11, readFileSync as readFileSync6 } from "node:fs";
+import { isAbsolute as isAbsolute2, join as join6 } from "node:path";
 
 // src/request/store.ts
 import { randomBytes as randomBytes3 } from "node:crypto";
@@ -1980,13 +2113,13 @@ var REVEAL_TTL_MS = 5 * 60 * 1e3;
 var SWEEP_INTERVAL_MS = 60 * 1e3;
 var USED_GRACE_MS = 5 * 60 * 1e3;
 function deferred() {
-  let resolve4;
+  let resolve5;
   let reject;
   const promise = new Promise((res, rej) => {
-    resolve4 = res;
+    resolve5 = res;
     reject = rej;
   });
-  return { promise, resolve: resolve4, reject };
+  return { promise, resolve: resolve5, reject };
 }
 function defaultTtlMs(kind) {
   return kind === "reveal" ? REVEAL_TTL_MS : REQUEST_TTL_MS;
@@ -2476,18 +2609,18 @@ function removeDotEnvEntries(content, names, opts = {}) {
 
 // src/storage/import-commit.ts
 import { randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync9, readFileSync as readFileSync5, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync10, readFileSync as readFileSync5, renameSync as renameSync3, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 var FILE_MODE4 = 384;
 function writeFileAtomic(path, content, mode) {
   const tmpPath = `${path}.${randomBytes4(6).toString("hex")}.tmp`;
   try {
     writeFileSync4(tmpPath, content, { mode });
-    renameSync2(tmpPath, path);
+    renameSync3(tmpPath, path);
     return { ok: true };
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err);
     try {
-      if (existsSync9(tmpPath)) unlinkSync(tmpPath);
+      if (existsSync10(tmpPath)) unlinkSync(tmpPath);
       return { ok: false, error };
     } catch {
       return { ok: false, error, leftoverPath: tmpPath };
@@ -2556,7 +2689,7 @@ async function commitImport(opts) {
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
-  const currentContent = existsSync9(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
+  const currentContent = existsSync10(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
   const valueByName = new Map(opts.entries.map((e) => [e.name, e.value]));
   const currentValueByName = new Map(parseDotEnv(currentContent).entries.map((e) => [e.name, e.value]));
   const toRemove = [];
@@ -2932,7 +3065,7 @@ var PayloadTooLargeError = class extends Error {
   }
 };
 function readBody(req, maxBytes = MAX_BODY_BYTES) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const chunks = [];
     let total = 0;
     let settled2 = false;
@@ -2953,7 +3086,7 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
     req.on("end", () => {
       if (settled2) return;
       settled2 = true;
-      resolve4(Buffer.concat(chunks));
+      resolve5(Buffer.concat(chunks));
     });
     req.on("error", settleError);
   });
@@ -5352,7 +5485,7 @@ var MIN_REARM_DELAY_MS = 1e3;
 var state;
 var starting;
 function settled(value) {
-  return new Promise((resolve4) => resolve4(value));
+  return new Promise((resolve5) => resolve5(value));
 }
 function toHandle(s) {
   return { port: s.port, origin: `http://${s.host}:${s.port}`, close: stopServer };
@@ -5388,7 +5521,7 @@ function startServer(opts = {}) {
       (_resolve, reject) => reject(new Error(`refusing to bind ${host} over plain HTTP; pass allowInsecureHttp to override (ADR-005)`))
     );
   }
-  starting = new Promise((resolve4, reject) => {
+  starting = new Promise((resolve5, reject) => {
     const server = http.createServer((req, res) => {
       if (state) resetIdleTimer(state);
       void handleRequest(req, res);
@@ -5404,7 +5537,7 @@ function startServer(opts = {}) {
       state = newState;
       resetIdleTimer(newState);
       starting = void 0;
-      resolve4(toHandle(newState));
+      resolve5(toHandle(newState));
     });
   });
   return starting;
@@ -5414,7 +5547,7 @@ function stopServer() {
   if (!current) return settled(void 0);
   state = void 0;
   if (current.idleTimer) clearTimeout(current.idleTimer);
-  return new Promise((resolve4) => current.server.close(() => resolve4()));
+  return new Promise((resolve5) => current.server.close(() => resolve5()));
 }
 
 // src/cli/commands/import.ts
@@ -5548,8 +5681,8 @@ async function cmdImport(argv) {
   if (positionals.length > 1) throw new UsageError(USAGE3);
   const cwd = process.cwd();
   const projectPath = findProjectPath(cwd);
-  const absPath = isAbsolute(pathArg) ? pathArg : join5(cwd, pathArg);
-  if (!existsSync10(absPath)) {
+  const absPath = isAbsolute2(pathArg) ? pathArg : join6(cwd, pathArg);
+  if (!existsSync11(absPath)) {
     throw new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` });
   }
   const content = readFileSync6(absPath, "utf8");
@@ -5600,15 +5733,15 @@ async function cmdImport(argv) {
 }
 
 // src/cli/commands/install.ts
-import { existsSync as existsSync11, mkdirSync as mkdirSync3, readFileSync as readFileSync7, renameSync as renameSync3, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync12, mkdirSync as mkdirSync3, readFileSync as readFileSync7, renameSync as renameSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname5, join as join6 } from "node:path";
+import { dirname as dirname6, join as join7 } from "node:path";
 var MARKETPLACE_NAME = "clarit-enigma";
 var REPO = "Clarit-AI/enigma";
 var PLUGIN_ENTRY = `enigma@${MARKETPLACE_NAME}`;
 function claudeSettingsPath() {
-  const configDir = process.env.CLAUDE_CONFIG_DIR || join6(homedir2(), ".claude");
-  return join6(configDir, "settings.json");
+  const configDir = process.env.CLAUDE_CONFIG_DIR || join7(homedir2(), ".claude");
+  return join7(configDir, "settings.json");
 }
 var DEFAULT_STYLE = { indent: "  ", trailingNewline: true, eol: "\n" };
 function detectStyle(raw) {
@@ -5620,7 +5753,7 @@ function detectStyle(raw) {
   };
 }
 function readSettings(path) {
-  if (!existsSync11(path)) return { settings: {}, style: DEFAULT_STYLE };
+  if (!existsSync12(path)) return { settings: {}, style: DEFAULT_STYLE };
   let raw;
   try {
     raw = readFileSync7(path, "utf8");
@@ -5666,7 +5799,7 @@ function errorReason(err) {
   return err instanceof Error ? err.message : String(err);
 }
 function writeSettingsAtomic(path, settings, style) {
-  const dir = dirname5(path);
+  const dir = dirname6(path);
   try {
     mkdirSync3(dir, { recursive: true });
   } catch (err) {
@@ -5680,7 +5813,7 @@ function writeSettingsAtomic(path, settings, style) {
   const body = style.eol === "\r\n" ? lfBody.replace(/\n/g, "\r\n") : lfBody;
   try {
     writeFileSync5(tmpPath, style.trailingNewline ? `${body}${style.eol}` : body, "utf8");
-    renameSync3(tmpPath, path);
+    renameSync4(tmpPath, path);
   } catch (err) {
     throw new EnigmaError({
       code: "E_CLAUDE_SETTINGS_UNWRITABLE",
@@ -5981,7 +6114,7 @@ function entriesToInject(entries, only) {
   return matched;
 }
 function spawnChild(command, args, env) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = spawn(command, args, { stdio: "inherit", env });
     const forward = (signal) => {
       child.kill(signal);
@@ -5998,10 +6131,10 @@ function spawnChild(command, args, env) {
       stopForwarding();
       if (signal) {
         const signum = osConstants.signals[signal] ?? 0;
-        resolve4(128 + signum);
+        resolve5(128 + signum);
         return;
       }
-      resolve4(code ?? 1);
+      resolve5(code ?? 1);
     });
   });
 }
@@ -6048,6 +6181,18 @@ function notImplemented(command) {
     );
     return 2;
   };
+}
+
+// src/core/is-main-module.ts
+import { realpathSync as realpathSync3 } from "node:fs";
+import { fileURLToPath as fileURLToPath3 } from "node:url";
+function isMainModule(metaUrl = import.meta.url, entry = process.argv[1]) {
+  if (!entry) return false;
+  try {
+    return realpathSync3(fileURLToPath3(metaUrl)) === realpathSync3(entry);
+  } catch {
+    return false;
+  }
 }
 
 // src/cli/index.ts
@@ -6112,7 +6257,7 @@ ${USAGE8}`);
     return 1;
   }
 }
-if (process.argv[1] && import.meta.url === new URL(process.argv[1], "file:").href) {
+if (isMainModule()) {
   main(process.argv.slice(2)).then((code) => {
     process.exitCode = code;
   });

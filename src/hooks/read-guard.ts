@@ -145,6 +145,7 @@ import { basename, resolve, sep } from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { enigmaHome } from '../core/paths.js';
 import { readIndex } from '../core/index-store.js';
+import { runHint } from '../core/shim.js';
 import type { PreToolUseInput, PreToolUseOutput } from './types.js';
 
 const DOTENV_EXEMPT = new Set(['.env.example']);
@@ -163,7 +164,14 @@ const DOTENV_EXCLUDE_GLOB = '!.env*';
  * than silently checking only a partial unwrapping. */
 const MAX_SUBSTITUTION_DEPTH = 10;
 
-const USE_INSTEAD = 'Use `enigma_request` to collect it from the user, or `enigma run -- <command>` to inject the real value into a child process without it ever entering this session.';
+// Issue #90. The remediation half of every denial. A denial is the one instruction an
+// agent is actually given after being blocked, so it must name a command that
+// runs: `runHint()` reports the bundled-CLI path when the PATH shim is not in
+// place (ADR-006). Recommending a command that does not exist turns a correct
+// refusal into a dead end. This is only ever called while building a denial, so
+// the PATH scan behind it never lands on the allow path.
+const useInstead = (): string =>
+  `Use \`enigma_request\` to collect it from the user, or ${runHint()} to inject the real value into a child process without it ever entering this session.`;
 
 function isDotEnvBasename(name: string): boolean {
   if (DOTENV_EXEMPT.has(name)) return false;
@@ -748,7 +756,7 @@ export function runReadGuard(input: PreToolUseInput): PreToolUseOutput | undefin
 
     for (const candidate of candidates) {
       if (targetsDotEnv(candidate)) {
-        return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${USE_INSTEAD}`);
+        return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${useInstead()}`);
       }
       if (targetsEnigmaConfig(candidate, cwd)) {
         return deny(
@@ -770,13 +778,13 @@ export function runReadGuard(input: PreToolUseInput): PreToolUseOutput | undefin
       const texts = allCommandTexts(normalizeShellEscapes(command));
       if (texts === undefined) {
         return deny(
-          'This command has command-substitution nesting too deep to safely inspect for a secret read. Simplify it, or use `enigma run -- <command>` if it needs a secret value injected.',
+          `This command has command-substitution nesting too deep to safely inspect for a secret read. Simplify it, or use ${runHint()} if it needs a secret value injected.`,
         );
       }
       const segments = texts.flatMap(splitSegments);
       for (const segment of segments) {
         if (segmentTargetsDotEnvByPath(segment)) {
-          return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${USE_INSTEAD}`);
+          return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${useInstead()}`);
         }
         if (segmentTargetsEnigmaConfigByPath(segment, cwd)) {
           return deny(
@@ -785,24 +793,24 @@ export function runReadGuard(input: PreToolUseInput): PreToolUseOutput | undefin
         }
         if (segmentIsBareEnvDump(segment)) {
           return deny(
-            `\`env\`/\`printenv\` can dump secret values into this session. Use \`enigma list\` to see which names exist, or \`enigma run -- <command>\` to run a command with the real values injected without you seeing them.`,
+            `\`env\`/\`printenv\` can dump secret values into this session. Use \`enigma list\` to see which names exist, or ${runHint()} to run a command with the real values injected without you seeing them.`,
           );
         }
         if (segmentIsEnigmaGetOrEnv(segment)) {
           return deny(
-            `\`enigma get\`/\`enigma env\` print a secret value to stdout for humans and scripts, not for the agent. ${USE_INSTEAD}`,
+            `\`enigma get\`/\`enigma env\` print a secret value to stdout for humans and scripts, not for the agent. ${useInstead()}`,
           );
         }
         if (segmentIsKeychainRead(segment)) {
-          return deny(`Reading the macOS Keychain directly via \`security find-generic-password\` is blocked. ${USE_INSTEAD}`);
+          return deny(`Reading the macOS Keychain directly via \`security find-generic-password\` is blocked. ${useInstead()}`);
         }
         if (segmentIsOpRead(segment)) {
-          return deny(`Reading a 1Password item directly via \`op read\` is blocked. ${USE_INSTEAD}`);
+          return deny(`Reading a 1Password item directly via \`op read\` is blocked. ${useInstead()}`);
         }
         const echoedName = segmentEchoesKnownSecret(segment, known);
         if (echoedName) {
           return deny(
-            `${echoedName} is a secret Enigma tracks; echoing it would put the value in this session. Use \`enigma run -- <command>\` to inject it into a child process instead.`,
+            `${echoedName} is a secret Enigma tracks; echoing it would put the value in this session. Use ${runHint()} to inject it into a child process instead.`,
           );
         }
       }
