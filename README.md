@@ -82,9 +82,10 @@ the confirmation works depends on your client: a form-capable one shows its own
 yes/no dialog, and the agent never sees that path. A client without form-mode
 elicitation gets `E_CONFIRMATION_REQUIRED` instead, and the agent must ask you
 to confirm in conversation before re-calling with `confirm: true` — invoking the
-slash command is not itself a confirmation. If the name exists in both project
-and global scope, the tool returns `E_AMBIGUOUS_SCOPE` and the agent asks which
-you meant rather than guessing.
+slash command is not itself a confirmation. If you omit the scope argument and
+the name exists in *both* project and global scope, the tool returns
+`E_AMBIGUOUS_SCOPE` and the agent asks which you meant rather than guessing;
+naming the scope explicitly always resolves.
 
 ### Depositories and prompt profiles
 
