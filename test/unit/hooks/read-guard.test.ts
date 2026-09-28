@@ -115,6 +115,17 @@ describe('PreToolUse read-guard', () => {
       const reason = denialReason(bash('enigma get OPENAI_API_KEY'));
       expect(reason).toContain('enigma_request');
     });
+
+    it('never names a CLI path that does not exist', () => {
+      // The remediation text is the one instruction an agent actually gets
+      // after a denial, so it must be runnable. Under test the plugin root
+      // infers to `src/`, which has no `dist/cli.mjs` — the denial must fall
+      // back to the plain form rather than pointing at a phantom bundle
+      // (ADR-006).
+      const reason = denialReason(read('/repo/.env'));
+
+      expect(reason).not.toMatch(/node "[^"]*\/src\/dist\/cli\.mjs"/);
+    });
   });
 
   describe('target-based Bash dotenv denial (fix batch #2): any command, not just an enumerated utility', () => {

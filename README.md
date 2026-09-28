@@ -6,6 +6,26 @@ Enigma keeps secret values out of a coding agent's context window while it still
 
 Status: pre-release, targeting v1. The product requirements are in [PRD.md](PRD.md); engineering context starts at [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md).
 
+## Scope
+
+Enigma is a development tool for one job: letting an agent *use* a secret
+without the value landing in its context window. It is not a security product.
+
+It is not an endpoint detection agent, not a defence against a compromised
+machine or a hostile process running as your own user, and it does not make the
+application you are building any safer. In spirit it sits closer to Infisical or
+HashiCorp than to 1Password — and is deliberately far smaller than either,
+because it solves a much narrower problem than they do.
+
+The precise boundary is written down in [`docs/SECURITY.md`](docs/SECURITY.md).
+What Enigma protects against is the agent reading a secret *by accident*, a
+tracked value surfacing in tool output, a value leaving the plugin's own
+process boundary, and the elicitation link leaking by construction. What it does
+**not** protect against is deliberate evasion by the agent, same-user malware, or
+anything once a value has left Enigma's boundary. If your threat is a determined
+adversary rather than a well-intentioned agent having a bad day, this is the
+wrong tool.
+
 ## Problem
 
 A coding agent that needs an API key today has exactly two bad options: ask the human to paste it into the chat (now it is in the transcript, in every subsequent prompt, and in whatever logging or caching sits behind the model), or read it itself from a `.env` file or `security find-generic-password` (same outcome, one step removed). Both put the value inside the one place it can never safely leave: the model's context window. Existing secret managers (1Password, the OS keychain, `direnv`) solve secure *storage*. None of them solve the handoff into an agentic session, where the values they store still end up typed into chat or `cat`'d onto a screen the agent reads.
@@ -57,14 +77,30 @@ claude plugin install enigma@clarit-enigma
 
 This registers your checkout itself as a local marketplace source, so rebuilding `dist/` (`npm run build`) picks up changes without reinstalling.
 
-> **npm distribution is shelved for now.** The `npx @clarit.ai/enigma install` method (and the standalone `enigma` binary it would put on `PATH`) is on hold — the package has never been published, and the marketplace path above is the supported install method. It needs no npm registry access. Revisit when support for harnesses beyond Claude Code grows.
+> **npm distribution is shelved for now.** The `npx @clarit.ai/enigma install`
+> method is on hold — the package has never been published, and the marketplace
+> path above is the supported install method. It needs no npm registry access.
+>
+> Because there is no published package to run a `postinstall` from, the plugin
+> puts `enigma` on your `PATH` itself: on your **first Claude Code session**
+> after installing, Enigma creates one symlink in a directory that is already on
+> your `PATH` and tells you so. Nothing else is touched — your shell config is
+> not edited, your `PATH` is not changed, and you have nothing to run yourself.
+> Run `hash -r` if the shell needs to notice.
+>
+> It is deliberately conservative: an existing `enigma` that already works is
+> reported and left alone rather than shadowed, and only a broken symlink left
+> behind by a plugin upgrade is repaired. `enigma doctor` reports the state at
+> any time. To opt out entirely, set `ENIGMA_NO_PATH_SHIM=1`; if the shim cannot
+> be placed at all, every command in this README still works as
+> `node "${CLAUDE_PLUGIN_ROOT}/dist/cli.mjs" <command>`.
 
 ## First request, step by step
 
 1. **Ask.** Tell the agent what you need in plain language, "add my OpenAI key," "I need a GitHub token for this repo." The `enigma` skill (bundled with the plugin) recognizes this and calls `enigma_request` with the name(s), never asking you to paste anything into chat.
 2. **Fill the form, out of band.** Claude Code opens the request URL (a local page, or a native macOS dialog if you asked for that). You pick a depository from a table showing each one's prompt profile (below) and a scope (this project, or global), type the value, and submit. The value goes straight from your browser to Enigma's local server; it is never sent back through MCP.
 3. **Get a names-only confirmation.** The agent's tool call returns `"Stored OPENAI_API_KEY in encrypted (project)"`, nothing else. Nothing about the value itself ever reaches the model.
-4. **Use it.** `enigma run -- <command>` injects the real value into that one child process's environment. The agent sees the child's stdout/stderr, never the injected variable.
+4. **Use it.** `enigma run -- <command>` injects the real value into that one child process's environment. The agent sees the child's stdout/stderr, never the injected variable. (`enigma` is on your `PATH` from your first session — see [Install](#install). If it isn't, run `enigma doctor` to see why.)
 
 ### Slash commands
 
@@ -113,7 +149,9 @@ Both `PreToolUse` and `PostToolUse` are heuristics, not a sandbox. Read [`docs/S
 
 ## FAQ
 
-**Does the agent ever see my secret's value?** No, by construction: no MCP tool result carries one, and `npm run leak-fence` fails the build if the storage layer's `resolve()` function is ever reachable from `src/mcp/**` or `src/web/**`.
+**Why is my `enigma` command suddenly a symlink?** Because a marketplace install has no `postinstall` to run, so the plugin creates one link in a directory already on your `PATH` during your first session after installing. It refuses to replace an `enigma` that already works, repairs only a broken one left by a plugin upgrade, and never edits your shell config. `enigma doctor` shows the current state; `ENIGMA_NO_PATH_SHIM=1` turns it off. See [Install](#install).
+
+**Does the agent ever see my secret's value?** On any path Enigma controls, no: no MCP tool result carries one, and `npm run leak-fence` fails the build if the storage layer's `resolve()` function is ever reachable from `src/mcp/**` or `src/web/**`. That is a statement about Enigma's own code, not a promise about the agent's behaviour — an agent that deliberately goes looking for a value in its own environment is out of scope by design. See [Scope](#scope) and [`docs/SECURITY.md`](docs/SECURITY.md).
 
 **What if I want to see the value myself?** Call `enigma_reveal` (or `/enigma:reveal NAME`). It opens a one-time page or copies to your clipboard, and it is human-initiated only; the agent shouldn't invoke it on its own judgment.
 

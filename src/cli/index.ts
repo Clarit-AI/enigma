@@ -11,6 +11,7 @@ import { cmdRemove } from './commands/remove.js';
 import { cmdRun } from './commands/run.js';
 import { notImplemented } from './commands/not-implemented.js';
 import { EnigmaError } from '../core/errors.js';
+import { isMainModule } from '../core/is-main-module.js';
 
 const USAGE = `Usage: enigma <command> [options]
 
@@ -78,7 +79,7 @@ export async function main(argv: string[]): Promise<number> {
 }
 
 /* node:coverage disable */
-if (process.argv[1] && import.meta.url === new URL(process.argv[1], 'file:').href) {
+if (isMainModule()) {
   main(process.argv.slice(2)).then((code) => {
     process.exitCode = code;
   });

@@ -7,6 +7,7 @@ import { EnigmaError } from '../../core/errors.js';
 import { classifyLegacyScopeEntries, legacyScopeCountsLine, readIndex } from '../../core/index-store.js';
 import { computeManifestGaps } from '../../core/manifest-gaps.js';
 import { auditLogPath, configPath, enigmaHome, indexPath, keyPath, secretsPath } from '../../core/paths.js';
+import { ensureCliShim, describeShim } from '../../core/shim.js';
 import { RequestStore } from '../../request/store.js';
 import { detectAll } from '../../storage/detect.js';
 import { supportsFormElicitation, supportsUrlElicitation } from '../elicit.js';
@@ -76,6 +77,13 @@ export function registerDoctorTool(server: McpServer): void {
         `Vault file: ${existsSync(secretsPath()) ? 'present' : 'missing'}`,
         `Manifest gaps: ${manifestGaps.length === 0 ? 'none' : manifestGaps.join(', ')}`,
         `Paths: index=${indexPath()} audit=${auditLogPath()} config=${configPath()}`,
+        // Whether `enigma run` — the only delivery path that keeps a value out
+        // of the context window — is actually runnable from a shell. Read-only:
+        // the SessionStart hook installs the shim, this only reports on it. When
+        // the status is not `present`, the exact invocation is given so the
+        // agent has something it can actually execute. Paths and a status word
+        // only, never a value (ADR-001).
+        `PATH shim: ${describeShim(ensureCliShim({ write: false })) ?? 'enigma is on PATH — use `enigma run -- <command>`'}`,
       ];
       if (legacyScopeLine) lines.push(`Legacy scope entries: ${legacyScopeLine}`);
 

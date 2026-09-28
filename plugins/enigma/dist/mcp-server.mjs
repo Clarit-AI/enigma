@@ -409,11 +409,11 @@ var require_codegen = __commonJS({
         const rhs = this.rhs === void 0 ? "" : ` = ${this.rhs}`;
         return `${varKind} ${this.name}${rhs};` + _n;
       }
-      optimizeNames(names, constants) {
+      optimizeNames(names, constants2) {
         if (!names[this.name.str])
           return;
         if (this.rhs)
-          this.rhs = optimizeExpr(this.rhs, names, constants);
+          this.rhs = optimizeExpr(this.rhs, names, constants2);
         return this;
       }
       get names() {
@@ -430,10 +430,10 @@ var require_codegen = __commonJS({
       render({ _n }) {
         return `${this.lhs} = ${this.rhs};` + _n;
       }
-      optimizeNames(names, constants) {
+      optimizeNames(names, constants2) {
         if (this.lhs instanceof code_1.Name && !names[this.lhs.str] && !this.sideEffects)
           return;
-        this.rhs = optimizeExpr(this.rhs, names, constants);
+        this.rhs = optimizeExpr(this.rhs, names, constants2);
         return this;
       }
       get names() {
@@ -494,8 +494,8 @@ var require_codegen = __commonJS({
       optimizeNodes() {
         return `${this.code}` ? this : void 0;
       }
-      optimizeNames(names, constants) {
-        this.code = optimizeExpr(this.code, names, constants);
+      optimizeNames(names, constants2) {
+        this.code = optimizeExpr(this.code, names, constants2);
         return this;
       }
       get names() {
@@ -524,12 +524,12 @@ var require_codegen = __commonJS({
         }
         return nodes.length > 0 ? this : void 0;
       }
-      optimizeNames(names, constants) {
+      optimizeNames(names, constants2) {
         const { nodes } = this;
         let i = nodes.length;
         while (i--) {
           const n = nodes[i];
-          if (n.optimizeNames(names, constants))
+          if (n.optimizeNames(names, constants2))
             continue;
           subtractNames(names, n.names);
           nodes.splice(i, 1);
@@ -582,12 +582,12 @@ var require_codegen = __commonJS({
           return void 0;
         return this;
       }
-      optimizeNames(names, constants) {
+      optimizeNames(names, constants2) {
         var _a3;
-        this.else = (_a3 = this.else) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants);
-        if (!(super.optimizeNames(names, constants) || this.else))
+        this.else = (_a3 = this.else) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants2);
+        if (!(super.optimizeNames(names, constants2) || this.else))
           return;
-        this.condition = optimizeExpr(this.condition, names, constants);
+        this.condition = optimizeExpr(this.condition, names, constants2);
         return this;
       }
       get names() {
@@ -610,10 +610,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.iteration})` + super.render(opts);
       }
-      optimizeNames(names, constants) {
-        if (!super.optimizeNames(names, constants))
+      optimizeNames(names, constants2) {
+        if (!super.optimizeNames(names, constants2))
           return;
-        this.iteration = optimizeExpr(this.iteration, names, constants);
+        this.iteration = optimizeExpr(this.iteration, names, constants2);
         return this;
       }
       get names() {
@@ -649,10 +649,10 @@ var require_codegen = __commonJS({
       render(opts) {
         return `for(${this.varKind} ${this.name} ${this.loop} ${this.iterable})` + super.render(opts);
       }
-      optimizeNames(names, constants) {
-        if (!super.optimizeNames(names, constants))
+      optimizeNames(names, constants2) {
+        if (!super.optimizeNames(names, constants2))
           return;
-        this.iterable = optimizeExpr(this.iterable, names, constants);
+        this.iterable = optimizeExpr(this.iterable, names, constants2);
         return this;
       }
       get names() {
@@ -694,11 +694,11 @@ var require_codegen = __commonJS({
         (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNodes();
         return this;
       }
-      optimizeNames(names, constants) {
+      optimizeNames(names, constants2) {
         var _a3, _b;
-        super.optimizeNames(names, constants);
-        (_a3 = this.catch) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants);
-        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants);
+        super.optimizeNames(names, constants2);
+        (_a3 = this.catch) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants2);
+        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants2);
         return this;
       }
       get names() {
@@ -999,7 +999,7 @@ var require_codegen = __commonJS({
     function addExprNames(names, from) {
       return from instanceof code_1._CodeOrName ? addNames(names, from.names) : names;
     }
-    function optimizeExpr(expr, names, constants) {
+    function optimizeExpr(expr, names, constants2) {
       if (expr instanceof code_1.Name)
         return replaceName(expr);
       if (!canOptimize(expr))
@@ -1014,14 +1014,14 @@ var require_codegen = __commonJS({
         return items;
       }, []));
       function replaceName(n) {
-        const c = constants[n.str];
+        const c = constants2[n.str];
         if (c === void 0 || names[n.str] !== 1)
           return n;
         delete names[n.str];
         return c;
       }
       function canOptimize(e) {
-        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants[c.str] !== void 0);
+        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants2[c.str] !== void 0);
       }
     }
     function subtractNames(names, from) {
@@ -2983,7 +2983,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve4.call(this, root, ref);
+      let _sch = resolve5.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -3010,7 +3010,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve4(root, ref) {
+    function resolve5(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3840,7 +3840,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve4(baseURI, relativeURI, options) {
+    function resolve5(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const {
         parsed: baseParsed,
@@ -4209,7 +4209,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve4,
+      resolve: resolve5,
       resolveComponent,
       equal,
       serialize,
@@ -7461,11 +7461,11 @@ var require_codegen2 = __commonJS({
         const rhs = this.rhs === void 0 ? "" : ` = ${this.rhs}`;
         return `${varKind} ${this.name}${rhs};` + _n;
       }
-      optimizeNames(names, constants) {
+      optimizeNames(names, constants2) {
         if (!names[this.name.str])
           return;
         if (this.rhs)
-          this.rhs = optimizeExpr(this.rhs, names, constants);
+          this.rhs = optimizeExpr(this.rhs, names, constants2);
         return this;
       }
       get names() {
@@ -7482,10 +7482,10 @@ var require_codegen2 = __commonJS({
       render({ _n }) {
         return `${this.lhs} = ${this.rhs};` + _n;
       }
-      optimizeNames(names, constants) {
+      optimizeNames(names, constants2) {
         if (this.lhs instanceof code_1.Name && !names[this.lhs.str] && !this.sideEffects)
           return;
-        this.rhs = optimizeExpr(this.rhs, names, constants);
+        this.rhs = optimizeExpr(this.rhs, names, constants2);
         return this;
       }
       get names() {
@@ -7546,8 +7546,8 @@ var require_codegen2 = __commonJS({
       optimizeNodes() {
         return `${this.code}` ? this : void 0;
       }
-      optimizeNames(names, constants) {
-        this.code = optimizeExpr(this.code, names, constants);
+      optimizeNames(names, constants2) {
+        this.code = optimizeExpr(this.code, names, constants2);
         return this;
       }
       get names() {
@@ -7576,12 +7576,12 @@ var require_codegen2 = __commonJS({
         }
         return nodes.length > 0 ? this : void 0;
       }
-      optimizeNames(names, constants) {
+      optimizeNames(names, constants2) {
         const { nodes } = this;
         let i = nodes.length;
         while (i--) {
           const n = nodes[i];
-          if (n.optimizeNames(names, constants))
+          if (n.optimizeNames(names, constants2))
             continue;
           subtractNames(names, n.names);
           nodes.splice(i, 1);
@@ -7634,12 +7634,12 @@ var require_codegen2 = __commonJS({
           return void 0;
         return this;
       }
-      optimizeNames(names, constants) {
+      optimizeNames(names, constants2) {
         var _a3;
-        this.else = (_a3 = this.else) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants);
-        if (!(super.optimizeNames(names, constants) || this.else))
+        this.else = (_a3 = this.else) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants2);
+        if (!(super.optimizeNames(names, constants2) || this.else))
           return;
-        this.condition = optimizeExpr(this.condition, names, constants);
+        this.condition = optimizeExpr(this.condition, names, constants2);
         return this;
       }
       get names() {
@@ -7662,10 +7662,10 @@ var require_codegen2 = __commonJS({
       render(opts) {
         return `for(${this.iteration})` + super.render(opts);
       }
-      optimizeNames(names, constants) {
-        if (!super.optimizeNames(names, constants))
+      optimizeNames(names, constants2) {
+        if (!super.optimizeNames(names, constants2))
           return;
-        this.iteration = optimizeExpr(this.iteration, names, constants);
+        this.iteration = optimizeExpr(this.iteration, names, constants2);
         return this;
       }
       get names() {
@@ -7701,10 +7701,10 @@ var require_codegen2 = __commonJS({
       render(opts) {
         return `for(${this.varKind} ${this.name} ${this.loop} ${this.iterable})` + super.render(opts);
       }
-      optimizeNames(names, constants) {
-        if (!super.optimizeNames(names, constants))
+      optimizeNames(names, constants2) {
+        if (!super.optimizeNames(names, constants2))
           return;
-        this.iterable = optimizeExpr(this.iterable, names, constants);
+        this.iterable = optimizeExpr(this.iterable, names, constants2);
         return this;
       }
       get names() {
@@ -7746,11 +7746,11 @@ var require_codegen2 = __commonJS({
         (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNodes();
         return this;
       }
-      optimizeNames(names, constants) {
+      optimizeNames(names, constants2) {
         var _a3, _b;
-        super.optimizeNames(names, constants);
-        (_a3 = this.catch) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants);
-        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants);
+        super.optimizeNames(names, constants2);
+        (_a3 = this.catch) === null || _a3 === void 0 ? void 0 : _a3.optimizeNames(names, constants2);
+        (_b = this.finally) === null || _b === void 0 ? void 0 : _b.optimizeNames(names, constants2);
         return this;
       }
       get names() {
@@ -8051,7 +8051,7 @@ var require_codegen2 = __commonJS({
     function addExprNames(names, from) {
       return from instanceof code_1._CodeOrName ? addNames(names, from.names) : names;
     }
-    function optimizeExpr(expr, names, constants) {
+    function optimizeExpr(expr, names, constants2) {
       if (expr instanceof code_1.Name)
         return replaceName(expr);
       if (!canOptimize(expr))
@@ -8066,14 +8066,14 @@ var require_codegen2 = __commonJS({
         return items;
       }, []));
       function replaceName(n) {
-        const c = constants[n.str];
+        const c = constants2[n.str];
         if (c === void 0 || names[n.str] !== 1)
           return n;
         delete names[n.str];
         return c;
       }
       function canOptimize(e) {
-        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants[c.str] !== void 0);
+        return e instanceof code_1._Code && e._items.some((c) => c instanceof code_1.Name && names[c.str] === 1 && constants2[c.str] !== void 0);
       }
     }
     function subtractNames(names, from) {
@@ -10000,7 +10000,7 @@ var require_compile2 = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve4.call(this, root, ref);
+      let _sch = resolve5.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -10027,7 +10027,7 @@ var require_compile2 = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve4(root, ref) {
+    function resolve5(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -18526,8 +18526,8 @@ function emoji() {
 }
 var ipv4 = /^(?:(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(?:25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])$/;
 var ipv6 = /^(([0-9a-fA-F]{1,4}:){7}[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,7}:|([0-9a-fA-F]{1,4}:){1,6}:[0-9a-fA-F]{1,4}|([0-9a-fA-F]{1,4}:){1,5}(:[0-9a-fA-F]{1,4}){1,2}|([0-9a-fA-F]{1,4}:){1,4}(:[0-9a-fA-F]{1,4}){1,3}|([0-9a-fA-F]{1,4}:){1,3}(:[0-9a-fA-F]{1,4}){1,4}|([0-9a-fA-F]{1,4}:){1,2}(:[0-9a-fA-F]{1,4}){1,5}|[0-9a-fA-F]{1,4}:((:[0-9a-fA-F]{1,4}){1,6})|:((:[0-9a-fA-F]{1,4}){1,7}|:))$/;
-var mac = (delimiter) => {
-  const escapedDelim = escapeRegex(delimiter ?? ":");
+var mac = (delimiter2) => {
+  const escapedDelim = escapeRegex(delimiter2 ?? ":");
   return new RegExp(`^(?:[0-9A-F]{2}${escapedDelim}){5}[0-9A-F]{2}$|^(?:[0-9a-f]{2}${escapedDelim}){5}[0-9a-f]{2}$`);
 };
 var cidrv4 = /^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9][0-9]|[0-9])\/([0-9]|[1-2][0-9]|3[0-2])$/;
@@ -21555,7 +21555,7 @@ var recursive = /* @__PURE__ */ new WeakMap();
 var NONE = 0;
 var ASSUMED = 1;
 var PROVEN = 2;
-function isRecursive(inst, stack, resolve4) {
+function isRecursive(inst, stack, resolve5) {
   const cached3 = recursive.get(inst);
   if (cached3 !== void 0)
     return cached3 ? PROVEN : NONE;
@@ -21565,7 +21565,7 @@ function isRecursive(inst, stack, resolve4) {
   let result = NONE;
   const check2 = (child) => {
     if (result !== PROVEN && child?._zod) {
-      const answer = isRecursive(child, stack, resolve4);
+      const answer = isRecursive(child, stack, resolve5);
       if (answer > result)
         result = answer;
     }
@@ -21576,7 +21576,7 @@ function isRecursive(inst, stack, resolve4) {
       const desc = Object.getOwnPropertyDescriptor(sh, key);
       if (spread && !desc.enumerable)
         continue;
-      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve4) : NONE;
+      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve5) : NONE;
       if (child > answer)
         answer = child;
     }
@@ -21640,7 +21640,7 @@ function isRecursive(inst, stack, resolve4) {
       break;
     // `$ZodLazy` caches its inner on the def, so a resolved edge is followed exactly
     case "lazy": {
-      const inner = def._cachedInner ?? (resolve4 ? inst._zod.innerType : void 0);
+      const inner = def._cachedInner ?? (resolve5 ? inst._zod.innerType : void 0);
       merge2(inner ? isRecursive(inner, stack, false) : ASSUMED);
       break;
     }
@@ -40048,7 +40048,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve4) => setTimeout(resolve4, pollInterval));
+        await new Promise((resolve5) => setTimeout(resolve5, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error62) {
@@ -40065,7 +40065,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve4, reject) => {
+    return new Promise((resolve5, reject) => {
       const earlyReject = (error62) => {
         reject(error62);
       };
@@ -40143,7 +40143,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve4(parseResult.data);
+            resolve5(parseResult.data);
           }
         } catch (error62) {
           reject(error62);
@@ -40404,12 +40404,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve4, reject) => {
+    return new Promise((resolve5, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve4, interval);
+      const timeoutId = setTimeout(resolve5, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -41500,7 +41500,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve4) => setTimeout(resolve4, pollInterval));
+      await new Promise((resolve5) => setTimeout(resolve5, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -42164,12 +42164,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve4) => {
+    return new Promise((resolve5) => {
       const json2 = serializeMessage(message);
       if (this._stdout.write(json2)) {
-        resolve4();
+        resolve5();
       } else {
-        this._stdout.once("drain", resolve4);
+        this._stdout.once("drain", resolve5);
       }
     });
   }
@@ -42207,13 +42207,13 @@ var REVEAL_TTL_MS = 5 * 60 * 1e3;
 var SWEEP_INTERVAL_MS = 60 * 1e3;
 var USED_GRACE_MS = 5 * 60 * 1e3;
 function deferred() {
-  let resolve4;
+  let resolve5;
   let reject;
   const promise2 = new Promise((res, rej) => {
-    resolve4 = res;
+    resolve5 = res;
     reject = rej;
   });
-  return { promise: promise2, resolve: resolve4, reject };
+  return { promise: promise2, resolve: resolve5, reject };
 }
 function defaultTtlMs(kind) {
   return kind === "reveal" ? REVEAL_TTL_MS : REQUEST_TTL_MS;
@@ -42513,8 +42513,8 @@ var RequestStore = {
 import { execFile } from "node:child_process";
 var DETECT_TIMEOUT_MS = 2e3;
 function checkBinary(command, args) {
-  return new Promise((resolve4) => {
-    execFile(command, args, { timeout: DETECT_TIMEOUT_MS, maxBuffer: 4096 }, (error62) => resolve4(!error62));
+  return new Promise((resolve5) => {
+    execFile(command, args, { timeout: DETECT_TIMEOUT_MS, maxBuffer: 4096 }, (error62) => resolve5(!error62));
   });
 }
 function detectCloudflared() {
@@ -42533,7 +42533,7 @@ function remoteUnavailable(detail) {
   return new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: `cloudflared: ${detail}` });
 }
 function startCloudflaredTunnel(targetUrl) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = spawn("cloudflared", ["tunnel", "--url", targetUrl], { stdio: ["ignore", "ignore", "pipe"] });
     child.unref();
     let stderrBuf = "";
@@ -42571,7 +42571,7 @@ function startCloudflaredTunnel(targetUrl) {
         const killer = setTimeout(() => child.kill("SIGKILL"), 2e3);
         killer.unref();
       };
-      resolve4({
+      resolve5({
         url: match[0],
         binary: "cloudflared",
         stop,
@@ -42600,13 +42600,13 @@ function remoteUnavailable2(detail) {
   return new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: `tailscale: ${detail}` });
 }
 function runTailscale(args, timeoutMs) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     execFile2("tailscale", args, { timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
@@ -42634,7 +42634,7 @@ function offBestEffort() {
 async function startTailscaleServe(port) {
   const dnsName = await selfDnsName();
   const target = `http://127.0.0.1:${port}`;
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = spawn2("tailscale", ["serve", `--https=${SERVE_PORT}`, target], { stdio: "ignore" });
     child.unref();
     let settled2 = false;
@@ -42654,7 +42654,7 @@ async function startTailscaleServe(port) {
     const graceTimer = setTimeout(() => {
       if (settled2) return;
       settled2 = true;
-      resolve4({ url: `https://${dnsName}`, binary: "tailscale", stop, waitForUnexpectedExit: () => unexpectedExit });
+      resolve5({ url: `https://${dnsName}`, binary: "tailscale", stop, waitForUnexpectedExit: () => unexpectedExit });
     }, START_GRACE_MS);
     graceTimer.unref();
     child.on("error", () => {
@@ -43579,24 +43579,24 @@ var PROBE_REF = "__enigma_detect_probe__";
 var REF_PATTERN = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH = 512;
 function runSecretTool(args) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     execFile3(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecretToolWithStdin(args, value) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = execFile3(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -43741,24 +43741,24 @@ var REF_PATTERN2 = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH2 = 512;
 var MARKER_BYTE = 1;
 function runSecurity(args) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     execFile4(SECURITY_BIN, args, { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecurityBatch(line) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = execFile4(SECURITY_BIN, ["-i"], { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -43920,24 +43920,24 @@ var REF_MAX_LENGTH3 = 512;
 var VAULT_MISSING_PATTERN = /isn't a vault|no vault named|could not find vault/i;
 var ITEM_MISSING_PATTERN = /isn't an item|could not find item|item.*not found/i;
 function runOp(args) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     execFile5(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runOpWithStdin(args, stdinData) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = execFile5(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve4({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -44465,7 +44465,7 @@ ${remoteNote}` : outcome.text;
 
 // src/mcp/tools/doctor.ts
 import { execFile as execFile6 } from "node:child_process";
-import { existsSync as existsSync8 } from "node:fs";
+import { existsSync as existsSync9 } from "node:fs";
 import { platform, release } from "node:os";
 import { promisify } from "node:util";
 
@@ -44510,6 +44510,151 @@ function computeManifestGaps(cwd) {
   const known = new Set(registeredNames);
   const gaps = Object.keys(manifest.secrets).filter((name) => !known.has(name)).sort();
   return { registeredNames, gaps };
+}
+
+// src/core/shim.ts
+import { accessSync, constants, existsSync as existsSync8, lstatSync, readlinkSync, renameSync as renameSync2, rmSync, symlinkSync } from "node:fs";
+import { delimiter, dirname as dirname5, isAbsolute, join as join5, resolve as resolve4 } from "node:path";
+import { fileURLToPath as fileURLToPath2 } from "node:url";
+function pathDirs(pathEnv) {
+  const seen = /* @__PURE__ */ new Set();
+  const dirs = [];
+  for (const raw of pathEnv.split(delimiter)) {
+    const entry = raw.trim();
+    if (entry.length === 0 || !isAbsolute(entry)) continue;
+    const abs = resolve4(entry);
+    if (seen.has(abs)) continue;
+    seen.add(abs);
+    dirs.push(abs);
+  }
+  return dirs;
+}
+function isWritableDir(dir) {
+  try {
+    accessSync(dir, constants.W_OK | constants.X_OK);
+    return true;
+  } catch {
+    return false;
+  }
+}
+function classify(dest, cli) {
+  let stats;
+  try {
+    stats = lstatSync(dest);
+  } catch {
+    return { slot: "free", link: null };
+  }
+  if (!stats.isSymbolicLink()) return { slot: "foreign", link: null };
+  let raw;
+  try {
+    raw = readlinkSync(dest);
+  } catch {
+    return { slot: "foreign", link: null };
+  }
+  const link = isAbsolute(raw) ? resolve4(raw) : resolve4(dirname5(dest), raw);
+  let resolves = true;
+  try {
+    accessSync(link, constants.F_OK);
+  } catch {
+    resolves = false;
+  }
+  if (!resolves) return { slot: "dangling", link };
+  return link === cli ? { slot: "ours", link } : { slot: "foreign", link };
+}
+function linkShim(dest, cli) {
+  const tmp = `${dest}.enigma-tmp-${process.pid}`;
+  try {
+    rmSync(tmp, { force: true });
+    symlinkSync(cli, tmp);
+    renameSync2(tmp, dest);
+    return true;
+  } catch {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+    }
+    return false;
+  }
+}
+function defaultPluginRoot() {
+  const fromEnv = process.env.CLAUDE_PLUGIN_ROOT;
+  if (fromEnv) return fromEnv;
+  try {
+    return resolve4(dirname5(fileURLToPath2(import.meta.url)), "..");
+  } catch {
+    return null;
+  }
+}
+function ensureCliShim(options = {}) {
+  try {
+    if (process.env.ENIGMA_NO_PATH_SHIM === "1") {
+      return { status: "disabled", target: null, cli: null, link: null, detail: "ENIGMA_NO_PATH_SHIM=1 is set" };
+    }
+    const pluginRoot = options.pluginRoot === void 0 ? defaultPluginRoot() : options.pluginRoot;
+    if (!pluginRoot) {
+      return { status: "unavailable", target: null, cli: null, link: null, detail: "not running from a plugin install" };
+    }
+    const cli = resolve4(pluginRoot, "dist", "cli.mjs");
+    if (!existsSync8(cli)) {
+      return { status: "unavailable", target: null, cli: null, link: null, detail: `no CLI bundle at ${cli}` };
+    }
+    const dirs = pathDirs(options.pathEnv ?? process.env.PATH ?? "");
+    if (dirs.length === 0) {
+      return { status: "no-writable-dir", target: null, cli, link: null, detail: "PATH has no absolute directory" };
+    }
+    const write = options.write !== false;
+    let firstFree = null;
+    for (const dir of dirs) {
+      const dest = join5(dir, "enigma");
+      const { slot, link } = classify(dest, cli);
+      if (slot === "ours") return { status: "present", target: dest, cli, link, detail: null };
+      if (slot === "foreign") {
+        return { status: "occupied", target: dest, cli, link, detail: `${dest} is not a shim and was left alone` };
+      }
+      if (slot === "dangling") {
+        if (!isWritableDir(dir)) continue;
+        if (!write) return { status: "pending", target: dest, cli, link: cli, detail: "a dangling shim would be refreshed here" };
+        if (linkShim(dest, cli)) return { status: "repointed", target: dest, cli, link: cli, detail: null };
+        continue;
+      }
+      if (firstFree === null && isWritableDir(dir)) firstFree = dest;
+    }
+    if (firstFree === null) {
+      return { status: "no-writable-dir", target: null, cli, link: null, detail: "no writable directory on PATH" };
+    }
+    if (!write) return { status: "pending", target: firstFree, cli, link: null, detail: "a session would create the shim here" };
+    if (!linkShim(firstFree, cli)) {
+      return { status: "failed", target: firstFree, cli, link: null, detail: `could not create ${firstFree}` };
+    }
+    return { status: "installed", target: firstFree, cli, link: cli, detail: null };
+  } catch (err) {
+    return {
+      status: "failed",
+      target: null,
+      cli: null,
+      link: null,
+      detail: err instanceof Error ? err.message : "unknown error"
+    };
+  }
+}
+function describeShim(result) {
+  switch (result.status) {
+    case "installed":
+      return `Enigma: put "enigma" on PATH at ${result.target} so "enigma run" works. If the shell has not picked it up yet, run: hash -r`;
+    case "repointed":
+      return `Enigma: refreshed the "enigma" PATH shim at ${result.target} (it pointed at a plugin version that is gone).`;
+    case "occupied":
+      return `Enigma: ${result.detail} \u2014 "enigma" on your PATH may not be this Enigma. Run this Enigma directly: node "${result.cli ?? ""}"`;
+    case "no-writable-dir":
+    case "failed":
+      return `Enigma: could not put "enigma" on PATH (${result.detail}). Run commands through: node "${result.cli ?? ""}" run -- <command>`;
+    case "disabled":
+    case "present":
+    case "unavailable":
+      return null;
+    case "pending":
+      return `Enigma: "enigma" is not on PATH yet; the next session start will create it at ${result.target}.`;
+  }
 }
 
 // node_modules/@modelcontextprotocol/sdk/dist/esm/client/index.js
@@ -44587,10 +44732,17 @@ function registerDoctorTool(server) {
         `Client elicitation support: url=${supportsUrlElicitation(server.server)} form=${supportsFormElicitation(server.server)}`,
         `Config home: ${enigmaHome()}`,
         `Index: ${indexStatus}`,
-        `Vault key: ${existsSync8(keyPath()) ? "present" : "missing"}`,
-        `Vault file: ${existsSync8(secretsPath()) ? "present" : "missing"}`,
+        `Vault key: ${existsSync9(keyPath()) ? "present" : "missing"}`,
+        `Vault file: ${existsSync9(secretsPath()) ? "present" : "missing"}`,
         `Manifest gaps: ${manifestGaps.length === 0 ? "none" : manifestGaps.join(", ")}`,
-        `Paths: index=${indexPath()} audit=${auditLogPath()} config=${configPath()}`
+        `Paths: index=${indexPath()} audit=${auditLogPath()} config=${configPath()}`,
+        // Whether `enigma run` — the only delivery path that keeps a value out
+        // of the context window — is actually runnable from a shell. Read-only:
+        // the SessionStart hook installs the shim, this only reports on it. When
+        // the status is not `present`, the exact invocation is given so the
+        // agent has something it can actually execute. Paths and a status word
+        // only, never a value (ADR-001).
+        `PATH shim: ${describeShim(ensureCliShim({ write: false })) ?? "enigma is on PATH \u2014 use `enigma run -- <command>`"}`
       ];
       if (legacyScopeLine) lines.push(`Legacy scope entries: ${legacyScopeLine}`);
       const pendingRequests = RequestStore.listUnconsumedFulfilled();
@@ -44612,8 +44764,8 @@ function registerDoctorTool(server) {
 }
 
 // src/mcp/tools/import.ts
-import { existsSync as existsSync10, readFileSync as readFileSync6 } from "node:fs";
-import { isAbsolute, join as join5 } from "node:path";
+import { existsSync as existsSync11, readFileSync as readFileSync6 } from "node:fs";
+import { isAbsolute as isAbsolute2, join as join6 } from "node:path";
 
 // src/storage/dotenv-file.ts
 var BEGIN_MARKER2 = "# enigma:begin";
@@ -44774,18 +44926,18 @@ function removeDotEnvEntries(content, names, opts = {}) {
 
 // src/storage/import-commit.ts
 import { randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync9, readFileSync as readFileSync5, renameSync as renameSync2, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync10, readFileSync as readFileSync5, renameSync as renameSync3, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 var FILE_MODE4 = 384;
 function writeFileAtomic(path, content, mode) {
   const tmpPath = `${path}.${randomBytes4(6).toString("hex")}.tmp`;
   try {
     writeFileSync4(tmpPath, content, { mode });
-    renameSync2(tmpPath, path);
+    renameSync3(tmpPath, path);
     return { ok: true };
   } catch (err) {
     const error62 = err instanceof Error ? err.message : String(err);
     try {
-      if (existsSync9(tmpPath)) unlinkSync(tmpPath);
+      if (existsSync10(tmpPath)) unlinkSync(tmpPath);
       return { ok: false, error: error62 };
     } catch {
       return { ok: false, error: error62, leftoverPath: tmpPath };
@@ -44854,7 +45006,7 @@ async function commitImport(opts) {
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
-  const currentContent = existsSync9(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
+  const currentContent = existsSync10(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
   const valueByName = new Map(opts.entries.map((e) => [e.name, e.value]));
   const currentValueByName = new Map(parseDotEnv(currentContent).entries.map((e) => [e.name, e.value]));
   const toRemove = [];
@@ -45230,7 +45382,7 @@ var PayloadTooLargeError = class extends Error {
   }
 };
 function readBody(req, maxBytes = MAX_BODY_BYTES) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const chunks = [];
     let total = 0;
     let settled2 = false;
@@ -45251,7 +45403,7 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
     req.on("end", () => {
       if (settled2) return;
       settled2 = true;
-      resolve4(Buffer.concat(chunks));
+      resolve5(Buffer.concat(chunks));
     });
     req.on("error", settleError);
   });
@@ -47617,7 +47769,7 @@ var MIN_REARM_DELAY_MS = 1e3;
 var state;
 var starting;
 function settled(value) {
-  return new Promise((resolve4) => resolve4(value));
+  return new Promise((resolve5) => resolve5(value));
 }
 function toHandle(s) {
   return { port: s.port, origin: `http://${s.host}:${s.port}`, close: stopServer };
@@ -47653,7 +47805,7 @@ function startServer(opts = {}) {
       (_resolve, reject) => reject(new Error(`refusing to bind ${host} over plain HTTP; pass allowInsecureHttp to override (ADR-005)`))
     );
   }
-  starting = new Promise((resolve4, reject) => {
+  starting = new Promise((resolve5, reject) => {
     const server = http.createServer((req, res) => {
       if (state) resetIdleTimer(state);
       void handleRequest(req, res);
@@ -47669,7 +47821,7 @@ function startServer(opts = {}) {
       state = newState;
       resetIdleTimer(newState);
       starting = void 0;
-      resolve4(toHandle(newState));
+      resolve5(toHandle(newState));
     });
   });
   return starting;
@@ -47679,7 +47831,7 @@ function stopServer() {
   if (!current) return settled(void 0);
   state = void 0;
   if (current.idleTimer) clearTimeout(current.idleTimer);
-  return new Promise((resolve4) => current.server.close(() => resolve4()));
+  return new Promise((resolve5) => current.server.close(() => resolve5()));
 }
 
 // src/mcp/schemas.ts
@@ -47719,8 +47871,8 @@ function registerImportTool(server) {
       const cwd = process.cwd();
       const projectPath = findProjectPath(cwd);
       const pathArg = args.path ?? ".env";
-      const absPath = isAbsolute(pathArg) ? pathArg : join5(cwd, pathArg);
-      if (!existsSync10(absPath)) {
+      const absPath = isAbsolute2(pathArg) ? pathArg : join6(cwd, pathArg);
+      if (!existsSync11(absPath)) {
         return errorResult(new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` }));
       }
       const content = readFileSync6(absPath, "utf8");
@@ -47878,7 +48030,7 @@ function buildHiddenAnswerScript(name, reason) {
 // src/native/exec.ts
 import { spawn as spawn3 } from "node:child_process";
 function execWithStdin(command, args, input2, opts) {
-  return new Promise((resolve4, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = spawn3(command, args, { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
@@ -47920,7 +48072,7 @@ function execWithStdin(command, args, input2, opts) {
       finish(() => reject(new EnigmaError({ code: "E_UI_UNAVAILABLE", message: `${command} failed to start` })));
     });
     child.on("close", (code) => {
-      finish(() => resolve4({ code, stdout, stderr }));
+      finish(() => resolve5({ code, stdout, stderr }));
     });
     child.stdin.on("error", () => {
     });
@@ -48251,7 +48403,7 @@ Open this link to reveal ${args.name}.`);
 
 // src/mcp/server.ts
 function createServer2() {
-  const server = new McpServer({ name: "enigma", version: "0.3.0" });
+  const server = new McpServer({ name: "enigma", version: "0.3.1" });
   registerListTool(server);
   registerRequestTool(server);
   registerAwaitTool(server);
