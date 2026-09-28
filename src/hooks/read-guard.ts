@@ -588,6 +588,45 @@ function segmentIsOpRead(segment: string): boolean {
   return commandName(head ?? '') === 'op' && sub === 'read';
 }
 
+/**
+ * Issue #92. The child of `enigma run [flags] -- <child…>`, or `undefined` when
+ * `segment` is not that shape (or has no `--`/no child, which behaves as
+ * before). `enigma run` injects secrets into the child and lets its output
+ * through, so a child that dumps its environment or reads a secret
+ * (`enigma get X`, `cat .env`) prints a value into this session just as it
+ * would run bare. The caller re-runs the ordinary per-segment checks on the
+ * returned child rather than keeping a parallel rule list here.
+ *
+ * Also recognises `node <…>/cli.mjs run …`, the form `runHint()` recommends
+ * when the PATH shim is absent — otherwise the denial text would point at a
+ * bypass. The child is re-joined from dequoted tokens, which can only make a
+ * quoted argument that contains a space look like two tokens (a rare false
+ * positive), never hide a token from the checks.
+ *
+ * Deliberately not chased, same boundary as the rest of this file: a child
+ * wrapped in `sh -c '…'`/`bash -c '…'` is not unwrapped, exactly as it is not
+ * unwrapped for a bare segment either.
+ */
+function enigmaRunChild(segment: string): string | undefined {
+  const tokens = tokenize(segment);
+  const head = commandName(tokens[0] ?? '');
+  let runIndex: number;
+  if (head === 'enigma') {
+    runIndex = 1;
+  } else if (head === 'node') {
+    let script = 1;
+    while (tokens[script]?.startsWith('-')) script++;
+    if (commandName(tokens[script] ?? '') !== 'cli.mjs') return undefined;
+    runIndex = script + 1;
+  } else {
+    return undefined;
+  }
+  if (tokens[runIndex] !== 'run') return undefined;
+  const dashDash = tokens.indexOf('--', runIndex + 1);
+  if (dashDash === -1 || dashDash === tokens.length - 1) return undefined;
+  return tokens.slice(dashDash + 1).join(' ');
+}
+
 /** Names Enigma actually tracks, from every scope — a bare `echo $NAME` is only
  * denied when NAME is a real secret name, so ordinary env var echoes are unaffected. */
 function knownSecretNames(): Set<string> {
@@ -739,6 +778,47 @@ function grepDotEnvExclusion(toolInput: Record<string, unknown>, cwd: string): P
   };
 }
 
+/** The per-segment Bash rules; the first match wins. `viaRun` is true when
+ * `segment` is the child of an `enigma run --` (Issue #92), which only changes
+ * the env-dump remediation: telling an agent that just ran an environment dump
+ * under `enigma run` to "use `enigma run -- <command>`" would recommend the
+ * form being denied. */
+function checkSegment(segment: string, cwd: string, known: Set<string>, viaRun: boolean): PreToolUseOutput | undefined {
+  if (segmentTargetsDotEnvByPath(segment)) {
+    return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${useInstead()}`);
+  }
+  if (segmentTargetsEnigmaConfigByPath(segment, cwd)) {
+    return deny(
+      "Enigma's config directory holds the encrypted vault, index, and audit log. Use `enigma list` or `enigma doctor` instead of reading it directly.",
+    );
+  }
+  if (segmentIsBareEnvDump(segment)) {
+    return deny(
+      viaRun
+        ? `\`env\`/\`printenv\` run under \`enigma run\` still print secret values into this session, because the child's output comes back here. Use \`enigma list\` to see which names exist, or ${runHint()} with the command that actually needs the values (a dev server, a test run), not one that prints the environment.`
+        : `\`env\`/\`printenv\` can dump secret values into this session. Use \`enigma list\` to see which names exist, or ${runHint()} to run a command with the real values injected without you seeing them.`,
+    );
+  }
+  if (segmentIsEnigmaGetOrEnv(segment)) {
+    return deny(
+      `\`enigma get\`/\`enigma env\` print a secret value to stdout for humans and scripts, not for the agent. ${useInstead()}`,
+    );
+  }
+  if (segmentIsKeychainRead(segment)) {
+    return deny(`Reading the macOS Keychain directly via \`security find-generic-password\` is blocked. ${useInstead()}`);
+  }
+  if (segmentIsOpRead(segment)) {
+    return deny(`Reading a 1Password item directly via \`op read\` is blocked. ${useInstead()}`);
+  }
+  const echoedName = segmentEchoesKnownSecret(segment, known);
+  if (echoedName) {
+    return deny(
+      `${echoedName} is a secret Enigma tracks; echoing it would put the value in this session. Use ${runHint()} to inject it into a child process instead.`,
+    );
+  }
+  return undefined;
+}
+
 /**
  * Rules 1-2 inspect the tool's own structured input (file paths, patterns) for
  * Read/Grep/Glob, followed by Grep's directory-search exclusion. Rules 3+
@@ -783,35 +863,16 @@ export function runReadGuard(input: PreToolUseInput): PreToolUseOutput | undefin
       }
       const segments = texts.flatMap(splitSegments);
       for (const segment of segments) {
-        if (segmentTargetsDotEnvByPath(segment)) {
-          return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${useInstead()}`);
-        }
-        if (segmentTargetsEnigmaConfigByPath(segment, cwd)) {
-          return deny(
-            "Enigma's config directory holds the encrypted vault, index, and audit log. Use `enigma list` or `enigma doctor` instead of reading it directly.",
-          );
-        }
-        if (segmentIsBareEnvDump(segment)) {
-          return deny(
-            `\`env\`/\`printenv\` can dump secret values into this session. Use \`enigma list\` to see which names exist, or ${runHint()} to run a command with the real values injected without you seeing them.`,
-          );
-        }
-        if (segmentIsEnigmaGetOrEnv(segment)) {
-          return deny(
-            `\`enigma get\`/\`enigma env\` print a secret value to stdout for humans and scripts, not for the agent. ${useInstead()}`,
-          );
-        }
-        if (segmentIsKeychainRead(segment)) {
-          return deny(`Reading the macOS Keychain directly via \`security find-generic-password\` is blocked. ${useInstead()}`);
-        }
-        if (segmentIsOpRead(segment)) {
-          return deny(`Reading a 1Password item directly via \`op read\` is blocked. ${useInstead()}`);
-        }
-        const echoedName = segmentEchoesKnownSecret(segment, known);
-        if (echoedName) {
-          return deny(
-            `${echoedName} is a secret Enigma tracks; echoing it would put the value in this session. Use ${runHint()} to inject it into a child process instead.`,
-          );
+        // `enigma run -- <child>` is checked as itself, then its child is checked
+        // exactly like a top-level segment (Issue #92). Each child is strictly
+        // shorter than its parent, so nested `enigma run -- enigma run -- …` ends.
+        let current: string | undefined = segment;
+        let viaRun = false;
+        while (current !== undefined) {
+          const denied = checkSegment(current, cwd, known, viaRun);
+          if (denied) return denied;
+          current = enigmaRunChild(current);
+          viaRun = true;
         }
       }
     }

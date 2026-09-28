@@ -1615,6 +1615,25 @@ function segmentIsOpRead(segment) {
   const [head, sub] = tokenize(segment);
   return commandName(head ?? "") === "op" && sub === "read";
 }
+function enigmaRunChild(segment) {
+  const tokens = tokenize(segment);
+  const head = commandName(tokens[0] ?? "");
+  let runIndex;
+  if (head === "enigma") {
+    runIndex = 1;
+  } else if (head === "node") {
+    let script = 1;
+    while (tokens[script]?.startsWith("-")) script++;
+    if (commandName(tokens[script] ?? "") !== "cli.mjs") return void 0;
+    runIndex = script + 1;
+  } else {
+    return void 0;
+  }
+  if (tokens[runIndex] !== "run") return void 0;
+  const dashDash = tokens.indexOf("--", runIndex + 1);
+  if (dashDash === -1 || dashDash === tokens.length - 1) return void 0;
+  return tokens.slice(dashDash + 1).join(" ");
+}
 function knownSecretNames() {
   return new Set(readIndex().entries.map((e) => e.name));
 }
@@ -1707,6 +1726,39 @@ function grepDotEnvExclusion(toolInput, cwd) {
     }
   };
 }
+function checkSegment(segment, cwd, known, viaRun) {
+  if (segmentTargetsDotEnvByPath(segment)) {
+    return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${useInstead()}`);
+  }
+  if (segmentTargetsEnigmaConfigByPath(segment, cwd)) {
+    return deny(
+      "Enigma's config directory holds the encrypted vault, index, and audit log. Use `enigma list` or `enigma doctor` instead of reading it directly."
+    );
+  }
+  if (segmentIsBareEnvDump(segment)) {
+    return deny(
+      viaRun ? `\`env\`/\`printenv\` run under \`enigma run\` still print secret values into this session, because the child's output comes back here. Use \`enigma list\` to see which names exist, or ${runHint()} with the command that actually needs the values (a dev server, a test run), not one that prints the environment.` : `\`env\`/\`printenv\` can dump secret values into this session. Use \`enigma list\` to see which names exist, or ${runHint()} to run a command with the real values injected without you seeing them.`
+    );
+  }
+  if (segmentIsEnigmaGetOrEnv(segment)) {
+    return deny(
+      `\`enigma get\`/\`enigma env\` print a secret value to stdout for humans and scripts, not for the agent. ${useInstead()}`
+    );
+  }
+  if (segmentIsKeychainRead(segment)) {
+    return deny(`Reading the macOS Keychain directly via \`security find-generic-password\` is blocked. ${useInstead()}`);
+  }
+  if (segmentIsOpRead(segment)) {
+    return deny(`Reading a 1Password item directly via \`op read\` is blocked. ${useInstead()}`);
+  }
+  const echoedName = segmentEchoesKnownSecret(segment, known);
+  if (echoedName) {
+    return deny(
+      `${echoedName} is a secret Enigma tracks; echoing it would put the value in this session. Use ${runHint()} to inject it into a child process instead.`
+    );
+  }
+  return void 0;
+}
 function runReadGuard(input) {
   const cwd = input.cwd ?? process.cwd();
   const toolInput = input.tool_input ?? {};
@@ -1740,35 +1792,13 @@ function runReadGuard(input) {
       }
       const segments = texts.flatMap(splitSegments);
       for (const segment of segments) {
-        if (segmentTargetsDotEnvByPath(segment)) {
-          return deny(`Reading .env files directly is blocked to keep secret values out of this session. ${useInstead()}`);
-        }
-        if (segmentTargetsEnigmaConfigByPath(segment, cwd)) {
-          return deny(
-            "Enigma's config directory holds the encrypted vault, index, and audit log. Use `enigma list` or `enigma doctor` instead of reading it directly."
-          );
-        }
-        if (segmentIsBareEnvDump(segment)) {
-          return deny(
-            `\`env\`/\`printenv\` can dump secret values into this session. Use \`enigma list\` to see which names exist, or ${runHint()} to run a command with the real values injected without you seeing them.`
-          );
-        }
-        if (segmentIsEnigmaGetOrEnv(segment)) {
-          return deny(
-            `\`enigma get\`/\`enigma env\` print a secret value to stdout for humans and scripts, not for the agent. ${useInstead()}`
-          );
-        }
-        if (segmentIsKeychainRead(segment)) {
-          return deny(`Reading the macOS Keychain directly via \`security find-generic-password\` is blocked. ${useInstead()}`);
-        }
-        if (segmentIsOpRead(segment)) {
-          return deny(`Reading a 1Password item directly via \`op read\` is blocked. ${useInstead()}`);
-        }
-        const echoedName = segmentEchoesKnownSecret(segment, known);
-        if (echoedName) {
-          return deny(
-            `${echoedName} is a secret Enigma tracks; echoing it would put the value in this session. Use ${runHint()} to inject it into a child process instead.`
-          );
+        let current = segment;
+        let viaRun = false;
+        while (current !== void 0) {
+          const denied = checkSegment(current, cwd, known, viaRun);
+          if (denied) return denied;
+          current = enigmaRunChild(current);
+          viaRun = true;
         }
       }
     }
