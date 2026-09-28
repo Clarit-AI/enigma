@@ -602,6 +602,73 @@ describe('PreToolUse read-guard', () => {
     });
   });
 
+  describe('the child of `enigma run --` is checked like a top-level segment (Issue #92)', () => {
+    it.each<[string, string]>([
+      ['printenv of a secret', 'enigma run -- printenv OPENAI_API_KEY'],
+      ['bare env', 'enigma run -- env'],
+      ['flags before --', 'enigma run --only FOO -- printenv FOO'],
+      ['--scope flag before --', 'enigma run --scope global --only FOO,BAR -- env'],
+      ['enigma get as the child', 'enigma run -- enigma get FOO'],
+      ['enigma env as the child', 'enigma run -- enigma env'],
+      ['cat .env as the child', 'enigma run -- cat .env'],
+      ['env by absolute path', 'enigma run -- /usr/bin/env'],
+      ['quoted child command name', "enigma run -- 'printenv' OPENAI_API_KEY"],
+      ['enigma by absolute path', '/usr/local/bin/enigma run -- printenv OPENAI_API_KEY'],
+      ['nested enigma run', 'enigma run -- enigma run -- printenv OPENAI_API_KEY'],
+      ['later in a chain', 'cd /repo && enigma run -- printenv OPENAI_API_KEY'],
+      ['piped onward', 'enigma run -- printenv OPENAI_API_KEY | head -1'],
+      ['inside a command substitution', 'echo "$(enigma run -- printenv OPENAI_API_KEY)"'],
+      ['bundled-CLI form runHint() recommends', 'node "/plugin/dist/cli.mjs" run -- printenv OPENAI_API_KEY'],
+      ['bundled-CLI form with node flags', 'node --no-warnings /plugin/dist/cli.mjs run --only FOO -- env'],
+      ['keychain read as the child', 'enigma run -- security find-generic-password -s x -w'],
+    ])('denies: %s', (_label, command) => {
+      expect(isDenied(bash(command))).toBe(true);
+    });
+
+    it.each<[string, string]>([
+      ['npm run dev', 'enigma run -- npm run dev'],
+      ['node server.js', 'enigma run -- node server.js'],
+      ['docker compose up', 'enigma run -- docker compose up'],
+      ['flags before --, ordinary child', 'enigma run --only FOO -- node server.js'],
+      ['--scope flag, ordinary child', 'enigma run --scope project -- npm test'],
+      ['.env.example as an argument', 'enigma run -- cat .env.example'],
+      ['no child (nothing after run)', 'enigma run'],
+      ['flags but no --', 'enigma run --only FOO'],
+      ['-- with an empty child', 'enigma run --only FOO --'],
+      ['another subcommand mentioning run', 'enigma list -- printenv'],
+      ['node script that is not the enigma CLI', 'node server.js run -- npm start'],
+      ['`--` only counts after run: env is an argument, not the child', 'enigma run --only env -- npm start'],
+    ])('allows: %s', (_label, command) => {
+      expect(isDenied(bash(command))).toBe(false);
+    });
+
+    it('denial text for an env dump under `enigma run` names a runnable alternative, not the denied form alone', () => {
+      const reason = denialReason(bash('enigma run -- printenv OPENAI_API_KEY'));
+      expect(reason).toContain('enigma list');
+      expect(reason).toContain('enigma run -- <command>');
+      expect(reason).toContain('still print secret values');
+    });
+
+    it('the top-level env-dump denial text is unchanged', () => {
+      const reason = denialReason(bash('printenv OPENAI_API_KEY'));
+      expect(reason).toContain('can dump secret values into this session');
+    });
+
+    it('a child that goes through an existing rule reports that rule, not a special case', () => {
+      expect(denialReason(bash('enigma run -- enigma get FOO'))).toContain('print a secret value to stdout');
+      expect(denialReason(bash('enigma run -- cat .env'))).toContain('Reading .env files directly is blocked');
+    });
+
+    // Known, accepted gap — pinned, not silently missed, same as the other
+    // "not chased" boundaries in this file. `sh -c '…'` is not unwrapped for a
+    // bare segment either (`sh -c 'printenv X'` is allowed today), so `enigma
+    // run` does not change that. Tracked as out of scope in Issue #92.
+    it('does not unwrap `sh -c` inside the child (same as a bare segment)', () => {
+      expect(isDenied(bash("sh -c 'printenv OPENAI_API_KEY'"))).toBe(false);
+      expect(isDenied(bash("enigma run -- sh -c 'printenv OPENAI_API_KEY'"))).toBe(false);
+    });
+  });
+
   describe('allows (table-driven, AC2/AC3)', () => {
     it.each<[string, PreToolUseInput]>([
       ['Read .env.example', read('/repo/.env.example')],
