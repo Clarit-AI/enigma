@@ -7,7 +7,7 @@
 // These tests exercise the production code path
 // `acquireFileLock(indexLockPath())` → RMW from inside `mutateIndex`,
 // which is the same path the CLI hits on every index write.
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { basename, dirname, join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -200,6 +200,58 @@ describe('ensureLockDir path containment — round-2 review H1 / B1 (BLOCKING re
     try {
       expect(existsSync(anchor)).toBe(true);
       expect(statSync(join(rawHome, 'locks')).mode & 0o777).toBe(0o700);
+    } finally {
+      lock.release();
+    }
+  });
+
+  it('a symlink inside the home that escapes it does not get the outside dir chmod-ed (review r3)', () => {
+    // `<home>/bridge -> <outside>`: lexically inside the home, really
+    // outside. chmod follows symlinks, so containment must use realpaths.
+    const home = freshHome('symlink-escape');
+    process.env.ENIGMA_HOME = home;
+    const outside = mkdtempSync(join(tmpdir(), 'enigma-outside-'));
+    scratchHomes.push(outside);
+    chmodSync(outside, 0o755);
+    symlinkSync(outside, join(home, 'bridge'));
+
+    const lock = acquireFileLock(join(home, 'bridge', 'anchor.lock'), 'symlink-escape probe');
+    try {
+      expect(statSync(outside).mode & 0o777).toBe(0o755);
+      expect(existsSync(join(outside, 'anchor.lock'))).toBe(true);
+    } finally {
+      lock.release();
+    }
+  });
+
+  it('a symlinked ENIGMA_HOME (dotfiles setup) still gets its locks/ dir tightened to 0700', () => {
+    const realHome = freshHome('symlinked-home-real');
+    const linkRoot = mkdtempSync(join(tmpdir(), 'enigma-home-link-'));
+    scratchHomes.push(linkRoot);
+    const linkHome = join(linkRoot, 'home');
+    symlinkSync(realHome, linkHome);
+    process.env.ENIGMA_HOME = linkHome;
+    mkdirSync(join(realHome, 'locks'), { mode: 0o755 });
+    chmodSync(join(realHome, 'locks'), 0o755);
+
+    const lock = acquireFileLock(join(linkHome, 'locks', 'x.lock'));
+    try {
+      expect(statSync(join(realHome, 'locks')).mode & 0o777).toBe(0o700);
+    } finally {
+      lock.release();
+    }
+  });
+
+  it('a child dir whose name starts with ".." (e.g. "..x") is inside the home and is tightened', () => {
+    const home = freshHome('dotdot-name');
+    process.env.ENIGMA_HOME = home;
+    const child = join(home, '..x');
+    mkdirSync(child, { mode: 0o755 });
+    chmodSync(child, 0o755);
+
+    const lock = acquireFileLock(join(child, 'a.lock'));
+    try {
+      expect(statSync(child).mode & 0o777).toBe(0o700);
     } finally {
       lock.release();
     }

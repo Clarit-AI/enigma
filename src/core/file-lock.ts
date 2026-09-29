@@ -36,14 +36,15 @@
  *   successful acquire.
  * - Crash recovery is the kernel's: the lock dies with the process
  *   — any death, including SIGKILL — so a crashed holder can never
- *   wedge the file.
+ *   wedge the file. A paused but ALIVE holder is waited out, never
+ *   evicted.
  *
  * Index-specific notes (writer set, upgrade protocol, ADR-003 /
  * Issue #70 limitation) live next to `acquireIndexLock` in
  * `src/core/index-store.ts`.
  */
-import { chmodSync, closeSync, ftruncateSync, mkdirSync, openSync, writeSync } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve } from 'node:path';
+import { chmodSync, closeSync, ftruncateSync, mkdirSync, openSync, realpathSync, writeSync } from 'node:fs';
+import { dirname, isAbsolute, relative, sep } from 'node:path';
 import { EnigmaError } from './errors.js';
 import { loadIndexLock } from './native-lock.js';
 import { enigmaHome } from './paths.js';
@@ -103,17 +104,14 @@ export interface Lock {
  * own the parent dir; we leave its mode alone — preserves a
  * pre-existing `0755` or any other mode the caller set.
  *
- * Containment is boundary-aware: both the home and the dir are
- * `resolve()`d first, then compared via `relative()`. Trailing slashes,
- * relative paths, and `..` segments in `ENIGMA_HOME` no longer fool
- * the comparison (round-2 review H1 / B1 regression fix).
+ * Containment is decided on real paths: both the home and the dir are
+ * `realpathSync()`d, then compared via `relative()` on a separator
+ * boundary. Trailing slashes, relative paths, `..` segments and
+ * symlinks (into or out of the home) cannot fool the comparison
+ * (review r2 H1 / B1, review r3 symlink escape).
  */
 function ensureLockDir(lockPath: string): void {
   const dir = dirname(lockPath);
-  const homeResolved = resolve(enigmaHome());
-  const dirResolved = resolve(dir);
-  const rel = relative(homeResolved, dirResolved);
-  const inside = rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
 
   // Always mkdir — see header for the "even outside enigmaHome()"
   // rationale. EEXIST (parent is a file, not a dir) bubbles up to
@@ -126,15 +124,38 @@ function ensureLockDir(lockPath: string): void {
     // surface from openSync if the dir is genuinely missing.
   }
 
-  // Mode-tightening only for Enigma-owned dirs.
-  if (inside) {
-    try {
-      chmodSync(dir, 0o700);
-    } catch {
-      // best-effort: tightening a pre-existing dir to 0700 is
-      // optional when the dir already exists.
-    }
+  // Mode-tightening only for Enigma-owned dirs, judged on the REAL path:
+  // chmod follows symlinks, so a lexical check would let
+  // `<home>/link -> /outside` tighten a caller's dir (review r3).
+  const realDir = realInsideEnigmaHome(dir);
+  if (realDir === undefined) return;
+  try {
+    chmodSync(realDir, 0o700);
+  } catch {
+    // best-effort: tightening a pre-existing dir to 0700 is
+    // optional when the dir already exists.
   }
+}
+
+/**
+ * The realpath of `dir` when it lies inside the realpath of
+ * `enigmaHome()`, else `undefined`. Canonicalizing both sides handles a
+ * trailing slash, a relative or `..`-containing `ENIGMA_HOME`, a
+ * symlinked home (dotfiles setups), and a symlink inside the home that
+ * escapes it. A path that cannot be resolved is treated as outside.
+ */
+function realInsideEnigmaHome(dir: string): string | undefined {
+  let realHome: string;
+  let realDir: string;
+  try {
+    realHome = realpathSync(enigmaHome());
+    realDir = realpathSync(dir);
+  } catch {
+    return undefined;
+  }
+  const rel = relative(realHome, realDir);
+  const inside = rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
+  return inside ? realDir : undefined;
 }
 
 /**
