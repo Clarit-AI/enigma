@@ -669,6 +669,144 @@ describe('PreToolUse read-guard', () => {
     });
   });
 
+  describe('bundled-CLI form: node flags with a separate value, and non-Enigma scripts (Issue #96)', () => {
+    let root: string;
+    let enigmaCli: string;
+    let foreignCli: string;
+    let nameless: string;
+    let broken: string;
+
+    function plant(name: string, manifest: string | null): string {
+      const dist = join(root, name, 'dist');
+      mkdirSync(dist, { recursive: true });
+      writeFileSync(join(dist, 'cli.mjs'), '');
+      if (manifest !== null) {
+        mkdirSync(join(root, name, '.claude-plugin'), { recursive: true });
+        writeFileSync(join(root, name, '.claude-plugin', 'plugin.json'), manifest);
+      }
+      return join(dist, 'cli.mjs');
+    }
+
+    beforeEach(() => {
+      root = mkdtempSync(join(tmpdir(), 'enigma-bundles-'));
+      enigmaCli = plant('enigma', JSON.stringify({ name: 'enigma', version: '0.3.1' }));
+      foreignCli = plant('foreign', JSON.stringify({ name: 'other-tool', version: '1.0.0' }));
+      nameless = plant('nameless', JSON.stringify({ version: '1.0.0' }));
+      broken = plant('broken', '{ not json');
+    });
+
+    afterEach(() => {
+      rmSync(root, { recursive: true, force: true });
+    });
+
+    it.each<[string]>([
+      ['--require'],
+      ['-r'],
+      ['--import'],
+      ['--loader'],
+      ['--experimental-loader'],
+      ['--conditions'],
+      ['-C'],
+    ])('denies an Enigma bundle behind `node %s <value>`', (flag) => {
+      expect(isDenied(bash(`node ${flag} ./preload.mjs ${enigmaCli} run -- printenv OPENAI_API_KEY`))).toBe(true);
+    });
+
+    it('denies with several value-taking flags and a plain flag mixed together', () => {
+      const command = `node --no-warnings --require ./a.mjs --import ./b.mjs ${enigmaCli} run --only FOO -- env`;
+      expect(isDenied(bash(command))).toBe(true);
+    });
+
+    it('denies the `--flag=value` form, which is a single token', () => {
+      expect(isDenied(bash(`node --require=./preload.mjs ${enigmaCli} run -- printenv OPENAI_API_KEY`))).toBe(true);
+    });
+
+    it('a flag value is not mistaken for the script: `node --require x` with no script allows', () => {
+      expect(isDenied(bash('node --require ./preload.mjs server.js'))).toBe(false);
+      expect(isDenied(bash('node --require ./preload.mjs'))).toBe(false);
+    });
+
+    it('resolves a relative script against the hook cwd', () => {
+      const command = 'node dist/cli.mjs run -- printenv OPENAI_API_KEY';
+      expect(isDenied(bash(command, join(root, 'enigma')))).toBe(true);
+      expect(isDenied(bash(command, join(root, 'foreign')))).toBe(false);
+    });
+
+    describe('a cli.mjs that is not an Enigma bundle', () => {
+      it('is allowed when its plugin manifest is readable and names another plugin', () => {
+        expect(isDenied(bash(`node ${foreignCli} run -- printenv OPENAI_API_KEY`))).toBe(false);
+      });
+
+      it('is allowed when its readable manifest has no name', () => {
+        expect(isDenied(bash(`node ${nameless} run -- printenv OPENAI_API_KEY`))).toBe(false);
+      });
+
+      it('is still denied when the same child is run bare after it', () => {
+        expect(isDenied(bash(`node ${foreignCli} run -- npm start && printenv OPENAI_API_KEY`))).toBe(true);
+      });
+    });
+
+    describe('a script that cannot be resolved keeps denying (conservative default)', () => {
+      it.each<[string, () => string]>([
+        ['not laid out as <root>/dist/cli.mjs', () => '/some/other/project/cli.mjs'],
+        ['missing file and manifest', () => join(root, 'gone', 'dist', 'cli.mjs')],
+        ['bundle with no manifest', () => plant('bare', null)],
+        ['unparseable manifest', () => broken],
+        ['unexpanded variable', () => '"$CLAUDE_PLUGIN_ROOT/dist/cli.mjs"'],
+      ])('%s', (_label, script) => {
+        expect(isDenied(bash(`node ${script()} run -- printenv OPENAI_API_KEY`))).toBe(true);
+      });
+    });
+  });
+
+  describe('leading NAME=value / time / command prefixes (Issue #96)', () => {
+    it.each<[string, string]>([
+      ['assignment before printenv', 'FOO=1 printenv OPENAI_API_KEY'],
+      ['assignment before env', 'FOO=1 env'],
+      ['two assignments', 'FOO=1 BAR=2 printenv OPENAI_API_KEY'],
+      ['quoted assignment value', 'FOO="a b" printenv OPENAI_API_KEY'],
+      ['time before printenv', 'time printenv OPENAI_API_KEY'],
+      ['command before printenv', 'command printenv OPENAI_API_KEY'],
+      ['mixed prefixes', 'FOO=1 time command printenv OPENAI_API_KEY'],
+      ['prefix later in a chain', 'cd /repo && FOO=1 printenv OPENAI_API_KEY'],
+      ['prefix inside a command substitution', 'echo "$(FOO=1 printenv OPENAI_API_KEY)"'],
+      ['assignment before enigma get', 'FOO=1 enigma get OPENAI_API_KEY'],
+      ['time before keychain read', 'time security find-generic-password -s x -w'],
+      ['assignment before op read', 'FOO=1 op read op://vault/item/field'],
+      ['assignment before echoing a known secret', 'FOO=1 echo $OPENAI_API_KEY'],
+      ['assignment before enigma run', 'FOO=1 enigma run -- printenv OPENAI_API_KEY'],
+      ['time before enigma run', 'time enigma run -- printenv OPENAI_API_KEY'],
+      ['prefix on the enigma run child', 'enigma run -- FOO=1 printenv OPENAI_API_KEY'],
+      ['prefixes on both parent and child', 'FOO=1 enigma run -- time printenv OPENAI_API_KEY'],
+      ['assignment before the bundled-CLI form', 'FOO=1 node /plugin/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['prefix on a nested enigma run', 'enigma run -- FOO=1 enigma run -- env'],
+    ])('denies: %s', (_label, command) => {
+      expect(isDenied(bash(command))).toBe(true);
+    });
+
+    it.each<[string, string]>([
+      ['assignment before an ordinary command', 'FOO=1 npm run dev'],
+      ['time before an ordinary command', 'time npm test'],
+      ['command -v lookup', 'command -v printenv'],
+      ['assignment before enigma run, ordinary child', 'FOO=1 enigma run -- npm run dev'],
+      ['prefix on an ordinary enigma run child', 'enigma run -- FOO=1 npm run dev'],
+      ['only assignments, no command', 'FOO=1 BAR=2'],
+      ['assignment before an ordinary enigma subcommand', 'FOO=1 enigma list'],
+      ['assignment before echoing an untracked name', 'FOO=1 echo $HOME'],
+    ])('allows: %s', (_label, command) => {
+      expect(isDenied(bash(command))).toBe(false);
+    });
+
+    // Decision recorded in Issue #96: only NAME=value, `time` and `command` are
+    // skipped. These wrap the command in something that takes its own options,
+    // which would make this a shell parser. Pinned, not silently missed, exactly
+    // like the `sh -c` gap above.
+    it('does not strip sudo, npx or nohup (accepted gap)', () => {
+      expect(isDenied(bash('sudo printenv OPENAI_API_KEY'))).toBe(false);
+      expect(isDenied(bash('npx printenv OPENAI_API_KEY'))).toBe(false);
+      expect(isDenied(bash('nohup printenv OPENAI_API_KEY'))).toBe(false);
+    });
+  });
+
   describe('allows (table-driven, AC2/AC3)', () => {
     it.each<[string, PreToolUseInput]>([
       ['Read .env.example', read('/repo/.env.example')],

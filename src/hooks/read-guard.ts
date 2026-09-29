@@ -145,11 +145,20 @@ import { basename, resolve, sep } from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { enigmaHome } from '../core/paths.js';
 import { readIndex } from '../core/index-store.js';
-import { runHint } from '../core/shim.js';
+import { readBundleManifest, runHint } from '../core/shim.js';
 import type { PreToolUseInput, PreToolUseOutput } from './types.js';
 
 const DOTENV_EXEMPT = new Set(['.env.example']);
 const BARE_ENV_DUMP_COMMANDS = new Set(['env', 'printenv']);
+/** Wrappers that run the next word as the command without changing what it
+ * prints (Issue #96). Deliberately not `sudo`/`npx`/`nohup`/`env …`: those take
+ * options and change what runs, so stripping them is a parser, not a prefix skip. */
+const TRANSPARENT_PREFIX_WORDS = new Set(['time', 'command']);
+const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+/** `node` options that take their value as the NEXT token (`--require ./x`),
+ * so the value is not the script (Issue #96). `--opt=value` is one token and
+ * needs no entry. */
+const NODE_VALUE_FLAGS = new Set(['--require', '-r', '--import', '--loader', '--experimental-loader', '--conditions', '-C']);
 /** Commands that touch a .env path without reading its content into this
  * session (metadata/lifecycle operations, or existence checks) — referencing
  * `.env` as an argument to one of these is not a leak. */
@@ -568,23 +577,42 @@ function segmentTargetsEnigmaConfigByPath(segment: string, cwd: string): boolean
   return rest.some((t) => tokenTargetsPath(t, (value) => targetsEnigmaConfig(value, cwd)));
 }
 
+/**
+ * The segment's tokens with leading `NAME=value` assignments and the
+ * `time`/`command` wrappers dropped, so `FOO=1 printenv X` and `time printenv`
+ * have `printenv` as their head like the bare form (Issue #96). Used wherever a
+ * rule keys on the command head, for top-level and `enigma run` child segments
+ * alike. Path-based rules keep using the raw tokens: an assignment's value
+ * (`X=.env`) must still be seen as an argument.
+ */
+function commandTokens(segment: string): string[] {
+  const tokens = tokenize(segment);
+  let i = 0;
+  while (i < tokens.length) {
+    const token = tokens[i] as string;
+    if (!ENV_ASSIGNMENT.test(token) && !TRANSPARENT_PREFIX_WORDS.has(token)) break;
+    i++;
+  }
+  return tokens.slice(i);
+}
+
 function segmentIsBareEnvDump(segment: string): boolean {
-  const [head] = tokenize(segment);
+  const [head] = commandTokens(segment);
   return head !== undefined && BARE_ENV_DUMP_COMMANDS.has(commandName(head));
 }
 
 function segmentIsEnigmaGetOrEnv(segment: string): boolean {
-  const [head, sub] = tokenize(segment);
+  const [head, sub] = commandTokens(segment);
   return commandName(head ?? '') === 'enigma' && (sub === 'get' || sub === 'env');
 }
 
 function segmentIsKeychainRead(segment: string): boolean {
-  const [head, sub] = tokenize(segment);
+  const [head, sub] = commandTokens(segment);
   return commandName(head ?? '') === 'security' && sub === 'find-generic-password';
 }
 
 function segmentIsOpRead(segment: string): boolean {
-  const [head, sub] = tokenize(segment);
+  const [head, sub] = commandTokens(segment);
   return commandName(head ?? '') === 'op' && sub === 'read';
 }
 
@@ -599,24 +627,37 @@ function segmentIsOpRead(segment: string): boolean {
  *
  * Also recognises `node <…>/cli.mjs run …`, the form `runHint()` recommends
  * when the PATH shim is absent — otherwise the denial text would point at a
- * bypass. The child is re-joined from dequoted tokens, which can only make a
- * quoted argument that contains a space look like two tokens (a rare false
- * positive), never hide a token from the checks.
+ * bypass. Node options are skipped to find the script, including the ones that
+ * take a separate value (`--require ./preload.mjs`, see `NODE_VALUE_FLAGS`).
+ * The script counts only if it is an Enigma plugin bundle: a `cli.mjs` whose
+ * plugin manifest is readable and names something else is another program's CLI
+ * (Issue #96). A script that cannot be resolved or read stays recognised — the
+ * conservative default, since a `$VAR` or relative path we cannot follow is
+ * exactly what the bundled form looks like from here. The child is re-joined
+ * from dequoted tokens, which can only make a quoted argument that contains a
+ * space look like two tokens (a rare false positive), never hide a token from
+ * the checks.
+ *
+ * Leading `NAME=value`/`time`/`command` are skipped before the head is read
+ * (`commandTokens`), so they do not hide the form either.
  *
  * Deliberately not chased, same boundary as the rest of this file: a child
  * wrapped in `sh -c '…'`/`bash -c '…'` is not unwrapped, exactly as it is not
  * unwrapped for a bare segment either.
  */
-function enigmaRunChild(segment: string): string | undefined {
-  const tokens = tokenize(segment);
+function enigmaRunChild(segment: string, cwd: string): string | undefined {
+  const tokens = commandTokens(segment);
   const head = commandName(tokens[0] ?? '');
   let runIndex: number;
   if (head === 'enigma') {
     runIndex = 1;
   } else if (head === 'node') {
     let script = 1;
-    while (tokens[script]?.startsWith('-')) script++;
-    if (commandName(tokens[script] ?? '') !== 'cli.mjs') return undefined;
+    while (tokens[script]?.startsWith('-')) script += NODE_VALUE_FLAGS.has(tokens[script] as string) ? 2 : 1;
+    const scriptPath = tokens[script] ?? '';
+    if (commandName(scriptPath) !== 'cli.mjs') return undefined;
+    const manifest = readBundleManifest(resolve(cwd, scriptPath));
+    if (manifest !== null && manifest.name !== 'enigma') return undefined;
     runIndex = script + 1;
   } else {
     return undefined;
@@ -634,7 +675,7 @@ function knownSecretNames(): Set<string> {
 }
 
 function segmentEchoesKnownSecret(segment: string, known: Set<string>): string | undefined {
-  const [head] = tokenize(segment);
+  const [head] = commandTokens(segment);
   if (commandName(head ?? '') !== 'echo') return undefined;
   const matches = [...segment.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g)].map((m) => m[1]);
   return matches.find((name): name is string => name !== undefined && known.has(name));
@@ -871,7 +912,7 @@ export function runReadGuard(input: PreToolUseInput): PreToolUseOutput | undefin
         while (current !== undefined) {
           const denied = checkSegment(current, cwd, known, viaRun);
           if (denied) return denied;
-          current = enigmaRunChild(current);
+          current = enigmaRunChild(current, cwd);
           viaRun = true;
         }
       }

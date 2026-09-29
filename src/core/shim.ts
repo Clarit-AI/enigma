@@ -118,14 +118,14 @@ function isWritableDir(dir: string): boolean {
   }
 }
 
-interface BundleManifest {
+export interface BundleManifest {
   name: string | null;
   version: string | null;
   root: string;
 }
 
 /** The plugin manifest beside `<root>/dist/cli.mjs`, or null when `cli` is not laid out that way. */
-function readBundleManifest(cli: string): BundleManifest | null {
+export function readBundleManifest(cli: string): BundleManifest | null {
   try {
     if (basename(cli) !== 'cli.mjs') return null;
     const dist = dirname(cli);
