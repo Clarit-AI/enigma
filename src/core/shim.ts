@@ -146,7 +146,34 @@ function parseSemver(v: string | null): [number, number, number, string] | null 
   return m ? [Number(m[1]), Number(m[2]), Number(m[3]), m[4] ?? ''] : null;
 }
 
-/** True only when both versions parse and `a` is strictly lower than `b`. */
+/**
+ * SemVer §11 precedence for two NON-EMPTY prerelease strings: identifiers are
+ * compared left to right; numeric identifiers compare numerically, a numeric
+ * identifier sorts before an alphanumeric one, alphanumeric identifiers compare
+ * in ASCII order, and with an equal prefix the shorter list sorts first.
+ * (`rc.2` < `rc.10`; `alpha` < `alpha.1` < `alpha.beta` < `beta`.)
+ */
+function comparePrerelease(a: string, b: string): number {
+  const xs = a.split('.');
+  const ys = b.split('.');
+  for (let i = 0; i < Math.min(xs.length, ys.length); i++) {
+    const x = xs[i] as string;
+    const y = ys[i] as string;
+    const xNum = /^\d+$/.test(x);
+    const yNum = /^\d+$/.test(y);
+    if (xNum && yNum) {
+      const [nx, ny] = [BigInt(x), BigInt(y)];
+      if (nx !== ny) return nx < ny ? -1 : 1;
+    } else if (xNum !== yNum) {
+      return xNum ? -1 : 1;
+    } else if (x !== y) {
+      return x < y ? -1 : 1;
+    }
+  }
+  return Math.sign(xs.length - ys.length);
+}
+
+/** True only when both versions parse and `a` is strictly lower than `b`. `+build` metadata is ignored. */
 function isOlder(a: string | null, b: string | null): boolean {
   const x = parseSemver(a);
   const y = parseSemver(b);
@@ -155,11 +182,11 @@ function isOlder(a: string | null, b: string | null): boolean {
     const [xi, yi] = [x[i] as number, y[i] as number];
     if (xi !== yi) return xi < yi;
   }
-  // Same numbers: a prerelease sorts before the release; two prereleases compare as text.
+  // Same numbers: a release outranks any prerelease of it.
   if (x[3] === y[3]) return false;
   if (x[3] === '') return false;
   if (y[3] === '') return true;
-  return x[3] < y[3];
+  return comparePrerelease(x[3], y[3]) < 0;
 }
 
 /** What currently occupies `<dir>/enigma`. */

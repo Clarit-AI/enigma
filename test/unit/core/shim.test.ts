@@ -241,6 +241,49 @@ describe('PATH shim', () => {
       expect(readlinkSync(join(binDir, 'enigma'))).toBe(other);
     });
 
+    // SemVer §11: compared identifier by identifier, numerically where both are
+    // numeric. A text compare would put rc.10 before rc.2 and downgrade rc.10.
+    describe('orders prerelease versions by SemVer precedence', () => {
+      /** A link at `linked` while `current` is the running plugin: what does the shim do? */
+      function run(current: string, linked: string): { status: string; link: string } {
+        writeFileSync(join(pluginRoot, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'enigma', version: current }));
+        rmSync(join(tmp, 'linked-plugin'), { recursive: true, force: true });
+        rmSync(join(binDir, 'enigma'), { force: true });
+        symlinkSync(makePlugin(join(tmp, 'linked-plugin'), 'enigma', linked), join(binDir, 'enigma'));
+        const { status } = ensureCliShim({ pluginRoot, pathEnv: binDir });
+        return { status, link: readlinkSync(join(binDir, 'enigma')) };
+      }
+
+      it('leaves rc.10 alone when the current plugin is rc.2 (newer, not downgraded)', () => {
+        const result = run('2.0.0-rc.2', '2.0.0-rc.10');
+
+        expect(result.status).toBe('occupied');
+        expect(result.link).toBe(join(tmp, 'linked-plugin', 'dist', 'cli.mjs'));
+      });
+
+      it('re-points rc.2 when the current plugin is rc.10', () => {
+        expect(run('2.0.0-rc.10', '2.0.0-rc.2')).toEqual({ status: 'repointed', link: cli });
+      });
+
+      it('leaves an equal prerelease at a different path alone', () => {
+        expect(run('2.0.0-rc.2', '2.0.0-rc.2').status).toBe('occupied');
+      });
+
+      it('ignores +build metadata', () => {
+        expect(run('2.0.0-rc.2+build.5', '2.0.0-rc.2+build.9').status).toBe('occupied');
+        expect(run('2.0.0+b1', '2.0.0-rc.1').status).toBe('repointed');
+      });
+
+      it('follows the SemVer §11 chain, and never downgrades along it', () => {
+        const chain = ['2.0.0-alpha', '2.0.0-alpha.1', '2.0.0-alpha.beta', '2.0.0-beta', '2.0.0-beta.2', '2.0.0-beta.11', '2.0.0-rc.1', '2.0.0'];
+        for (let i = 0; i < chain.length - 1; i++) {
+          const [lower, higher] = [chain[i] as string, chain[i + 1] as string];
+          expect(run(higher, lower).status, `${lower} linked, ${higher} current`).toBe('repointed');
+          expect(run(lower, higher).status, `${higher} linked, ${lower} current`).toBe('occupied');
+        }
+      });
+    });
+
     it('does not flip the link back and forth between two installs', () => {
       const oldRoot = join(tmp, 'old-install');
       const oldCli = makePlugin(oldRoot, 'enigma', '1.0.0');
