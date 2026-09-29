@@ -1286,6 +1286,25 @@ function parseSemver(v) {
   const m = v === null ? null : /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+.*)?$/.exec(v.trim());
   return m ? [Number(m[1]), Number(m[2]), Number(m[3]), m[4] ?? ""] : null;
 }
+function comparePrerelease(a, b) {
+  const xs = a.split(".");
+  const ys = b.split(".");
+  for (let i = 0; i < Math.min(xs.length, ys.length); i++) {
+    const x = xs[i];
+    const y = ys[i];
+    const xNum = /^\d+$/.test(x);
+    const yNum = /^\d+$/.test(y);
+    if (xNum && yNum) {
+      const [nx, ny] = [BigInt(x), BigInt(y)];
+      if (nx !== ny) return nx < ny ? -1 : 1;
+    } else if (xNum !== yNum) {
+      return xNum ? -1 : 1;
+    } else if (x !== y) {
+      return x < y ? -1 : 1;
+    }
+  }
+  return Math.sign(xs.length - ys.length);
+}
 function isOlder(a, b) {
   const x = parseSemver(a);
   const y = parseSemver(b);
@@ -1297,7 +1316,7 @@ function isOlder(a, b) {
   if (x[3] === y[3]) return false;
   if (x[3] === "") return false;
   if (y[3] === "") return true;
-  return x[3] < y[3];
+  return comparePrerelease(x[3], y[3]) < 0;
 }
 function classify(dest, cli) {
   let stats;
