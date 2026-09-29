@@ -42932,7 +42932,7 @@ function projectId(cwd) {
 
 // src/core/paths.ts
 import { homedir } from "node:os";
-import { join as join2 } from "node:path";
+import { basename as basename2, dirname as dirname2, join as join2 } from "node:path";
 function enigmaHome() {
   return process.env.ENIGMA_HOME || join2(homedir(), ".config", "enigma");
 }
@@ -42957,12 +42957,12 @@ function indexLockPath() {
 
 // src/core/secure-file.ts
 import { mkdirSync, appendFileSync, chmodSync, existsSync as existsSync2, readFileSync as readFileSync2, renameSync, writeFileSync } from "node:fs";
-import { dirname as dirname2 } from "node:path";
+import { dirname as dirname3 } from "node:path";
 import { randomBytes as randomBytes2 } from "node:crypto";
 var FILE_MODE = 384;
 var DIR_MODE = 448;
 function ensureParentDir(path) {
-  const dir = dirname2(path);
+  const dir = dirname3(path);
   mkdirSync(dir, { recursive: true, mode: DIR_MODE });
   chmodSync(dir, DIR_MODE);
 }
@@ -43023,13 +43023,17 @@ function appendAuditEvent(event) {
 }
 
 // src/core/index-store.ts
-import { chmodSync as chmodSync2, closeSync, existsSync as existsSync4, ftruncateSync, mkdirSync as mkdirSync2, openSync, writeSync } from "node:fs";
-import { dirname as dirname4, resolve as resolve3 } from "node:path";
+import { existsSync as existsSync4 } from "node:fs";
+import { resolve as resolve3 } from "node:path";
+
+// src/core/file-lock.ts
+import { chmodSync as chmodSync2, closeSync, ftruncateSync, mkdirSync as mkdirSync2, openSync, writeSync } from "node:fs";
+import { dirname as dirname5 } from "node:path";
 
 // src/core/native-lock.ts
 import { createRequire } from "node:module";
 import { existsSync as existsSync3 } from "node:fs";
-import { basename as basename2, dirname as dirname3, resolve as resolve2 } from "node:path";
+import { basename as basename3, dirname as dirname4, resolve as resolve2 } from "node:path";
 import { fileURLToPath } from "node:url";
 var SUPPORTED_NATIVE_TARGETS = ["darwin-arm64", "darwin-x64", "linux-x64"];
 var HOST_TAG = `${process.platform}-${process.arch}`;
@@ -43042,11 +43046,11 @@ function artifactLocation(tag) {
   if (override) {
     return { path: resolve2(override, tag, "index-lock.node"), origin: "ENIGMA_NATIVE_DIR" };
   }
-  const here = dirname3(fileURLToPath(import.meta.url));
-  if (basename2(here) === "dist") {
+  const here = dirname4(fileURLToPath(import.meta.url));
+  if (basename3(here) === "dist") {
     return { path: resolve2(here, "..", "native", tag, "index-lock.node"), origin: "installed package layout" };
   }
-  if (basename2(here) === "core" && basename2(dirname3(here)) === "src") {
+  if (basename3(here) === "core" && basename3(dirname4(here)) === "src") {
     return {
       path: resolve2(here, "..", "..", "plugins", "enigma", "native", tag, "index-lock.node"),
       origin: "source-tree layout"
@@ -43089,6 +43093,89 @@ function loadIndexLock() {
       code: "E_LOCK_UNAVAILABLE",
       message: `Enigma's index lock artifact for ${tag} failed to load (${found}): ${err instanceof Error ? err.message : String(err)}. Refusing to run without kernel-held exclusion.`
     });
+  }
+}
+
+// src/core/file-lock.ts
+var LOCK_RETRY_INTERVAL_MS = 10;
+var LOCK_MAX_ATTEMPTS = 50;
+var SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
+function syncSleep(ms) {
+  if (ms <= 0) return;
+  Atomics.wait(SLEEP_BUFFER, 0, 0, ms);
+}
+function ensureLockDir(lockPath) {
+  const dir = dirname5(lockPath);
+  try {
+    mkdirSync2(dir, { recursive: true, mode: 448 });
+    chmodSync2(dir, 448);
+  } catch {
+  }
+}
+function wrapAcquireError(err, lockPath) {
+  const cause = err instanceof Error ? err.constructor.name : String(err);
+  return new EnigmaError({
+    code: "E_LOCK_TIMEOUT",
+    message: `Failed to acquire ${lockPath}: ${cause}`
+  });
+}
+function openAnchor(lockPath) {
+  try {
+    return openSync(lockPath, "wx", 384);
+  } catch (err) {
+    if (!(err instanceof Error) || err.code !== "EEXIST") {
+      throw wrapAcquireError(err, lockPath);
+    }
+  }
+  try {
+    return openSync(lockPath, "r+");
+  } catch (err) {
+    throw wrapAcquireError(err, lockPath);
+  }
+}
+function writeInfoMetadata(fd) {
+  try {
+    ftruncateSync(fd, 0);
+    writeSync(fd, `${process.pid}
+${Date.now()}
+`, 0);
+  } catch {
+  }
+}
+function acquireFileLock(lockPath) {
+  ensureLockDir(lockPath);
+  const addon = loadIndexLock();
+  const fd = openAnchor(lockPath);
+  try {
+    for (let attempt = 0; attempt < LOCK_MAX_ATTEMPTS; attempt++) {
+      if (addon.tryLockSync(fd)) {
+        writeInfoMetadata(fd);
+        return {
+          release: () => {
+            try {
+              addon.unlockSync(fd);
+            } catch {
+            }
+            try {
+              closeSync(fd);
+            } catch {
+            }
+          }
+        };
+      }
+      syncSleep(LOCK_RETRY_INTERVAL_MS);
+    }
+    throw new EnigmaError({
+      code: "E_LOCK_TIMEOUT",
+      message: `Could not acquire ${lockPath} within ${LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS} ms; another process holds the lock.`
+    });
+  } catch (err) {
+    try {
+      closeSync(fd);
+    } catch {
+    }
+    if (err instanceof EnigmaError) throw err;
+    throw wrapAcquireError(err, lockPath);
   }
 }
 
@@ -43147,90 +43234,8 @@ function listIndexEntries(index, opts = {}) {
     return { ...entry, shadowed: Boolean(shadowedBy) };
   });
 }
-var LOCK_RETRY_INTERVAL_MS = 10;
-var LOCK_MAX_ATTEMPTS = 50;
-var SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
-function syncSleep(ms) {
-  if (ms <= 0) return;
-  Atomics.wait(SLEEP_BUFFER, 0, 0, ms);
-}
-function ensureLockDir(lockPath) {
-  const dir = dirname4(lockPath);
-  try {
-    mkdirSync2(dir, { recursive: true, mode: 448 });
-    chmodSync2(dir, 448);
-  } catch {
-  }
-}
-function wrapAcquireError(err, lockPath) {
-  const cause = err instanceof Error ? err.constructor.name : String(err);
-  return new EnigmaError({
-    code: "E_LOCK_TIMEOUT",
-    message: `Failed to acquire ${lockPath}: ${cause}`
-  });
-}
-function openAnchor(lockPath) {
-  try {
-    return openSync(lockPath, "wx", 384);
-  } catch (err) {
-    if (!(err instanceof Error) || err.code !== "EEXIST") {
-      throw wrapAcquireError(err, lockPath);
-    }
-  }
-  try {
-    return openSync(lockPath, "r+");
-  } catch (err) {
-    throw wrapAcquireError(err, lockPath);
-  }
-}
-function writeInfoMetadata(fd) {
-  try {
-    ftruncateSync(fd, 0);
-    writeSync(fd, `${process.pid}
-${Date.now()}
-`, 0);
-  } catch {
-  }
-}
-function acquireIndexLock() {
-  const lockPath = indexLockPath();
-  ensureLockDir(lockPath);
-  const addon = loadIndexLock();
-  const fd = openAnchor(lockPath);
-  try {
-    for (let attempt = 0; attempt < LOCK_MAX_ATTEMPTS; attempt++) {
-      if (addon.tryLockSync(fd)) {
-        writeInfoMetadata(fd);
-        return {
-          release: () => {
-            try {
-              addon.unlockSync(fd);
-            } catch {
-            }
-            try {
-              closeSync(fd);
-            } catch {
-            }
-          }
-        };
-      }
-      syncSleep(LOCK_RETRY_INTERVAL_MS);
-    }
-    throw new EnigmaError({
-      code: "E_LOCK_TIMEOUT",
-      message: `Could not acquire ${lockPath} within ${LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS} ms; another process holds the index lock.`
-    });
-  } catch (err) {
-    try {
-      closeSync(fd);
-    } catch {
-    }
-    if (err instanceof EnigmaError) throw err;
-    throw wrapAcquireError(err, lockPath);
-  }
-}
 function mutateIndex(delta) {
-  const lock = acquireIndexLock();
+  const lock = acquireFileLock(indexLockPath());
   try {
     const current = readIndex();
     const next = delta(current);
@@ -43912,7 +43917,7 @@ var macosKeychainDepositoryModule = {
 
 // src/storage/depositories/onepassword.ts
 import { execFile as execFile5 } from "node:child_process";
-import { basename as basename3 } from "node:path";
+import { basename as basename4 } from "node:path";
 var OP_BIN = "op";
 var VAULT = "Enigma";
 var MIN_MAJOR_VERSION = 2;
@@ -44018,7 +44023,7 @@ function buildTitle(ref, ctx) {
   const name = nameFromRef(ref);
   const isGlobal = ref === name || ref.startsWith("global/");
   if (isGlobal || !ctx.projectPath) return name;
-  return `${name} \xB7 ${basename3(ctx.projectPath)}`;
+  return `${name} \xB7 ${basename4(ctx.projectPath)}`;
 }
 function itemTemplate(title, value) {
   return JSON.stringify({
@@ -44529,7 +44534,7 @@ import {
   statSync as statSync2,
   symlinkSync
 } from "node:fs";
-import { basename as basename4, delimiter, dirname as dirname5, isAbsolute, join as join5, resolve as resolve4 } from "node:path";
+import { basename as basename5, delimiter, dirname as dirname6, isAbsolute, join as join5, resolve as resolve4 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function pathDirs(pathEnv) {
   const seen = /* @__PURE__ */ new Set();
@@ -44554,10 +44559,10 @@ function isWritableDir(dir) {
 }
 function readBundleManifest(cli) {
   try {
-    if (basename4(cli) !== "cli.mjs") return null;
-    const dist = dirname5(cli);
-    if (basename4(dist) !== "dist") return null;
-    const root = dirname5(dist);
+    if (basename5(cli) !== "cli.mjs") return null;
+    const dist = dirname6(cli);
+    if (basename5(dist) !== "dist") return null;
+    const root = dirname6(dist);
     const manifest = JSON.parse(readFileSync5(join5(root, ".claude-plugin", "plugin.json"), "utf8"));
     if (typeof manifest !== "object" || manifest === null) return null;
     const { name, version: version2 } = manifest;
@@ -44616,7 +44621,7 @@ function classify(dest, cli) {
   } catch {
     return { slot: "foreign", link: null };
   }
-  const link = isAbsolute(raw) ? resolve4(raw) : resolve4(dirname5(dest), raw);
+  const link = isAbsolute(raw) ? resolve4(raw) : resolve4(dirname6(dest), raw);
   let resolves = true;
   try {
     accessSync(link, constants.F_OK);
@@ -44660,7 +44665,7 @@ function defaultPluginRoot() {
   const fromEnv = process.env.CLAUDE_PLUGIN_ROOT;
   if (fromEnv) return fromEnv;
   try {
-    return resolve4(dirname5(fileURLToPath2(import.meta.url)), "..");
+    return resolve4(dirname6(fileURLToPath2(import.meta.url)), "..");
   } catch {
     return null;
   }

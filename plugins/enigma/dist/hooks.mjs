@@ -38,7 +38,26 @@ import { join as join2 } from "node:path";
 
 // src/core/paths.ts
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
+
+// src/core/errors.ts
+var EnigmaError = class _EnigmaError extends Error {
+  code;
+  secretName;
+  depository;
+  exitCode;
+  constructor(options) {
+    super(options.message);
+    this.name = "EnigmaError";
+    this.code = options.code;
+    this.secretName = options.secretName;
+    this.depository = options.depository;
+    this.exitCode = options.exitCode;
+    Object.setPrototypeOf(this, _EnigmaError.prototype);
+  }
+};
+
+// src/core/paths.ts
 function enigmaHome() {
   return process.env.ENIGMA_HOME || join(homedir(), ".config", "enigma");
 }
@@ -60,31 +79,12 @@ function secretsPath() {
 
 // src/core/secure-file.ts
 import { mkdirSync, appendFileSync, chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname as dirname2 } from "node:path";
 import { randomBytes } from "node:crypto";
-
-// src/core/errors.ts
-var EnigmaError = class _EnigmaError extends Error {
-  code;
-  secretName;
-  depository;
-  exitCode;
-  constructor(options) {
-    super(options.message);
-    this.name = "EnigmaError";
-    this.code = options.code;
-    this.secretName = options.secretName;
-    this.depository = options.depository;
-    this.exitCode = options.exitCode;
-    Object.setPrototypeOf(this, _EnigmaError.prototype);
-  }
-};
-
-// src/core/secure-file.ts
 var FILE_MODE = 384;
 var DIR_MODE = 448;
 function ensureParentDir(path) {
-  const dir = dirname(path);
+  const dir = dirname2(path);
   mkdirSync(dir, { recursive: true, mode: DIR_MODE });
   chmodSync(dir, DIR_MODE);
 }
@@ -144,23 +144,26 @@ function loadProjectManifest(projectPath) {
 }
 
 // src/core/index-store.ts
-import { chmodSync as chmodSync2, closeSync, existsSync as existsSync3, ftruncateSync, mkdirSync as mkdirSync2, openSync, writeSync } from "node:fs";
-import { dirname as dirname3, resolve as resolve2 } from "node:path";
+import { existsSync as existsSync3 } from "node:fs";
+import { resolve as resolve2 } from "node:path";
 
 // src/core/native-lock.ts
 var HOST_TAG = `${process.platform}-${process.arch}`;
 
+// src/core/file-lock.ts
+var SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
+
 // src/core/project.ts
 import { createHash } from "node:crypto";
 import { existsSync as existsSync2, readFileSync as readFileSync2, realpathSync as realpathSync2, statSync } from "node:fs";
-import { basename, dirname as dirname2, join as join3, resolve } from "node:path";
+import { basename as basename2, dirname as dirname3, join as join3, resolve } from "node:path";
 import * as nodePath from "node:path";
 var PROJECT_ID_LENGTH = 16;
 function findProjectPath(cwd) {
   let dir = resolve(cwd);
   for (; ; ) {
     if (existsSync2(`${dir}/.git`)) return dir;
-    const parent = dirname2(dir);
+    const parent = dirname3(dir);
     if (parent === dir) return resolve(cwd);
     dir = parent;
   }
@@ -261,7 +264,7 @@ function findRepoIdentityPath(cwd) {
       return fallback;
     }
     const resolved = safeRealpath(commonDir, fallback);
-    return basename(resolved) === ".git" ? dirname2(resolved) : resolved;
+    return basename2(resolved) === ".git" ? dirname3(resolved) : resolved;
   } catch {
     return fallback;
   }
@@ -292,7 +295,6 @@ function listIndexEntries(index, opts = {}) {
     return { ...entry, shadowed: Boolean(shadowedBy) };
   });
 }
-var SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 var ORPHAN_ADOPTABLE_DEPOSITORIES = /* @__PURE__ */ new Set([
   "encrypted",
   "keychain",
@@ -967,7 +969,7 @@ var macosKeychainDepositoryModule = {
 
 // src/storage/depositories/onepassword.ts
 import { execFile as execFile3 } from "node:child_process";
-import { basename as basename2 } from "node:path";
+import { basename as basename3 } from "node:path";
 var OP_BIN = "op";
 var VAULT = "Enigma";
 var MIN_MAJOR_VERSION = 2;
@@ -1063,7 +1065,7 @@ function buildTitle(ref, ctx) {
   const name = nameFromRef(ref);
   const isGlobal = ref === name || ref.startsWith("global/");
   if (isGlobal || !ctx.projectPath) return name;
-  return `${name} \xB7 ${basename2(ctx.projectPath)}`;
+  return `${name} \xB7 ${basename3(ctx.projectPath)}`;
 }
 function itemTemplate(title, value) {
   return JSON.stringify({
@@ -1245,7 +1247,7 @@ import {
   statSync as statSync2,
   symlinkSync
 } from "node:fs";
-import { basename as basename3, delimiter, dirname as dirname4, isAbsolute, join as join5, resolve as resolve3 } from "node:path";
+import { basename as basename4, delimiter, dirname as dirname4, isAbsolute, join as join5, resolve as resolve3 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/core/version.ts
@@ -1275,9 +1277,9 @@ function isWritableDir(dir) {
 }
 function readBundleManifest(cli) {
   try {
-    if (basename3(cli) !== "cli.mjs") return null;
+    if (basename4(cli) !== "cli.mjs") return null;
     const dist = dirname4(cli);
-    if (basename3(dist) !== "dist") return null;
+    if (basename4(dist) !== "dist") return null;
     const root = dirname4(dist);
     const manifest = JSON.parse(readFileSync5(join5(root, ".claude-plugin", "plugin.json"), "utf8"));
     if (typeof manifest !== "object" || manifest === null) return null;
@@ -1505,7 +1507,7 @@ function runSessionStart(input) {
 }
 
 // src/hooks/read-guard.ts
-import { basename as basename4, resolve as resolve4, sep } from "node:path";
+import { basename as basename5, resolve as resolve4, sep } from "node:path";
 import { existsSync as existsSync8, statSync as statSync3 } from "node:fs";
 var DOTENV_EXEMPT = /* @__PURE__ */ new Set([".env.example"]);
 var BARE_ENV_DUMP_COMMANDS = /* @__PURE__ */ new Set(["env", "printenv"]);
@@ -1520,7 +1522,7 @@ function isDotEnvBasename(name) {
   return name === ".env" || name.startsWith(".env.");
 }
 function targetsDotEnv(pathLike) {
-  return isDotEnvBasename(basename4(pathLike.trim()));
+  return isDotEnvBasename(basename5(pathLike.trim()));
 }
 function targetsEnigmaConfig(pathLike, cwd) {
   const home = resolve4(enigmaHome());
