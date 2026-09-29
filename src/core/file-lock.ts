@@ -94,10 +94,12 @@ export interface Lock {
  * lock, which created its dir at 0700 and tightened the leaf):
  * - Missing components of the LITERAL path are created one at a time,
  *   so the kernel resolves `..` and symlinks the same way `openSync`
- *   will. Each is born `0700`; once it exists, its real path decides
- *   its final mode: inside the home → stays `0700`; outside → relaxed
- *   to the umask default, as a plain mkdir would have made it. So no
- *   dir inside the home is ever looser than `0700`, even for an instant.
+ *   will. Each is born no more permissive than `0700` (mkdir mode
+ *   `0700`, further narrowed by the umask); once it exists, its real path
+ *   decides its final mode: inside the home → set to exactly `0700`;
+ *   outside → relaxed to the umask default, as a plain mkdir would have
+ *   made it. So no dir inside the home is ever looser than `0700`, even
+ *   for an instant.
  * - The leaf (possibly pre-existing, e.g. a `0755` `locks/`) is
  *   tightened to `0700` when its real path is inside the home.
  * - Pre-existing INTERMEDIATE dirs are left as they are. Every caller
@@ -111,7 +113,7 @@ export interface Lock {
  *   are ever chmod-ed.
  *
  * History: review r2 H1/B1 (trailing slash), r3 (symlink escape), r5
- * (alias into home), r6 (`link/..` in the lock path), r7 (born-0700,
+ * (alias into home), r6 (`link/..` in the lock path), r7 (born no looser than 0700,
  * `link/..` in ENIGMA_HOME).
  */
 function ensureLockDir(lockPath: string): void {
