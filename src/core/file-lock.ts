@@ -44,7 +44,7 @@
  * `src/core/index-store.ts`.
  */
 import { chmodSync, closeSync, ftruncateSync, mkdirSync, openSync, realpathSync, writeSync } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { EnigmaError } from './errors.js';
 import { loadIndexLock } from './native-lock.js';
 import { enigmaHome } from './paths.js';
@@ -95,9 +95,10 @@ export interface Lock {
  * caller that points us at a non-existent path is implicitly asking us
  * to bring it into existence. `mkdirSync(..., { recursive: true })`
  * returns success on a pre-existing dir, so this is a no-op for the
- * common case. New dirs are created at `0700` only when the path is
- * (lexically) under `enigmaHome()`; a caller-owned path outside it gets
- * the process umask default, like any other directory the caller makes.
+ * common case. New dirs are created at `0700` when they will physically
+ * land under `enigmaHome()` (symlinks in the existing part followed); a
+ * caller-owned path outside it gets the process umask default, like any
+ * other directory the caller makes.
  *
  * The chmod runs only INSIDE `enigmaHome()`: the index lock, the
  * ledger lock, and the per-target `<enigmaHome>/locks/<hash>.lock`
@@ -120,7 +121,9 @@ function ensureLockDir(lockPath: string): void {
   // openSync and surfaces as a clear E_LOCK_TIMEOUT with the
   // underlying errno (wrapAcquireError formats errno.code).
   try {
-    const underHome = isWithin(resolve(enigmaHome()), resolve(dir));
+    // Mode for NEW dirs follows where they will physically land, so a
+    // symlink alias into the home still gets 0700 intermediates (review r5).
+    const underHome = isWithin(physicalPath(enigmaHome()), physicalPath(dir));
     mkdirSync(dir, underHome ? { recursive: true, mode: 0o700 } : { recursive: true });
   } catch {
     // Already exists, owned by another user, or a file at this path —
@@ -157,6 +160,27 @@ function realInsideEnigmaHome(dir: string): string | undefined {
     return undefined;
   }
   return isWithin(realHome, realDir) ? realDir : undefined;
+}
+
+/**
+ * Where `p` physically is (or will be once created): the realpath of its
+ * deepest existing ancestor, plus the not-yet-existing tail. Symlinks in
+ * the existing part are followed, so an alias into or out of the home is
+ * judged by its real location. `..` is collapsed lexically first.
+ */
+function physicalPath(p: string): string {
+  const tail: string[] = [];
+  let cur = resolve(p);
+  for (;;) {
+    try {
+      return join(realpathSync(cur), ...tail);
+    } catch {
+      const parent = dirname(cur);
+      if (parent === cur) return resolve(p);
+      tail.unshift(basename(cur));
+      cur = parent;
+    }
+  }
 }
 
 /** True when `child` is `parent` or below it, split on a separator boundary (so `..x` is below). */

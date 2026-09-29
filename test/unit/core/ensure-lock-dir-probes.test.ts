@@ -256,4 +256,24 @@ describe('ensureLockDir path containment — round-2 review H1 / B1 (BLOCKING re
       lock.release();
     }
   });
+
+  it('an outside symlink alias INTO the home creates the new nested dirs at 0700 (review r5)', () => {
+    // `<outside>/alias -> <home>`; locking `<alias>/new/leaf/lockfile`
+    // physically creates `<home>/new` and `<home>/new/leaf`. Both are
+    // Enigma-owned, so both must be 0700, not the umask default.
+    const home = freshHome('alias-into-home');
+    process.env.ENIGMA_HOME = home;
+    const outside = mkdtempSync(join(tmpdir(), 'enigma-alias-root-'));
+    scratchHomes.push(outside);
+    const alias = join(outside, 'alias');
+    symlinkSync(home, alias);
+
+    const lock = acquireFileLock(join(alias, 'new', 'leaf', 'lockfile'));
+    try {
+      expect(statSync(join(home, 'new')).mode & 0o777).toBe(0o700);
+      expect(statSync(join(home, 'new', 'leaf')).mode & 0o777).toBe(0o700);
+    } finally {
+      lock.release();
+    }
+  });
 });
