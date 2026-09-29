@@ -12,7 +12,7 @@
 // recoverable (kernel death release); a leftover legacy body is
 // irrelevant. fd-cleanup/delta-failure lives in index-store.test.ts (it is
 // per-process introspection of the acquire path).
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -290,22 +290,34 @@ describe('acquireFileLock — real processes against the committed flock addon (
     }
     const nativeDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'plugins', 'enigma', 'native');
 
-    // Start barrier: both children begin their first acquire at the same
-    // wall-clock instant, so a slow spawn cannot make them miss each other.
-    const startAt = String(Date.now() + 1500);
+    // Start barrier (ready/go handshake): each child prints `ready` and
+    // blocks on stdin; once BOTH are ready the parent releases them
+    // together, so a slow spawn cannot make them miss each other.
+    const children: ChildProcess[] = [];
+    let readyCount = 0;
+    const onReady = (): void => {
+      readyCount += 1;
+      if (readyCount === 2) for (const c of children) c.stdin!.end('go\n');
+    };
     const runTimed = (anchor: string): Promise<{ code: number | null; stdout: string }> =>
       new Promise((resolvePromise) => {
         const child = spawn(
           process.execPath,
-          [ledgerWorker, 'timed', anchor, '10', '50', startAt],
+          [ledgerWorker, 'timed', anchor, '10', '50', 'gate'],
           {
-            stdio: ['ignore', 'pipe', 'inherit'],
+            stdio: ['pipe', 'pipe', 'inherit'],
             env: { ...process.env, ENIGMA_NATIVE_DIR: nativeDir },
           },
         );
+        children.push(child);
         let stdout = '';
+        let sawReady = false;
         child.stdout!.on('data', (chunk: Buffer) => {
           stdout += chunk.toString();
+          if (!sawReady && stdout.includes('ready\n')) {
+            sawReady = true;
+            onReady();
+          }
         });
         child.on('exit', (code) => resolvePromise({ code, stdout }));
       });

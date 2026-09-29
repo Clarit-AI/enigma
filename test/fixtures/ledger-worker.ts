@@ -12,19 +12,21 @@
 //   remove <name1> <name2> ...
 //     Calls `removeNames` with the given args; prints "OK" on stdout,
 //     then exits 0.
-//   timed <anchor> <iters> <holdMs> [startAtMs]
+//   timed <anchor> <iters> <holdMs> [gate]
 //     Generic acquireFileLock exercise: `iters` cycles of
 //     acquire → sleep(holdMs) → release on the given anchor (a
 //     kernel lock file path). Prints `[startMs,endMs]` for each
 //     cycle on stdout so the parent test can assert the critical
 //     sections of two children on DIFFERENT anchors actually
-//     overlap — proving distinct anchors don't serialize. The
-//     optional `startAtMs` is a wall-clock start barrier, so a slow
-//     spawn of one child cannot push it past the other's whole run.
+//     overlap — proving distinct anchors don't serialize. With the
+//     optional `gate` flag the worker prints `ready` and blocks on
+//     stdin until the parent writes a line, so both children start
+//     their first acquire together however slowly each one spawned.
 //
 // Argv is read positionally — names with spaces are not supported
 // and not needed for the test surface (the project ID, worktree, and
 // file come from the integration test as fixed strings).
+import { readSync } from 'node:fs';
 import { acquireFileLock } from '../../src/core/file-lock.js';
 import { upsertTarget, removeNames } from '../../src/render/ledger.js';
 
@@ -46,15 +48,17 @@ if (mode === 'upsert') {
   removeNames(rest);
   process.stdout.write('OK\n');
 } else if (mode === 'timed') {
-  const [anchor, itersRaw, holdMsRaw, startAtRaw] = rest;
+  const [anchor, itersRaw, holdMsRaw, gate] = rest;
   const iters = Number(itersRaw);
   const holdMs = Number(holdMsRaw);
   if (!anchor || !Number.isFinite(iters) || !Number.isFinite(holdMs)) {
-    process.stderr.write(`usage: timed <anchor> <iters> <holdMs> [startAtMs]\n`);
+    process.stderr.write(`usage: timed <anchor> <iters> <holdMs> [gate]\n`);
     process.exit(2);
   }
-  const waitMs = Number(startAtRaw ?? 0) - Date.now();
-  if (waitMs > 0) Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, waitMs);
+  if (gate === 'gate') {
+    process.stdout.write('ready\n');
+    readSync(0, Buffer.alloc(1)); // blocks until the parent releases both children
+  }
   for (let i = 0; i < iters; i++) {
     const lock = acquireFileLock(anchor, 'timed worker');
     try {
