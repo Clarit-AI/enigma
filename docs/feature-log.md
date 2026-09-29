@@ -2,7 +2,9 @@
 
 ## Completed
 
-### Unreleased — targeting `v0.3.2`
+### `v0.3.2` — shipped 2026-09-28 as `enigma--v0.3.2` (PR #103)
+
+Read-guard and PATH-shim corrections found after the first shim release.
 
 - Read-guard checks the child of `enigma run [flags] -- <child>` (and the
   bundled `node …/cli.mjs run` form the denial text recommends) through the
@@ -21,6 +23,33 @@
   options that take a separate value cannot hide it and no filesystem or
   manifest check is involved; leading `NAME=value`, `time` and `command` are
   skipped before the command head at top level and on the `enigma run` child.
+- Build version embedded in every bundle (`ENIGMA_VERSION`, `src/core/version.ts`,
+  an esbuild define mirrored in `vitest.config.ts`), so the stale-link check
+  still self-heals in the npm-bin layout, which has no `plugin.json` beside
+  `dist/cli.mjs`; the MCP server constructor uses the same constant instead of
+  a hardcoded string that two release bumps had missed. Session-start and
+  read-guard tests now control `CLAUDE_PLUGIN_ROOT` instead of inheriting the
+  ambient value, and the shim docs record the re-point, group-write and ACL
+  rules (PR #101 / Issue #99, 2026-09-28).
+- Release: version bump across all manifests and `dist/` (PR #103 / Issue #102,
+  2026-09-28). The `package-lock.json` root versions had drifted at `0.3.0` and
+  were corrected. Docs loop closed in the same PR: PATH-shim replacement rule
+  and its no-manifest limit in `docs/architecture.md`.
+
+### `v0.3.1` — shipped 2026-09-26 as `enigma--v0.3.1` (PR #93)
+
+Put `enigma` on `PATH` after a marketplace install (Issue #90).
+
+- The SessionStart hook symlinks the bundled CLI into a directory already on
+  `PATH`, so the `enigma run -- <command>` form read-guard recommends is
+  runnable after the only supported install. Absolute `PATH` entries only, the
+  whole `PATH` is scanned before anything is created, a dangling link is
+  re-pointed, `ENIGMA_NO_PATH_SHIM=1` opts out, and `ensureCliShim` never
+  throws. `enigma doctor` reports the state read-only.
+- Both bundles gate their entrypoint with `isMainModule()`
+  (`src/core/is-main-module.ts`, `realpathSync` on both sides): the old
+  `import.meta.url` comparison made the CLI a silent no-op when invoked
+  through any symlink.
 
 ### `v0.3.0` — shipped 2026-09-24 as `enigma--v0.3.0` (PR #86)
 
