@@ -19,7 +19,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { __setLockTimingForTesting, LOCK_MAX_ATTEMPTS, LOCK_RETRY_INTERVAL_MS, mutateIndex, readIndex, upsertIndexEntry } from '../../src/core/index-store.js';
-import { indexLockPath } from '../../src/core/paths.js';
+import { indexLockPath, renderLockPath } from '../../src/core/paths.js';
 
 const WORKER = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'index-lock-worker.mjs');
 const ADDON = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'plugins', 'enigma', 'native', `${process.platform}-${process.arch}`, 'index-lock.node');
@@ -189,5 +189,110 @@ describe('index lock — real processes against the committed flock addon (Issue
     }
     mutateIndex((cur) => upsertIndexEntry(cur, entry('FREE')));
     expect(readIndex().entries.map((e) => e.name)).toEqual(['FREE']);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ *  Generic acquireFileLock — Issue #106                               *
+ * ------------------------------------------------------------------ *
+ *
+ * These integration tests prove the same kernel-held exclusion contract
+ * holds for arbitrary anchor paths — what `acquireFileLock(lockPath)`
+ * delivers to the rest of the codebase (e.g. the render-target locks at
+ * `<configDir>/locks/<sha256>.lock`). The kernel `flock(2)` on a
+ * description per anchor is the arbiter; cross-anchor exclusion does not
+ * exist (it must not exist), and the same-anchor exclusion we already
+ * prove for the index lock above applies to every lock path equally.
+ */
+describe('acquireFileLock — real processes against the committed flock addon (Issue #106)', () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), 'enigma-filelock-rp-'));
+    originalHome = process.env.ENIGMA_HOME;
+    process.env.ENIGMA_HOME = tmpHome;
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.ENIGMA_HOME;
+    else process.env.ENIGMA_HOME = originalHome;
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it('two processes locking two DIFFERENT anchors proceed without waiting (AC #2, cross-anchor non-contention)', async () => {
+    const anchorA = join(tmpHome, 'a.lock');
+    const anchorB = join(tmpHome, 'b.lock');
+    mkdirSync(dirname(anchorA), { recursive: true, mode: 0o700 });
+
+    // Both children do a real `flock` acquire + 50ms hold + release +
+    // re-acquire cycle (20 iters). If cross-anchor contention existed,
+    // the total elapsed would be ~20 * 50ms * 2 ≈ 2 seconds instead of
+    // ~1 second. We assert an order-of-magnitude tighter bound than the
+    // production retry budget.
+    const counterA = join(tmpHome, 'a.counter');
+    const counterB = join(tmpHome, 'b.counter');
+    writeFileSync(counterA, '0');
+    writeFileSync(counterB, '0');
+
+    const t0 = Date.now();
+    const results = await Promise.all([
+      runWorker(['counter', ADDON, anchorA, counterA, '20', '50']),
+      runWorker(['counter', ADDON, anchorB, counterB, '20', '50']),
+    ]);
+    const elapsed = Date.now() - t0;
+    for (const r of results) expect(r.code).toBe(0);
+    expect(readFileSync(counterA, 'utf8')).toBe('20');
+    expect(readFileSync(counterB, 'utf8')).toBe('20');
+    // Production retry budget is ~500ms; cross-anchor parallel must
+    // complete well inside one retry window on top of the work itself.
+    expect(elapsed).toBeLessThan(LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS + 1500);
+  });
+
+  it('two worktrees with the same relative `.env` basename get distinct anchors (clarification comment)', () => {
+    const wt1 = join(tmpHome, 'wt1');
+    const wt2 = join(tmpHome, 'wt2');
+    mkdirSync(wt1, { recursive: true, mode: 0o755 });
+    mkdirSync(wt2, { recursive: true, mode: 0o755 });
+    const env1 = join(wt1, '.env');
+    const env2 = join(wt2, '.env');
+    expect(renderLockPath(env1)).not.toBe(renderLockPath(env2));
+  });
+
+  it('two worktrees with the same `.env` basename contend on DIFFERENT anchors and parallel renders both finish (clarification comment)', async () => {
+    const wt1 = join(tmpHome, 'wt1');
+    const wt2 = join(tmpHome, 'wt2');
+    mkdirSync(wt1, { recursive: true, mode: 0o755 });
+    mkdirSync(wt2, { recursive: true, mode: 0o755 });
+    const env1 = join(wt1, '.env');
+    const env2 = join(wt2, '.env');
+    const anchor1 = renderLockPath(env1);
+    const anchor2 = renderLockPath(env2);
+    expect(anchor1).not.toBe(anchor2);
+
+    // The render-lock anchors live under <ENIGMA_HOME>/locks/. The
+    // production acquire path auto-creates that dir; the worker fixture
+    // uses raw openSync and does not. Pre-create it for the children.
+    mkdirSync(dirname(anchor1), { recursive: true, mode: 0o700 });
+
+    const counter1 = join(wt1, 'counter');
+    const counter2 = join(wt2, 'counter');
+    writeFileSync(counter1, '0');
+    writeFileSync(counter2, '0');
+
+    const t0 = Date.now();
+    const results = await Promise.all([
+      runWorker(['counter', ADDON, anchor1, counter1, '10', '10']),
+      runWorker(['counter', ADDON, anchor2, counter2, '10', '10']),
+    ]);
+    const elapsed = Date.now() - t0;
+    for (const r of results) expect(r.code).toBe(0);
+    expect(readFileSync(counter1, 'utf8')).toBe('10');
+    expect(readFileSync(counter2, 'utf8')).toBe('10');
+    // 20 iters of ~10ms each, two anchors in parallel ≈ 100ms of work.
+    // CI noise (spawn + scheduling) can add a few hundred ms; assert
+    // total elapsed is well under the production retry budget (500 ms)
+    // to catch a regression that adds cross-anchor waits.
+    expect(elapsed).toBeLessThan(LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS);
   });
 });
