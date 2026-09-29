@@ -62,7 +62,7 @@
 - **Storage vs delivery**: the depository is authoritative; `encrypted` stays the default (already the code default). `env` remains for compatibility, labelled "plaintext, this worktree only".
 - **Delivery**: a managed block in the worktree's `.env` (`# enigma:render:begin` / `# enigma:render:end`, distinct from the `env` depository's markers), written `0600` via temp file + rename, never read back.
 - **Render set**: every project-scoped secret for this repository in a no-prompt store (`encrypted`, `env`); globals are not rendered; optional `.enigma.json` `render` key narrows, retargets, or disables. Prompting stores are never auto-rendered; `enigma render NAME` renders one explicitly.
-- **Per-worktree axis**: a names-only ledger at `<config dir>/render-ledger.json` (`configDir()`, so `ENIGMA_HOME` redirects it like `index.json`) records render targets; the index keeps one entry per repository.
+- **Per-worktree axis**: a names-only ledger at `<config dir>/render-ledger.json` (`enigmaHome()` in `src/core/paths.ts`, so `ENIGMA_HOME` redirects it like `index.json`) records render targets; the index keeps one entry per repository.
 - **Triggers**: `enigma render`; SessionStart; set/rotate/remove/move fan-out using the value already in hand. No value-resolving call under `src/mcp/**` or `src/web/**`. Git `post-checkout` hook deferred (#105).
 - **Locking**: target files use the #66 native lock through a generic `acquireFileLock(path)`. The anchor lives under `<config dir>/locks/` and is named by a hash of the target's resolved absolute path — never its basename, because every worktree has its own `.env` at the same relative name and a basename key would make worktrees contend.
 - **Audit**: new op `render`, one line per name with the worktree path.
