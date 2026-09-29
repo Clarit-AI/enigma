@@ -1504,6 +1504,8 @@ import { basename as basename4, resolve as resolve4, sep } from "node:path";
 import { existsSync as existsSync8, statSync as statSync3 } from "node:fs";
 var DOTENV_EXEMPT = /* @__PURE__ */ new Set([".env.example"]);
 var BARE_ENV_DUMP_COMMANDS = /* @__PURE__ */ new Set(["env", "printenv"]);
+var TRANSPARENT_PREFIX_WORDS = /* @__PURE__ */ new Set(["time", "command"]);
+var ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
 var NON_READING_BASH_VERBS = /* @__PURE__ */ new Set(["rm", "mv", "touch", "chmod", "stat", "ls", "find", "test"]);
 var DOTENV_EXCLUDE_GLOB = "!.env*";
 var MAX_SUBSTITUTION_DEPTH = 10;
@@ -1684,32 +1686,41 @@ function segmentTargetsEnigmaConfigByPath(segment, cwd) {
   if (!head) return false;
   return rest.some((t) => tokenTargetsPath(t, (value) => targetsEnigmaConfig(value, cwd)));
 }
+function commandTokens(segment) {
+  const tokens = tokenize(segment);
+  let i = 0;
+  while (i < tokens.length) {
+    const token = tokens[i];
+    if (!ENV_ASSIGNMENT.test(token) && !TRANSPARENT_PREFIX_WORDS.has(token)) break;
+    i++;
+  }
+  return tokens.slice(i);
+}
 function segmentIsBareEnvDump(segment) {
-  const [head] = tokenize(segment);
+  const [head] = commandTokens(segment);
   return head !== void 0 && BARE_ENV_DUMP_COMMANDS.has(commandName(head));
 }
 function segmentIsEnigmaGetOrEnv(segment) {
-  const [head, sub] = tokenize(segment);
+  const [head, sub] = commandTokens(segment);
   return commandName(head ?? "") === "enigma" && (sub === "get" || sub === "env");
 }
 function segmentIsKeychainRead(segment) {
-  const [head, sub] = tokenize(segment);
+  const [head, sub] = commandTokens(segment);
   return commandName(head ?? "") === "security" && sub === "find-generic-password";
 }
 function segmentIsOpRead(segment) {
-  const [head, sub] = tokenize(segment);
+  const [head, sub] = commandTokens(segment);
   return commandName(head ?? "") === "op" && sub === "read";
 }
 function enigmaRunChild(segment) {
-  const tokens = tokenize(segment);
+  const tokens = commandTokens(segment);
   const head = commandName(tokens[0] ?? "");
   let runIndex;
   if (head === "enigma") {
     runIndex = 1;
   } else if (head === "node") {
-    let script = 1;
-    while (tokens[script]?.startsWith("-")) script++;
-    if (commandName(tokens[script] ?? "") !== "cli.mjs") return void 0;
+    const script = tokens.findIndex((t, i) => i > 0 && commandName(t) === "cli.mjs" && tokens[i + 1] === "run");
+    if (script === -1) return void 0;
     runIndex = script + 1;
   } else {
     return void 0;
@@ -1723,7 +1734,7 @@ function knownSecretNames() {
   return new Set(readIndex().entries.map((e) => e.name));
 }
 function segmentEchoesKnownSecret(segment, known) {
-  const [head] = tokenize(segment);
+  const [head] = commandTokens(segment);
   if (commandName(head ?? "") !== "echo") return void 0;
   const matches = [...segment.matchAll(/\$\{?([A-Za-z_][A-Za-z0-9_]*)\}?/g)].map((m) => m[1]);
   return matches.find((name) => name !== void 0 && known.has(name));

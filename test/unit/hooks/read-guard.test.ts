@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -666,6 +666,143 @@ describe('PreToolUse read-guard', () => {
     it('does not unwrap `sh -c` inside the child (same as a bare segment)', () => {
       expect(isDenied(bash("sh -c 'printenv OPENAI_API_KEY'"))).toBe(false);
       expect(isDenied(bash("enigma run -- sh -c 'printenv OPENAI_API_KEY'"))).toBe(false);
+    });
+  });
+
+  describe('bundled-CLI form is a `…/cli.mjs run` token pattern, with no filesystem check (Issue #96)', () => {
+    it.each<[string, string]>([
+      ['--env-file with a separate value', 'node --env-file cfg /any/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['--title with a separate value', 'node --title t /any/dist/cli.mjs run -- env'],
+      ['-r with a separate value', 'node -r ./pre.mjs /any/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['--require with a separate value', 'node --require ./pre.mjs /any/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['--import with a separate value', 'node --import ./pre.mjs /any/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['--watch-path with a separate value', 'node --watch-path p /any/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['several options, values and plain flags mixed', 'node --no-warnings --env-file cfg -r ./a.mjs /any/dist/cli.mjs run --only FOO -- env'],
+      ['--flag=value form', 'node --require=./pre.mjs /any/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['run flags before --', 'node /any/dist/cli.mjs run --only FOO -- printenv FOO'],
+      ['relative script', 'node ./dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['bare relative script', 'node cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['path to a nonexistent cli.mjs', 'node /nonexistent/nowhere/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['unexpanded variable in the path', 'node "$CLAUDE_PLUGIN_ROOT/dist/cli.mjs" run -- printenv OPENAI_API_KEY'],
+      ['a secret read as the child', 'node /any/dist/cli.mjs run -- enigma get FOO'],
+      ['assignment before node', 'FOO=1 node /any/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+    ])('denies: %s', (_label, command) => {
+      expect(isDenied(bash(command))).toBe(true);
+    });
+
+    it.each<[string, string]>([
+      ['ordinary child', 'node /any/dist/cli.mjs run -- npm run dev'],
+      ['ordinary child after options with values', 'node --env-file cfg /any/dist/cli.mjs run --only FOO -- node server.js'],
+      ['plain script', 'node server.js'],
+      ['plain script with an option value', 'node --require ./pre.mjs server.js'],
+      ['options only', 'node --require ./pre.mjs'],
+      ['another cli.mjs subcommand', 'node /any/dist/cli.mjs doctor'],
+      ['cli.mjs run with no child', 'node /any/dist/cli.mjs run'],
+      ['cli.mjs run with an empty child', 'node /any/dist/cli.mjs run --only FOO --'],
+      ['run is not right after cli.mjs', 'node /any/dist/cli.mjs list run -- npm start'],
+      // Not an Enigma-run wrapper, so the top-level rules alone decide, and none
+      // of them match `node …/other.mjs`. Pinned so a change here is deliberate.
+      ['a script that is not named cli.mjs', 'node /any/dist/other.mjs run -- printenv OPENAI_API_KEY'],
+    ])('allows: %s', (_label, command) => {
+      expect(isDenied(bash(command))).toBe(false);
+    });
+
+    describe('nothing on disk changes the answer', () => {
+      let root: string;
+
+      beforeEach(() => {
+        root = mkdtempSync(join(tmpdir(), 'enigma-bundles-'));
+      });
+
+      afterEach(() => {
+        rmSync(root, { recursive: true, force: true });
+      });
+
+      function plant(name: string, manifest: string | null, withCli = true): string {
+        const dist = join(root, name, 'dist');
+        mkdirSync(dist, { recursive: true });
+        if (withCli) writeFileSync(join(dist, 'cli.mjs'), '');
+        if (manifest !== null) {
+          mkdirSync(join(root, name, '.claude-plugin'), { recursive: true });
+          writeFileSync(join(root, name, '.claude-plugin', 'plugin.json'), manifest);
+        }
+        return join(dist, 'cli.mjs');
+      }
+
+      it.each<[string, string, boolean]>([
+        ['a bundle whose manifest names enigma', JSON.stringify({ name: 'enigma' }), true],
+        ['a bundle whose manifest names another plugin', JSON.stringify({ name: 'other-tool' }), true],
+        ['a bundle whose manifest has no name', JSON.stringify({ version: '1.0.0' }), true],
+        ['a bundle with an unparseable manifest', '{ not json', true],
+        ['a bundle with no manifest', '', true],
+        ['a foreign manifest beside a missing cli.mjs', JSON.stringify({ name: 'other-tool' }), false],
+      ])('denies %s', (_label, manifest, withCli) => {
+        const cli = plant('bundle', manifest === '' ? null : manifest, withCli);
+        expect(isDenied(bash(`node ${cli} run -- printenv OPENAI_API_KEY`))).toBe(true);
+      });
+
+      it('denies a foreign dist/cli.mjs that is a symlink to another file', () => {
+        const target = plant('real', JSON.stringify({ name: 'enigma' }));
+        const foreign = plant('linked', JSON.stringify({ name: 'other-tool' }), false);
+        symlinkSync(target, foreign);
+        expect(isDenied(bash(`node ${foreign} run -- printenv OPENAI_API_KEY`))).toBe(true);
+      });
+
+      it('gives the same answer for a relative script whatever the hook cwd is', () => {
+        plant('bundle', JSON.stringify({ name: 'enigma' }));
+        const command = 'node dist/cli.mjs run -- printenv OPENAI_API_KEY';
+        expect(isDenied(bash(command, join(root, 'bundle')))).toBe(true);
+        expect(isDenied(bash(command, root))).toBe(true);
+      });
+    });
+  });
+
+  describe('leading NAME=value / time / command prefixes (Issue #96)', () => {
+    it.each<[string, string]>([
+      ['assignment before printenv', 'FOO=1 printenv OPENAI_API_KEY'],
+      ['assignment before env', 'FOO=1 env'],
+      ['two assignments', 'FOO=1 BAR=2 printenv OPENAI_API_KEY'],
+      ['quoted assignment value', 'FOO="a b" printenv OPENAI_API_KEY'],
+      ['time before printenv', 'time printenv OPENAI_API_KEY'],
+      ['command before printenv', 'command printenv OPENAI_API_KEY'],
+      ['mixed prefixes', 'FOO=1 time command printenv OPENAI_API_KEY'],
+      ['prefix later in a chain', 'cd /repo && FOO=1 printenv OPENAI_API_KEY'],
+      ['prefix inside a command substitution', 'echo "$(FOO=1 printenv OPENAI_API_KEY)"'],
+      ['assignment before enigma get', 'FOO=1 enigma get OPENAI_API_KEY'],
+      ['time before keychain read', 'time security find-generic-password -s x -w'],
+      ['assignment before op read', 'FOO=1 op read op://vault/item/field'],
+      ['assignment before echoing a known secret', 'FOO=1 echo $OPENAI_API_KEY'],
+      ['assignment before enigma run', 'FOO=1 enigma run -- printenv OPENAI_API_KEY'],
+      ['time before enigma run', 'time enigma run -- printenv OPENAI_API_KEY'],
+      ['prefix on the enigma run child', 'enigma run -- FOO=1 printenv OPENAI_API_KEY'],
+      ['prefixes on both parent and child', 'FOO=1 enigma run -- time printenv OPENAI_API_KEY'],
+      ['assignment before the bundled-CLI form', 'FOO=1 node /plugin/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['prefix on a nested enigma run', 'enigma run -- FOO=1 enigma run -- env'],
+    ])('denies: %s', (_label, command) => {
+      expect(isDenied(bash(command))).toBe(true);
+    });
+
+    it.each<[string, string]>([
+      ['assignment before an ordinary command', 'FOO=1 npm run dev'],
+      ['time before an ordinary command', 'time npm test'],
+      ['command -v lookup', 'command -v printenv'],
+      ['assignment before enigma run, ordinary child', 'FOO=1 enigma run -- npm run dev'],
+      ['prefix on an ordinary enigma run child', 'enigma run -- FOO=1 npm run dev'],
+      ['only assignments, no command', 'FOO=1 BAR=2'],
+      ['assignment before an ordinary enigma subcommand', 'FOO=1 enigma list'],
+      ['assignment before echoing an untracked name', 'FOO=1 echo $HOME'],
+    ])('allows: %s', (_label, command) => {
+      expect(isDenied(bash(command))).toBe(false);
+    });
+
+    // Decision recorded in Issue #96: only NAME=value, `time` and `command` are
+    // skipped. These wrap the command in something that takes its own options,
+    // which would make this a shell parser. Pinned, not silently missed, exactly
+    // like the `sh -c` gap above.
+    it('does not strip sudo, npx or nohup (accepted gap)', () => {
+      expect(isDenied(bash('sudo printenv OPENAI_API_KEY'))).toBe(false);
+      expect(isDenied(bash('npx printenv OPENAI_API_KEY'))).toBe(false);
+      expect(isDenied(bash('nohup printenv OPENAI_API_KEY'))).toBe(false);
     });
   });
 
