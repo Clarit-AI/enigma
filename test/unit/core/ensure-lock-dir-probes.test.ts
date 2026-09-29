@@ -276,4 +276,45 @@ describe('ensureLockDir path containment — round-2 review H1 / B1 (BLOCKING re
       lock.release();
     }
   });
+
+  // `link/..` is resolved by the kernel AFTER following `link`, unlike
+  // path.join/resolve and the JS realpathSync, which collapse it lexically
+  // first. Paths are built by string concatenation to keep the `..` (review r6).
+  it('`<outside>/alias/../new/leaf` with alias -> <home>/nested creates <home>/new and <home>/new/leaf at 0700', () => {
+    const home = freshHome('alias-dotdot-in');
+    process.env.ENIGMA_HOME = home;
+    mkdirSync(join(home, 'nested'));
+    const outside = mkdtempSync(join(tmpdir(), 'enigma-alias-dotdot-'));
+    scratchHomes.push(outside);
+    const alias = join(outside, 'alias');
+    symlinkSync(join(home, 'nested'), alias);
+
+    const lock = acquireFileLock(`${alias}/../new/leaf/lockfile`);
+    try {
+      expect(statSync(join(home, 'new')).mode & 0o777).toBe(0o700);
+      expect(statSync(join(home, 'new', 'leaf')).mode & 0o777).toBe(0o700);
+      expect(existsSync(join(outside, 'new'))).toBe(false);
+    } finally {
+      lock.release();
+    }
+  });
+
+  it('`<home>/bridge/../new` with bridge -> <outside>/nested leaves the new outside dir at the umask default', () => {
+    const home = freshHome('bridge-dotdot-out');
+    process.env.ENIGMA_HOME = home;
+    const outside = mkdtempSync(join(tmpdir(), 'enigma-bridge-dotdot-'));
+    scratchHomes.push(outside);
+    mkdirSync(join(outside, 'nested'));
+    symlinkSync(join(outside, 'nested'), join(home, 'bridge'));
+    const control = join(outside, 'control');
+    mkdirSync(control);
+
+    const lock = acquireFileLock(`${home}/bridge/../new/lockfile`);
+    try {
+      expect(existsSync(join(home, 'new'))).toBe(false);
+      expect(statSync(join(outside, 'new')).mode & 0o777).toBe(statSync(control).mode & 0o777);
+    } finally {
+      lock.release();
+    }
+  });
 });
