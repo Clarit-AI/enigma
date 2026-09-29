@@ -429,7 +429,7 @@ import { resolve as resolve4 } from "node:path";
 
 // src/core/file-lock.ts
 import { chmodSync as chmodSync2, closeSync, ftruncateSync, mkdirSync as mkdirSync2, openSync, realpathSync as realpathSync2, writeSync } from "node:fs";
-import { dirname as dirname5, isAbsolute, relative, resolve as resolve3, sep } from "node:path";
+import { basename as basename4, dirname as dirname5, isAbsolute, join as join4, relative, resolve as resolve3, sep } from "node:path";
 
 // src/core/native-lock.ts
 import { createRequire } from "node:module";
@@ -508,7 +508,7 @@ function syncSleep(ms) {
 function ensureLockDir(lockPath) {
   const dir = dirname5(lockPath);
   try {
-    const underHome = isWithin(resolve3(enigmaHome()), resolve3(dir));
+    const underHome = isWithin(physicalPath(enigmaHome()), physicalPath(dir));
     mkdirSync2(dir, underHome ? { recursive: true, mode: 448 } : { recursive: true });
   } catch {
   }
@@ -529,6 +529,20 @@ function realInsideEnigmaHome(dir) {
     return void 0;
   }
   return isWithin(realHome, realDir) ? realDir : void 0;
+}
+function physicalPath(p) {
+  const tail = [];
+  let cur = resolve3(p);
+  for (; ; ) {
+    try {
+      return join4(realpathSync2(cur), ...tail);
+    } catch {
+      const parent = dirname5(cur);
+      if (parent === cur) return resolve3(p);
+      tail.unshift(basename4(cur));
+      cur = parent;
+    }
+  }
 }
 function isWithin(parent, child) {
   const rel = relative(parent, child);
@@ -889,7 +903,7 @@ var encryptedDepositoryModule = {
 
 // src/storage/depositories/env.ts
 import { existsSync as existsSync6, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
-import { join as join4 } from "node:path";
+import { join as join5 } from "node:path";
 var BEGIN_MARKER = "# enigma:begin";
 var END_MARKER = "# enigma:end";
 var FILE_MODE3 = 384;
@@ -964,7 +978,7 @@ function removeManagedValue(content, name) {
   return newLines.join(eol);
 }
 function checkEnvGitignore(projectPath) {
-  const gitignorePath = join4(projectPath, ".gitignore");
+  const gitignorePath = join5(projectPath, ".gitignore");
   if (!existsSync6(gitignorePath)) {
     return [".env is not gitignored: no .gitignore file found in this project"];
   }
@@ -988,7 +1002,7 @@ function requireProjectPath(ctx) {
   return ctx.projectPath;
 }
 function createEnvDepository(ctx) {
-  const envFilePath = join4(requireProjectPath(ctx), ".env");
+  const envFilePath = join5(requireProjectPath(ctx), ".env");
   const readEnvFile = () => existsSync6(envFilePath) ? readFileSync4(envFilePath, "utf8") : "";
   return {
     id: "env",
@@ -1372,7 +1386,7 @@ var macosKeychainDepositoryModule = {
 
 // src/storage/depositories/onepassword.ts
 import { execFile as execFile3 } from "node:child_process";
-import { basename as basename4 } from "node:path";
+import { basename as basename5 } from "node:path";
 var OP_BIN = "op";
 var VAULT = "Enigma";
 var MIN_MAJOR_VERSION = 2;
@@ -1478,7 +1492,7 @@ function buildTitle(ref, ctx) {
   const name = nameFromRef(ref);
   const isGlobal = ref === name || ref.startsWith("global/");
   if (isGlobal || !ctx.projectPath) return name;
-  return `${name} \xB7 ${basename4(ctx.projectPath)}`;
+  return `${name} \xB7 ${basename5(ctx.projectPath)}`;
 }
 function itemTemplate(title, value) {
   return JSON.stringify({
@@ -1901,7 +1915,7 @@ import {
   statSync as statSync2,
   symlinkSync
 } from "node:fs";
-import { basename as basename5, delimiter, dirname as dirname6, isAbsolute as isAbsolute2, join as join5, resolve as resolve5 } from "node:path";
+import { basename as basename6, delimiter, dirname as dirname6, isAbsolute as isAbsolute2, join as join6, resolve as resolve5 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/core/version.ts
@@ -1931,11 +1945,11 @@ function isWritableDir(dir) {
 }
 function readBundleManifest(cli) {
   try {
-    if (basename5(cli) !== "cli.mjs") return null;
+    if (basename6(cli) !== "cli.mjs") return null;
     const dist = dirname6(cli);
-    if (basename5(dist) !== "dist") return null;
+    if (basename6(dist) !== "dist") return null;
     const root = dirname6(dist);
-    const manifest = JSON.parse(readFileSync5(join5(root, ".claude-plugin", "plugin.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync5(join6(root, ".claude-plugin", "plugin.json"), "utf8"));
     if (typeof manifest !== "object" || manifest === null) return null;
     const { name, version } = manifest;
     return { name: typeof name === "string" ? name : null, version: typeof version === "string" ? version : null, root };
@@ -2062,7 +2076,7 @@ function ensureCliShim(options = {}) {
     const write = options.write !== false;
     let firstFree = null;
     for (const dir of dirs) {
-      const dest = join5(dir, "enigma");
+      const dest = join6(dir, "enigma");
       const { slot, link, detail: slotDetail } = classify(dest, cli);
       if (slot === "ours") return { status: "present", target: dest, cli, link, detail: null };
       if (slot === "foreign") {
@@ -2214,7 +2228,7 @@ async function cmdGet(argv) {
 
 // src/cli/commands/import.ts
 import { existsSync as existsSync11, readFileSync as readFileSync7 } from "node:fs";
-import { isAbsolute as isAbsolute3, join as join6 } from "node:path";
+import { isAbsolute as isAbsolute3, join as join7 } from "node:path";
 
 // src/request/store.ts
 import { randomBytes as randomBytes3 } from "node:crypto";
@@ -5799,7 +5813,7 @@ async function cmdImport(argv) {
   if (positionals.length > 1) throw new UsageError(USAGE3);
   const cwd = process.cwd();
   const projectPath = findProjectPath(cwd);
-  const absPath = isAbsolute3(pathArg) ? pathArg : join6(cwd, pathArg);
+  const absPath = isAbsolute3(pathArg) ? pathArg : join7(cwd, pathArg);
   if (!existsSync11(absPath)) {
     throw new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` });
   }
@@ -5853,13 +5867,13 @@ async function cmdImport(argv) {
 // src/cli/commands/install.ts
 import { existsSync as existsSync12, mkdirSync as mkdirSync3, readFileSync as readFileSync8, renameSync as renameSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname7, join as join7 } from "node:path";
+import { dirname as dirname7, join as join8 } from "node:path";
 var MARKETPLACE_NAME = "clarit-enigma";
 var REPO = "Clarit-AI/enigma";
 var PLUGIN_ENTRY = `enigma@${MARKETPLACE_NAME}`;
 function claudeSettingsPath() {
-  const configDir = process.env.CLAUDE_CONFIG_DIR || join7(homedir2(), ".claude");
-  return join7(configDir, "settings.json");
+  const configDir = process.env.CLAUDE_CONFIG_DIR || join8(homedir2(), ".claude");
+  return join8(configDir, "settings.json");
 }
 var DEFAULT_STYLE = { indent: "  ", trailingNewline: true, eol: "\n" };
 function detectStyle(raw) {
