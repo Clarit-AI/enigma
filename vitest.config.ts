@@ -15,6 +15,12 @@ export default defineConfig({
     // check that still runs even when vitest itself was resolved via a bare
     // `npx vitest` falling back to a cached/global install. See
     // scripts/vitest-toolchain-guard.mjs.
-    globalSetup: ['./scripts/vitest-toolchain-guard.mjs'],
+    // Issue #106: the render-ledger concurrency test spawns a worker
+    // fixture (`test/fixtures/ledger-worker.ts`) that calls the real
+    // `upsertTarget`/`removeNames` code. The fixture is TypeScript and
+    // depends on `.js`-extension imports that Node's loader cannot
+    // resolve under `--experimental-strip-types`; we bundle it to
+    // `test/fixtures/ledger-worker.mjs` first via esbuild.
+    globalSetup: ['./scripts/build-ledger-fixture.mjs', './scripts/vitest-toolchain-guard.mjs'],
   },
 });
