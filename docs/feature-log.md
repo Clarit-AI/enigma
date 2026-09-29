@@ -2,6 +2,26 @@
 
 ## Completed
 
+### Unreleased — targeting `v0.3.2`
+
+- Read-guard checks the child of `enigma run [flags] -- <child>` (and the
+  bundled `node …/cli.mjs run` form the denial text recommends) through the
+  same per-segment rules as a top-level segment, so `enigma run -- printenv X`
+  is denied like `printenv X` (PR #95 / Issue #92, 2026-09-28). `sh -c` /
+  `bash -c` is not unwrapped, with or without `enigma run`.
+- PATH shim fixes (PR #98 / Issue #94, 2026-09-28): `enigma_doctor` no longer
+  reports `enigma` on PATH when the shim is disabled or unavailable; a working
+  link to a strictly older Enigma plugin bundle is re-pointed (semver
+  precedence, prereleases included), while same-version, newer or unrelated
+  targets report occupied; directories writable by the world are never shim
+  locations; realpaths are compared so a symlinked plugin root still counts as
+  present; read-only doctor reports a distinct `stale` status.
+- Read-guard follow-ups from #95 (Issue #96): node options that take a
+  separate value are skipped when locating the bundled CLI; `node <script> run`
+  is recognised only for an Enigma plugin bundle (unresolvable scripts still
+  deny); leading `NAME=value`, `time` and `command` are skipped before the
+  command head at top level and on the `enigma run` child.
+
 ### `v0.3.0` — shipped 2026-09-24 as `enigma--v0.3.0` (PR #86)
 
 Repo-level project identity, durable index-write serialization, and the
