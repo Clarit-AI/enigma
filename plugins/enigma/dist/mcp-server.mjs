@@ -43106,6 +43106,9 @@ function syncSleep(ms) {
 }
 function ensureLockDir(lockPath) {
   const dir = dirname5(lockPath);
+  const home = enigmaHome();
+  const insideHome = dir === home || dir.startsWith(`${home}/`);
+  if (!insideHome) return;
   try {
     mkdirSync2(dir, { recursive: true, mode: 448 });
     chmodSync2(dir, 448);
@@ -43142,7 +43145,7 @@ ${Date.now()}
   } catch {
   }
 }
-function acquireFileLock(lockPath) {
+function acquireFileLock(lockPath, label = "the lock") {
   ensureLockDir(lockPath);
   const addon = loadIndexLock();
   const fd = openAnchor(lockPath);
@@ -43167,7 +43170,7 @@ function acquireFileLock(lockPath) {
     }
     throw new EnigmaError({
       code: "E_LOCK_TIMEOUT",
-      message: `Could not acquire ${lockPath} within ${LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS} ms; another process holds the lock.`
+      message: `Could not acquire ${lockPath} within ${LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS} ms; another process holds ${label}.`
     });
   } catch (err) {
     try {
@@ -43234,8 +43237,11 @@ function listIndexEntries(index, opts = {}) {
     return { ...entry, shadowed: Boolean(shadowedBy) };
   });
 }
+function acquireIndexLock() {
+  return acquireFileLock(indexLockPath(), "the index lock");
+}
 function mutateIndex(delta) {
-  const lock = acquireFileLock(indexLockPath());
+  const lock = acquireIndexLock();
   try {
     const current = readIndex();
     const next = delta(current);
