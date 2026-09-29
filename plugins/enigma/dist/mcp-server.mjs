@@ -42175,6 +42175,9 @@ var StdioServerTransport = class {
   }
 };
 
+// src/core/version.ts
+var ENIGMA_VERSION = true ? "0.3.1" : "unknown";
+
 // src/core/errors.ts
 var EnigmaError = class _EnigmaError extends Error {
   code;
@@ -44627,7 +44630,7 @@ function classify(dest, cli) {
     if (realLink === realCli) return { slot: "ours", link };
     const other = readBundleManifest(realLink);
     if (other?.name === "enigma") {
-      if (isOlder(other.version, readBundleManifest(realCli)?.version ?? null)) return { slot: "stale", link };
+      if (isOlder(other.version, readBundleManifest(realCli)?.version ?? ENIGMA_VERSION)) return { slot: "stale", link };
       return {
         slot: "foreign",
         link,
@@ -48500,7 +48503,7 @@ Open this link to reveal ${args.name}.`);
 
 // src/mcp/server.ts
 function createServer2() {
-  const server = new McpServer({ name: "enigma", version: "0.3.1" });
+  const server = new McpServer({ name: "enigma", version: ENIGMA_VERSION });
   registerListTool(server);
   registerRequestTool(server);
   registerAwaitTool(server);

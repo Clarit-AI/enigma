@@ -1,8 +1,11 @@
 #!/usr/bin/env node
-import { chmodSync } from 'node:fs';
+import { chmodSync, readFileSync } from 'node:fs';
 import * as esbuild from 'esbuild';
 
 const OUT_DIR = 'plugins/enigma/dist';
+
+// Embedded in every bundle as `ENIGMA_VERSION` (src/core/version.ts).
+const { version } = JSON.parse(readFileSync('package.json', 'utf8'));
 
 const entries = [
   { name: 'mcp-server', entry: 'src/mcp/server.ts' },
@@ -20,6 +23,7 @@ for (const { name, entry, executable } of entries) {
     format: 'esm',
     target: 'node20',
     loader: { '.html': 'text' },
+    define: { __ENIGMA_VERSION__: JSON.stringify(version) },
     ...(executable ? { banner: { js: '#!/usr/bin/env node' } } : {}),
   });
   if (executable) chmodSync(outfile, 0o755);

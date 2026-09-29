@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { describeShim, ensureCliShim } from '../../../src/core/shim.js';
+import { ENIGMA_VERSION } from '../../../src/core/version.js';
 
 // The shim exists because a marketplace install leaves the bundled CLI off
 // PATH, which makes read-guard's own remediation advice ("use enigma run")
@@ -160,6 +161,41 @@ describe('PATH shim', () => {
 
       expect(ensureCliShim({ pluginRoot, pathEnv: binDir }).status).toBe('repointed');
       expect(readlinkSync(join(binDir, 'enigma'))).toBe(cli);
+    });
+
+    // Issue #99: the npm-bin layout has no `.claude-plugin/plugin.json` beside
+    // `dist/cli.mjs`, so the running bundle's version is the one embedded at
+    // build time (ENIGMA_VERSION), not a manifest read.
+    describe('when the running CLI has no manifest beside it', () => {
+      beforeEach(() => {
+        rmSync(join(pluginRoot, '.claude-plugin'), { recursive: true, force: true });
+      });
+
+      it('re-points an older linked bundle, judging by the embedded version', () => {
+        const older = makePlugin(join(tmp, 'older-plugin'), 'enigma', '0.0.1');
+        symlinkSync(older, join(binDir, 'enigma'));
+
+        const result = ensureCliShim({ pluginRoot, pathEnv: binDir });
+
+        expect(result.status).toBe('repointed');
+        expect(readlinkSync(join(binDir, 'enigma'))).toBe(cli);
+      });
+
+      it('leaves a newer linked bundle alone', () => {
+        const newer = makePlugin(join(tmp, 'newer-plugin'), 'enigma', '999.0.0');
+        symlinkSync(newer, join(binDir, 'enigma'));
+
+        expect(ensureCliShim({ pluginRoot, pathEnv: binDir }).status).toBe('occupied');
+        expect(readlinkSync(join(binDir, 'enigma'))).toBe(newer);
+      });
+
+      it('leaves a linked bundle at the embedded version alone', () => {
+        const same = makePlugin(join(tmp, 'same-plugin'), 'enigma', ENIGMA_VERSION);
+        symlinkSync(same, join(binDir, 'enigma'));
+
+        expect(ensureCliShim({ pluginRoot, pathEnv: binDir }).status).toBe('occupied');
+        expect(readlinkSync(join(binDir, 'enigma'))).toBe(same);
+      });
     });
 
     it('orders versions numerically, not as text (1.10.0 is newer than 1.9.0)', () => {

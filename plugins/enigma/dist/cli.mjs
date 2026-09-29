@@ -1873,6 +1873,11 @@ import {
 } from "node:fs";
 import { basename as basename4, delimiter, dirname as dirname5, isAbsolute, join as join5, resolve as resolve4 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
+
+// src/core/version.ts
+var ENIGMA_VERSION = true ? "0.3.1" : "unknown";
+
+// src/core/shim.ts
 function pathDirs(pathEnv) {
   const seen = /* @__PURE__ */ new Set();
   const dirs = [];
@@ -1972,7 +1977,7 @@ function classify(dest, cli) {
     if (realLink === realCli) return { slot: "ours", link };
     const other = readBundleManifest(realLink);
     if (other?.name === "enigma") {
-      if (isOlder(other.version, readBundleManifest(realCli)?.version ?? null)) return { slot: "stale", link };
+      if (isOlder(other.version, readBundleManifest(realCli)?.version ?? ENIGMA_VERSION)) return { slot: "stale", link };
       return {
         slot: "foreign",
         link,
