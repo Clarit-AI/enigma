@@ -1,6 +1,11 @@
+import { readFileSync } from 'node:fs';
 import { defineConfig } from 'vitest/config';
 
+// Same define scripts/build.mjs gives the bundles (src/core/version.ts).
+const { version } = JSON.parse(readFileSync('./package.json', 'utf8'));
+
 export default defineConfig({
+  define: { __ENIGMA_VERSION__: JSON.stringify(version) },
   test: {
     environment: 'node',
     include: ['test/**/*.test.ts'],

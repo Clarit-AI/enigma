@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runReadGuard } from '../../../src/hooks/read-guard.js';
 import { indexPath } from '../../../src/core/paths.js';
 import type { IndexEntry, IndexFile } from '../../../src/core/index-store.js';
@@ -61,10 +61,17 @@ describe('PreToolUse read-guard', () => {
     tmpHome = mkdtempSync(join(tmpdir(), 'enigma-home-'));
     originalHome = process.env.ENIGMA_HOME;
     process.env.ENIGMA_HOME = tmpHome;
+    // Denial text embeds `runHint()`, which reports the bundled-CLI path when a
+    // plugin root with a CLI bundle is visible and the PATH shim is absent.
+    // Point CLAUDE_PLUGIN_ROOT at a directory with no bundle so the expected
+    // `enigma run -- <command>` form does not depend on the ambient environment.
+    vi.stubEnv('CLAUDE_PLUGIN_ROOT', join(tmpHome, 'no-plugin'));
+    vi.stubEnv('ENIGMA_NO_PATH_SHIM', '');
     seedIndex(['OPENAI_API_KEY']);
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     if (originalHome === undefined) delete process.env.ENIGMA_HOME;
     else process.env.ENIGMA_HOME = originalHome;
     rmSync(tmpHome, { recursive: true, force: true });

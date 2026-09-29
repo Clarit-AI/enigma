@@ -52,6 +52,7 @@ import {
 } from 'node:fs';
 import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { ENIGMA_VERSION } from './version.js';
 
 export type ShimStatus =
   /** The symlink did not exist and now does. */
@@ -223,14 +224,15 @@ function classify(dest: string, cli: string): { slot: Slot; link: string | null;
   // ours. Anything else that resolves is only replaceable when it is provably a
   // STRICTLY OLDER Enigma plugin bundle; a real `enigma` binary, a same-version
   // or newer Enigma install, and a bundle whose version cannot be compared are
-  // never touched.
+  // never touched. The current version is the current manifest's, else the one
+  // embedded at build time: the npm-bin layout has no manifest beside the CLI.
   try {
     const realLink = realpathSync(link);
     const realCli = realpathSync(cli);
     if (realLink === realCli) return { slot: 'ours', link };
     const other = readBundleManifest(realLink);
     if (other?.name === 'enigma') {
-      if (isOlder(other.version, readBundleManifest(realCli)?.version ?? null)) return { slot: 'stale', link };
+      if (isOlder(other.version, readBundleManifest(realCli)?.version ?? ENIGMA_VERSION)) return { slot: 'stale', link };
       return {
         slot: 'foreign',
         link,

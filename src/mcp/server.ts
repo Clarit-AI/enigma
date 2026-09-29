@@ -2,6 +2,7 @@ import { realpathSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { ENIGMA_VERSION } from '../core/version.js';
 import { registerAwaitTool } from './tools/await.js';
 import { registerDoctorTool } from './tools/doctor.js';
 import { registerImportTool } from './tools/import.js';
@@ -16,7 +17,7 @@ import { registerRevealTool } from './tools/reveal.js';
  * (ADR-001) — every tool's result is `{content:[{type:'text',...}], isError?}`.
  */
 export function createServer(): McpServer {
-  const server = new McpServer({ name: 'enigma', version: '0.3.1' });
+  const server = new McpServer({ name: 'enigma', version: ENIGMA_VERSION });
   registerListTool(server);
   registerRequestTool(server);
   registerAwaitTool(server);
