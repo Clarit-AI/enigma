@@ -33,7 +33,10 @@ consumer to update, and cutting a plugin tag doesn't require an npm publish.
    committed per release (ADR-006) — both channels ship the pre-bundled
    output, never a build step on the consumer's machine. CI (`ci.yml`) and
    the release workflow both fail the build if `dist/` doesn't match its
-   committed source, so this step is not optional.
+   committed source, so this step is not optional. The build embeds
+   `package.json`'s version in every bundle (`ENIGMA_VERSION`,
+   `src/core/version.ts`, used by the MCP server and the PATH shim), so no
+   source file carries a version to bump by hand.
 3. Commit everything. Both `claude plugin tag` and the release workflow's
    drift check require a clean tree / a tag that points at what's actually
    committed.
