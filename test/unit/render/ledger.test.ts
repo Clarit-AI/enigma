@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { EnigmaError } from '../../../src/core/errors.js';
 import { renderLedgerPath, renderLockPath } from '../../../src/core/paths.js';
+import { acquireFileLock } from '../../../src/core/file-lock.js';
 import {
   readLedger,
   removeNames,
@@ -53,7 +54,26 @@ describe('render ledger (Issue #106)', () => {
     expect(ledger.targets[0]?.names).toEqual(['OPENAI_API_KEY']);
 
     expect(statSync(renderLedgerPath()).mode & 0o777).toBe(0o600);
-    expect(statSync(join(tmpHome)).mode & 0o777).toBe(0o700);
+    // Assert mode on a NESTED dir that `ensureLockDir` actually
+    // tightened — NOT on the mkdtemp root, whose mode the system
+    // picks and we never touch. Pre-create `<ENIGMA_HOME>/locks/` at
+    // 0755, then exercise the per-target lock path: `ensureLockDir`
+    // must tighten it to 0700 (inside-enigmaHome path).
+    const nestedDir = join(tmpHome, 'locks');
+    mkdirSync(nestedDir, { recursive: true, mode: 0o755 });
+    expect(statSync(nestedDir).mode & 0o777).toBe(0o755);
+    // Exercise the render-target lock helper on a fresh nested path:
+    // `acquireFileLock` calls `ensureLockDir` on the locks/ subdir,
+    // which lives inside enigmaHome() and so is tightened to 0700.
+    // `renderLockPath` requires the target's parent to exist.
+    mkdirSync(join(tmpHome, 'sub'), { recursive: true, mode: 0o755 });
+    const lockPath = renderLockPath(join(tmpHome, 'sub', '.env'));
+    const l = acquireFileLock(lockPath);
+    try {
+      expect(statSync(nestedDir).mode & 0o777).toBe(0o700);
+    } finally {
+      l.release();
+    }
   });
 
   it('merges names sorted-unique on the same (projectId, worktree, file) key and refreshes renderedAt', () => {
@@ -99,6 +119,24 @@ describe('render ledger (Issue #106)', () => {
     expect(byFile['/wt2/.env']).toEqual(['D']);
   });
 
+  it('removeNames persists a PARTIAL removal — same target count, but the names list shrank (regression for QA C1 / codex blocking)', () => {
+    // The pre-fix bug returned early when the target count was unchanged,
+    // so `upsert [A,B]` followed by `removeNames([A])` left `[A,B]` on
+    // disk. This test fails on the pre-fix code.
+    upsertTarget({ projectId: 'proj-a', worktree: '/wt', file: '/wt/.env', names: ['A', 'B'] });
+    upsertTarget({ projectId: 'proj-a', worktree: '/wt2', file: '/wt2/.env', names: ['C'] });
+
+    removeNames(['A']);
+
+    const ledger = readLedger();
+    // /wt/.env → ['B']; /wt2/.env → ['C'] (untouched). Two targets, but
+    // /wt/.env's names changed — that must persist.
+    expect(ledger.targets).toHaveLength(2);
+    const byFile = Object.fromEntries(ledger.targets.map((t) => [t.file, t.names]));
+    expect(byFile['/wt/.env']).toEqual(['B']);
+    expect(byFile['/wt2/.env']).toEqual(['C']);
+  });
+
   it('removeNames is a no-op when the input is empty or no target carries the name', () => {
     upsertTarget({ projectId: 'proj-a', worktree: '/wt', file: '/wt/.env', names: ['A'] });
     const before = readLedger();
@@ -135,6 +173,74 @@ describe('render ledger (Issue #106)', () => {
     try {
       readLedger();
       expect.unreachable('readLedger should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(EnigmaError);
+      expect((err as EnigmaError).code).toBe('E_CONFIG_CORRUPT');
+      expect((err as EnigmaError).message).toContain(renderLedgerPath());
+    }
+  });
+
+  it('wrong-shape JSON: empty object surfaces E_CONFIG_CORRUPT naming the path', () => {
+    writeFileSync(renderLedgerPath(), '{}');
+    try {
+      readLedger();
+      expect.unreachable('empty-object ledger should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(EnigmaError);
+      expect((err as EnigmaError).code).toBe('E_CONFIG_CORRUPT');
+      expect((err as EnigmaError).message).toContain(renderLedgerPath());
+    }
+  });
+
+  it('wrong-shape JSON: top-level array surfaces E_CONFIG_CORRUPT naming the path', () => {
+    writeFileSync(renderLedgerPath(), '[]');
+    try {
+      readLedger();
+      expect.unreachable('top-level array ledger should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(EnigmaError);
+      expect((err as EnigmaError).code).toBe('E_CONFIG_CORRUPT');
+      expect((err as EnigmaError).message).toContain(renderLedgerPath());
+    }
+  });
+
+  it('wrong-shape JSON: missing targets array surfaces E_CONFIG_CORRUPT naming the path', () => {
+    writeFileSync(renderLedgerPath(), JSON.stringify({ version: 1 }));
+    try {
+      readLedger();
+      expect.unreachable('missing-targets ledger should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(EnigmaError);
+      expect((err as EnigmaError).code).toBe('E_CONFIG_CORRUPT');
+      expect((err as EnigmaError).message).toContain(renderLedgerPath());
+    }
+  });
+
+  it('unknown version surfaces E_CONFIG_CORRUPT with the version named in the message', () => {
+    writeFileSync(renderLedgerPath(), JSON.stringify({ version: 2, targets: [] }));
+    try {
+      readLedger();
+      expect.unreachable('unknown-version ledger should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(EnigmaError);
+      expect((err as EnigmaError).code).toBe('E_CONFIG_CORRUPT');
+      expect((err as EnigmaError).message).toContain(renderLedgerPath());
+      // Version explicitly named so the operator can see what's wrong.
+      expect((err as EnigmaError).message).toContain('2');
+    }
+  });
+
+  it('a target with missing fields surfaces E_CONFIG_CORRUPT naming the path', () => {
+    writeFileSync(
+      renderLedgerPath(),
+      JSON.stringify({
+        version: 1,
+        targets: [{ projectId: 'proj-a', worktree: '/wt', file: '/wt/.env' /* names + renderedAt missing */ }],
+      }),
+    );
+    try {
+      readLedger();
+      expect.unreachable('incomplete-target ledger should have thrown');
     } catch (err) {
       expect(err).toBeInstanceOf(EnigmaError);
       expect((err as EnigmaError).code).toBe('E_CONFIG_CORRUPT');

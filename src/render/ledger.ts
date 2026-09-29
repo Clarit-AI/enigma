@@ -35,6 +35,7 @@
 import { acquireFileLock } from '../core/file-lock.js';
 import { renderLedgerLockPath, renderLedgerPath } from '../core/paths.js';
 import { readJsonFile, writeJsonFileAtomic } from '../core/secure-file.js';
+import { EnigmaError } from '../core/errors.js';
 
 /** One rendered target: a (projectId, worktree, file) row carrying the names written there. */
 export interface RenderLedgerTarget {
@@ -96,8 +97,9 @@ function mergeNames(existing: readonly string[], incoming: readonly string[]): s
 
 /**
  * Read the ledger from disk. Missing file → the empty ledger. Corrupt
- * JSON → `E_CONFIG_CORRUPT` naming the path (never a raw `SyntaxError`,
- * matching `loadConfig` at `src/core/config.ts`).
+ * JSON, wrong shape, or an unknown `version` → `E_CONFIG_CORRUPT`
+ * naming the path (never a raw `SyntaxError`, matching `loadConfig` at
+ * `src/core/config.ts`).
  *
  * Lock-free: the on-disk shape is always the post-commit shape of some
  * completed write (writes are atomic rename), so any reader sees a
@@ -106,7 +108,71 @@ function mergeNames(existing: readonly string[], incoming: readonly string[]): s
  * lock and re-read inside the critical section.
  */
 export function readLedger(): RenderLedgerFile {
-  return readJsonFile<RenderLedgerFile>(renderLedgerPath(), EMPTY_LEDGER, 'E_CONFIG_CORRUPT');
+  const path = renderLedgerPath();
+  const raw = readJsonFile<unknown>(path, undefined, 'E_CONFIG_CORRUPT');
+  return parseLedger(raw, path);
+}
+
+/**
+ * Validate the shape of a parsed ledger. Anything that is not
+ * `{ version: 1, targets: RenderLedgerTarget[] }` with well-formed
+ * targets → `E_CONFIG_CORRUPT` naming the path. An unknown `version`
+ * also fails closed with the version named in the message.
+ */
+function parseLedger(raw: unknown, path: string): RenderLedgerFile {
+  if (raw === undefined) return EMPTY_LEDGER;
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw corruptLedger(path, 'expected an object with `version` and `targets`');
+  }
+  const record = raw as Record<string, unknown>;
+  const version = record.version;
+  if (version !== RENDER_LEDGER_VERSION) {
+    throw corruptLedger(path, `unsupported ledger version: ${JSON.stringify(version)}`);
+  }
+  if (!Array.isArray(record.targets)) {
+    throw corruptLedger(path, '`targets` must be an array');
+  }
+  const targets: RenderLedgerTarget[] = [];
+  for (const entry of record.targets) {
+    targets.push(parseLedgerTarget(entry, path));
+  }
+  return { version: RENDER_LEDGER_VERSION, targets };
+}
+
+function parseLedgerTarget(raw: unknown, path: string): RenderLedgerTarget {
+  if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+    throw corruptLedger(path, 'each target must be an object');
+  }
+  const record = raw as Record<string, unknown>;
+  if (typeof record.projectId !== 'string') {
+    throw corruptLedger(path, 'target.projectId must be a string');
+  }
+  if (typeof record.worktree !== 'string') {
+    throw corruptLedger(path, 'target.worktree must be a string');
+  }
+  if (typeof record.file !== 'string') {
+    throw corruptLedger(path, 'target.file must be a string');
+  }
+  if (!Array.isArray(record.names) || !record.names.every((n) => typeof n === 'string')) {
+    throw corruptLedger(path, 'target.names must be an array of strings');
+  }
+  if (typeof record.renderedAt !== 'string') {
+    throw corruptLedger(path, 'target.renderedAt must be an ISO-8601 string');
+  }
+  return {
+    projectId: record.projectId,
+    worktree: record.worktree,
+    file: record.file,
+    names: [...record.names],
+    renderedAt: record.renderedAt,
+  };
+}
+
+function corruptLedger(path: string, reason: string): EnigmaError {
+  return new EnigmaError({
+    code: 'E_CONFIG_CORRUPT',
+    message: `${path} is not a valid render ledger (${reason}); fix or remove it by hand, then try again.`,
+  });
 }
 
 /**
@@ -167,6 +233,10 @@ export function upsertTarget(input: UpsertTargetInput): RenderLedgerTarget | und
  * target whose `names[]` becomes empty is dropped from the ledger
  * entirely. No-op when `names` is empty or no target carries any of the
  * names.
+ *
+ * Persists whenever ANY target's `names[]` changed OR any target was
+ * dropped — not only when the target count changes. A partial removal
+ * (one name gone, others kept) on a target that survives must commit.
  */
 export function removeNames(names: readonly string[]): void {
   if (names.length === 0) return;
@@ -175,11 +245,22 @@ export function removeNames(names: readonly string[]): void {
     const current = readLedger();
     const drop = new Set(names);
     const next: RenderLedgerTarget[] = [];
+    let dirty = false;
     for (const target of current.targets) {
       const remaining = target.names.filter((n) => !drop.has(n));
-      if (remaining.length > 0) next.push({ ...target, names: remaining });
+      if (remaining.length < target.names.length) dirty = true;
+      if (remaining.length > 0) {
+        if (remaining.length < target.names.length) {
+          next.push({ ...target, names: remaining });
+        } else {
+          next.push(target);
+        }
+      } else if (target.names.length > 0) {
+        // target was dropped (its non-empty list became empty).
+        dirty = true;
+      }
     }
-    if (next.length === current.targets.length) return;
+    if (!dirty) return;
     writeJsonFileAtomic(renderLedgerPath(), { ...current, targets: next });
   } finally {
     lock.release();

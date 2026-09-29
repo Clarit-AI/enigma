@@ -1,14 +1,15 @@
 import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { EnigmaError } from './errors.js';
-import { acquireFileLock, __setLockTimingForTesting, LOCK_MAX_ATTEMPTS, LOCK_RETRY_INTERVAL_MS } from './file-lock.js';
+import { acquireFileLock, __setLockTimingForTesting, LOCK_MAX_ATTEMPTS, LOCK_RETRY_INTERVAL_MS, type Lock } from './file-lock.js';
 import { indexLockPath, indexPath } from './paths.js';
 // Re-exported so existing test files (`test/unit/index-store.test.ts`,
 // `test/integration/index-lock-kernel.test.ts`, `test/unit/audit-project-id.test.ts`)
 // can keep importing the timing knobs from `index-store.ts`. The
-// implementation moved to `./file-lock.js` (Issue #106); the lock helpers
-// themselves are now `acquireFileLock(lockPath)` and the inline
-// `acquireIndexLock` body is gone — see below.
+// implementation moved to `./file-lock.js` (Issue #106); the lock helper
+// is now `acquireFileLock(lockPath, label)` plus the thin
+// `acquireIndexLock()` wrapper below that labels it "the index lock" so
+// the `E_LOCK_TIMEOUT` message matches the pre-#106 baseline.
 export { __setLockTimingForTesting, LOCK_MAX_ATTEMPTS, LOCK_RETRY_INTERVAL_MS };
 import { findRepoIdentityPath, projectId as computeProjectId } from './project.js';
 import { readJsonFile, writeJsonFileAtomic } from './secure-file.js';
@@ -204,9 +205,6 @@ export function listIndexEntries(
  */
 /**
  * Apply `delta` to the index under an interprocess lock so a concurrent
-
-/**
- * Apply `delta` to the index under an interprocess lock so a concurrent
  * writer can never silently overwrite another writer's just-committed
  * entry (Issue #66). Critical section:
  *
@@ -225,8 +223,20 @@ export function listIndexEntries(
  * the known limitation around same-name concurrent `set` with
  * `rotate=false`.
  */
+/**
+ * Acquire the index lock — a thin wrapper around `acquireFileLock` that
+ * labels the lock as `"the index lock"` so an `E_LOCK_TIMEOUT` message
+ * matches the pre-Issue-#106 baseline ("…another process holds the
+ * index lock."). Kept as a separate function for readability at the
+ * `mutateIndex` call site, and so a future call to "the index lock"
+ * doesn't have to remember the label.
+ */
+function acquireIndexLock(): Lock {
+  return acquireFileLock(indexLockPath(), 'the index lock');
+}
+
 export function mutateIndex(delta: (current: IndexFile) => IndexFile): void {
-  const lock = acquireFileLock(indexLockPath());
+  const lock = acquireIndexLock();
   try {
     const current = readIndex();
     const next = delta(current);

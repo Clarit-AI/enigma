@@ -49,6 +49,7 @@ import { chmodSync, closeSync, ftruncateSync, mkdirSync, openSync, writeSync } f
 import { dirname } from 'node:path';
 import { EnigmaError } from './errors.js';
 import { loadIndexLock } from './native-lock.js';
+import { enigmaHome } from './paths.js';
 
 /** Per-retry synchronous sleep while the lock is held by a live process. */
 export let LOCK_RETRY_INTERVAL_MS = 10;
@@ -88,13 +89,25 @@ export interface Lock {
 }
 
 /**
- * Best-effort mkdir+chmod of the parent dir. ENOENT/EEXIST are
- * expected — the dir already exists at the right mode from any prior
- * Enigma write. Anything else is swallowed here and surfaces from the
- * open below if the dir is genuinely missing/unwritable.
+ * Best-effort mkdir+chmod of the parent dir, scoped to the Enigma config
+ * tree. ENOENT/EEXIST are expected — the dir already exists at the right
+ * mode from any prior Enigma write. Anything else is swallowed here and
+ * surfaces from the open below if the dir is genuinely
+ * missing/unwritable.
+ *
+ * Only directories that live INSIDE `enigmaHome()` are touched (and
+ * tightened to `0700`): the index lock, the ledger lock, and the
+ * per-target `<enigmaHome>/locks/<hash>.lock` anchors. A caller passing
+ * a lock path outside the Enigma config tree (e.g. a future hook that
+ * wants kernel-held exclusion on a caller-owned file) is assumed to own
+ * the parent dir; we leave it alone — preserves a pre-existing `0755`
+ * or any other mode the caller set.
  */
 function ensureLockDir(lockPath: string): void {
   const dir = dirname(lockPath);
+  const home = enigmaHome();
+  const insideHome = dir === home || dir.startsWith(`${home}/`);
+  if (!insideHome) return;
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
     chmodSync(dir, 0o700);
@@ -157,6 +170,12 @@ function writeInfoMetadata(fd: number): void {
 /**
  * Acquire a kernel-held interprocess lock on `lockPath`.
  *
+ * `label` is the noun that the timeout message uses for the lock
+ * (default `"the lock"`); the index-lock caller passes `"the index lock"`
+ * so the message exactly matches the pre-Issue-#106 baseline ("…
+ * another process holds the index lock."). The label is purely
+ * cosmetic — it changes no behavior.
+ *
  * Returns a `Lock` whose `release()` MUST be called in `finally` (the
  * pattern `mutateIndex` already follows). Throws `E_LOCK_TIMEOUT` if the
  * retry budget is exhausted, wrapping the underlying fs/native error in
@@ -164,9 +183,10 @@ function writeInfoMetadata(fd: number): void {
  *
  * The anchor at `lockPath` is created on first use at mode `0600`; its
  * inode is stable for the lifetime of the install. The parent dir is
- * created at mode `0700` if it does not already exist.
+ * created at mode `0700` if it does not already exist AND lives inside
+ * `enigmaHome()` (see `ensureLockDir`).
  */
-export function acquireFileLock(lockPath: string): Lock {
+export function acquireFileLock(lockPath: string, label: string = 'the lock'): Lock {
   ensureLockDir(lockPath);
   const addon = loadIndexLock();
   const fd = openAnchor(lockPath);
@@ -195,7 +215,7 @@ export function acquireFileLock(lockPath: string): Lock {
     }
     throw new EnigmaError({
       code: 'E_LOCK_TIMEOUT',
-      message: `Could not acquire ${lockPath} within ${LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS} ms; another process holds the lock.`,
+      message: `Could not acquire ${lockPath} within ${LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS} ms; another process holds ${label}.`,
     });
   } catch (err) {
     // fd cleanup on every non-success path (AC: no fd leak).

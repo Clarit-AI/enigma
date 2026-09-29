@@ -130,6 +130,31 @@ describe('acquireFileLock — generic kernel-held interprocess lock (Issue #106)
     }
   });
 
+  it('a pre-existing 0755 dir outside enigmaHome() is left alone (caller owns it, generic lock does not chmod)', () => {
+    // Set up a caller-owned dir OUTSIDE tmpHome (= OUTSIDE enigmaHome())
+    // with mode 0755. acquireFileLock must not tighten it — the caller
+    // owns the dir, the lock helper only touches dirs inside the
+    // Enigma config tree.
+    const outsideHome = mkdtempSync(join(tmpdir(), 'enigma-filelock-outside-'));
+    try {
+      const callerDir = join(outsideHome, 'caller-owned');
+      mkdirSync(callerDir, { recursive: true, mode: 0o755 });
+      const path = join(callerDir, 'lockfile');
+      const before = statSync(callerDir).mode & 0o777;
+      expect(before).toBe(0o755);
+      const lock = acquireFileLock(path);
+      try {
+        // Mode unchanged — we never chmod caller-owned dirs.
+        expect(statSync(callerDir).mode & 0o777).toBe(0o755);
+        expect(existsSync(path)).toBe(true);
+      } finally {
+        lock.release();
+      }
+    } finally {
+      rmSync(outsideHome, { recursive: true, force: true });
+    }
+  });
+
   it('releases the lock in `finally` even when the held critical section throws', () => {
     const path = anchor('THROW');
     expect(() => {
