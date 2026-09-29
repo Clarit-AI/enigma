@@ -289,10 +289,14 @@ describe('acquireFileLock — real processes against the committed flock addon (
     for (const r of results) expect(r.code).toBe(0);
     expect(readFileSync(counter1, 'utf8')).toBe('10');
     expect(readFileSync(counter2, 'utf8')).toBe('10');
-    // 20 iters of ~10ms each, two anchors in parallel ≈ 100ms of work.
-    // CI noise (spawn + scheduling) can add a few hundred ms; assert
-    // total elapsed is well under the production retry budget (500 ms)
-    // to catch a regression that adds cross-anchor waits.
-    expect(elapsed).toBeLessThan(LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS);
+    // 20 iters of ~10ms each, two anchors in parallel ≈ 100ms of
+    // work. The two `spawn` calls in `Promise.all` add ~100-300ms
+    // each on cold CI runners — measured from BEFORE the spawns, that
+    // is part of the wall clock. Add slack the way the sibling
+    // cross-anchor test (`+ 1500`) does so a noisy CI runner cannot
+    // flake this test; the assertion still catches any regression
+    // that adds cross-anchor waits (a regression would add hundreds
+    // of ms, not a few hundred).
+    expect(elapsed).toBeLessThan(LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS + 1500);
   });
 });
