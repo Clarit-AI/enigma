@@ -43,8 +43,8 @@
  * Issue #70 limitation) live next to `acquireIndexLock` in
  * `src/core/index-store.ts`.
  */
-import { chmodSync, closeSync, existsSync, ftruncateSync, mkdirSync, openSync, realpathSync, writeSync } from 'node:fs';
-import { dirname, isAbsolute, parse, relative, sep } from 'node:path';
+import { chmodSync, closeSync, existsSync, ftruncateSync, mkdirSync, openSync, realpathSync, statSync, writeSync } from 'node:fs';
+import { dirname, isAbsolute, parse, relative, resolve, sep } from 'node:path';
 import { EnigmaError } from './errors.js';
 import { loadIndexLock } from './native-lock.js';
 import { enigmaHome } from './paths.js';
@@ -87,34 +87,36 @@ export interface Lock {
 }
 
 /**
- * Make sure the lock's parent dir exists, and keep every Enigma-owned dir
- * on the way at `0700` without ever touching a caller's dirs.
+ * Make sure the lock's parent dir exists, without loosening anything
+ * Enigma owns or tightening anything it doesn't.
  *
- * The rule (one rule, decided on real paths only):
- * - Missing components of the literal path are created one at a time,
+ * Contract (scoped to what callers need; matches the pre-#106 index
+ * lock, which created its dir at 0700 and tightened the leaf):
+ * - Missing components of the LITERAL path are created one at a time,
  *   so the kernel resolves `..` and symlinks the same way `openSync`
- *   will. A caller that points us at a non-existent path is asking us to
- *   bring it into existence; dirs are created at the umask default.
- * - A dir is chmod-ed to `0700` iff its `realpathSync.native` is inside
- *   the `realpathSync.native` of `enigmaHome()`, checked right after it is
- *   created and once more for the (possibly pre-existing) leaf.
+ *   will. Each is born `0700`; once it exists, its real path decides
+ *   its final mode: inside the home → stays `0700`; outside → relaxed
+ *   to the umask default, as a plain mkdir would have made it. So no
+ *   dir inside the home is ever looser than `0700`, even for an instant.
+ * - The leaf (possibly pre-existing, e.g. a `0755` `locks/`) is
+ *   tightened to `0700` when its real path is inside the home.
+ * - Pre-existing INTERMEDIATE dirs are left as they are. Every caller
+ *   builds its path from `enigmaHome()` (the home itself, or `locks/`
+ *   under it), so there is no intermediate between the home and the leaf.
+ * - "Inside the home" = `realpathSync.native(dir)` is within
+ *   `realpathSync.native(resolve(enigmaHome()))`. The home side is
+ *   `resolve()`d first because `paths.ts` builds every lock path with
+ *   `join(enigmaHome(), …)`, which collapses `..` lexically; the dir side
+ *   stays literal because that is what the kernel opens. Only directories
+ *   are ever chmod-ed.
  *
- * So the index lock, the ledger lock and `<enigmaHome>/locks/` end at
- * `0700`, including via a symlinked home or an alias into it, while a
- * dir that is really outside the home keeps whatever mode it has or
- * gets, however the path reached it (trailing slash, relative, `..`,
- * `link/..`, a symlink out of the home). History: review r2 H1/B1, r3
- * symlink escape, r5 alias into home, r6 `link/..`.
+ * History: review r2 H1/B1 (trailing slash), r3 (symlink escape), r5
+ * (alias into home), r6 (`link/..` in the lock path), r7 (born-0700,
+ * `link/..` in ENIGMA_HOME).
  */
 function ensureLockDir(lockPath: string): void {
   const dir = dirname(lockPath);
 
-  // Create missing components one at a time on the LITERAL path, so the
-  // kernel resolves `..` and symlinks exactly as the later openSync will.
-  // Each new dir is judged by its own realpath the moment it exists; no
-  // path arithmetic predicts where it lands (review r6). A new dir inside
-  // the home sits at the umask default only until the chmod right after
-  // its mkdir, while still empty.
   const { root } = parse(dir);
   let prefix = root;
   for (const part of dir.slice(root.length).split(sep)) {
@@ -122,41 +124,52 @@ function ensureLockDir(lockPath: string): void {
     prefix = prefix === '' ? part : prefix.endsWith(sep) ? prefix + part : prefix + sep + part;
     if (existsSync(prefix)) continue;
     try {
-      mkdirSync(prefix);
+      mkdirSync(prefix, { mode: 0o700 });
     } catch (err) {
       if ((err as NodeJS.ErrnoException).code === 'EEXIST') continue;
       // Parent is a file, unwritable, etc. — openSync surfaces it with
       // the errno (wrapAcquireError formats errno.code).
       return;
     }
-    tightenIfInsideHome(prefix);
+    // Born 0700; now that it exists, settle its final mode by real path.
+    if (!tightenIfInsideHome(prefix)) relaxToUmaskDefault(prefix);
   }
 
-  // The leaf may have existed already (e.g. a pre-existing 0755 `locks/`).
   tightenIfInsideHome(dir);
 }
 
 /**
- * chmod `dir` to `0700` when its real path is inside the real path of
- * `enigmaHome()`; otherwise leave it alone. Uses `realpathSync.native`
- * (libc `realpath(3)`): the JS `realpathSync` collapses `..` lexically
- * before following symlinks, which disagrees with the kernel for
- * `link/..`. chmod targets the resolved path. Unresolvable → untouched.
+ * chmod `dir` to `0700` when it is a directory whose real path is inside
+ * the home (see `ensureLockDir` for the definition). Returns whether it
+ * was inside. Uses `realpathSync.native` (libc `realpath(3)`): the JS
+ * `realpathSync` collapses `..` lexically before following symlinks,
+ * which disagrees with the kernel for `link/..`. Unresolvable → outside.
  */
-function tightenIfInsideHome(dir: string): void {
+function tightenIfInsideHome(dir: string): boolean {
   let realHome: string;
   let realDir: string;
   try {
-    realHome = realpathSync.native(enigmaHome());
+    realHome = realpathSync.native(resolve(enigmaHome()));
     realDir = realpathSync.native(dir);
+    if (!statSync(realDir).isDirectory()) return false;
   } catch {
-    return;
+    return false;
   }
-  if (!isWithin(realHome, realDir)) return;
+  if (!isWithin(realHome, realDir)) return false;
   try {
     chmodSync(realDir, 0o700);
   } catch {
     // best-effort: the lock still works at the existing mode.
+  }
+  return true;
+}
+
+/** Give a dir we just created outside the home the mode a plain mkdir would have. */
+function relaxToUmaskDefault(dir: string): void {
+  try {
+    chmodSync(dir, 0o777 & ~process.umask());
+  } catch {
+    // best-effort: staying at 0700 is only stricter than asked.
   }
 }
 
@@ -238,8 +251,10 @@ function writeInfoMetadata(fd: number): void {
  *
  * The anchor at `lockPath` is created on first use at mode `0600`; its
  * inode is stable for the lifetime of the install. A missing parent dir
- * is always created; every dir whose real path is inside `enigmaHome()`
- * ends at `0700`, and no dir outside it is chmod-ed (see `ensureLockDir`).
+ * is always created. Dirs it creates and the leaf end at `0700` when their
+ * real path is inside `enigmaHome()`; a dir it creates outside gets the
+ * umask default; no pre-existing dir outside is chmod-ed (see
+ * `ensureLockDir`).
  */
 export function acquireFileLock(lockPath: string, label: string = 'the lock'): Lock {
   ensureLockDir(lockPath);

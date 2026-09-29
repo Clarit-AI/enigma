@@ -317,4 +317,58 @@ describe('ensureLockDir path containment — round-2 review H1 / B1 (BLOCKING re
       lock.release();
     }
   });
+
+  it('ENIGMA_HOME containing `link/..` tightens the dir paths.ts actually writes to (review r7)', () => {
+    // paths.ts builds `join(ENIGMA_HOME, 'index.lock')`, which collapses
+    // `alias/..` lexically to `<root>`; the kernel would follow alias
+    // first. The effective config dir is therefore `<root>`, not the
+    // alias target's parent.
+    const root = mkdtempSync(join(tmpdir(), 'enigma-home-linkdotdot-'));
+    scratchHomes.push(root);
+    mkdirSync(join(root, 'inside', 'nested'), { recursive: true });
+    symlinkSync(join(root, 'inside', 'nested'), join(root, 'alias'));
+    chmodSync(root, 0o755);
+    process.env.ENIGMA_HOME = `${root}/alias/..`;
+
+    // Acquire the index lock directly: an index WRITE would also let
+    // secure-file tighten the dir and hide what the lock itself does.
+    const lock = acquireFileLock(indexLockPath(), 'the index lock');
+    try {
+      expect(existsSync(join(root, 'index.lock'))).toBe(true);
+      expect(statSync(root).mode & 0o777).toBe(0o700);
+    } finally {
+      lock.release();
+    }
+  });
+
+  it('a regular file where the lock dir should be is never chmod-ed (QA r7 L1)', () => {
+    const home = freshHome('file-parent');
+    process.env.ENIGMA_HOME = home;
+    const blocker = join(home, 'afile');
+    writeFileSync(blocker, 'x');
+    chmodSync(blocker, 0o644);
+    expect(() => acquireFileLock(join(blocker, 'lockfile'))).toThrow();
+    expect(statSync(blocker).mode & 0o777).toBe(0o644);
+  });
+
+  it('under umask 000, new dirs inside the home end 0700 and new dirs outside end 0777 (QA r7 M1)', () => {
+    const previous = process.umask(0);
+    try {
+      const base = freshHome('umask-000');
+      const home = join(base, 'home'); // created by this call
+      process.env.ENIGMA_HOME = home;
+      const inside = acquireFileLock(join(home, 'locks', 'a.lock'));
+      inside.release();
+      expect(statSync(home).mode & 0o777).toBe(0o700);
+      expect(statSync(join(home, 'locks')).mode & 0o777).toBe(0o700);
+
+      const outsideRoot = mkdtempSync(join(tmpdir(), 'enigma-umask-out-'));
+      scratchHomes.push(outsideRoot);
+      const outside = acquireFileLock(join(outsideRoot, 'new', 'b.lock'));
+      outside.release();
+      expect(statSync(join(outsideRoot, 'new')).mode & 0o777).toBe(0o777);
+    } finally {
+      process.umask(previous);
+    }
+  });
 });
