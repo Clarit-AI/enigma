@@ -290,11 +290,14 @@ describe('acquireFileLock — real processes against the committed flock addon (
     }
     const nativeDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'plugins', 'enigma', 'native');
 
+    // Start barrier: both children begin their first acquire at the same
+    // wall-clock instant, so a slow spawn cannot make them miss each other.
+    const startAt = String(Date.now() + 1500);
     const runTimed = (anchor: string): Promise<{ code: number | null; stdout: string }> =>
       new Promise((resolvePromise) => {
         const child = spawn(
           process.execPath,
-          [ledgerWorker, 'timed', anchor, '10', '50'],
+          [ledgerWorker, 'timed', anchor, '10', '50', startAt],
           {
             stdio: ['ignore', 'pipe', 'inherit'],
             env: { ...process.env, ENIGMA_NATIVE_DIR: nativeDir },
@@ -331,7 +334,7 @@ describe('acquireFileLock — real processes against the committed flock addon (
     // every interval would be strictly before or after every other
     // — no overlap, this assertion would fail.
     const anyOverlap = intervals1.some(([s1, e1]) =>
-      intervals2.some(([s2, e2]) => s1 <= e2 && s2 <= e1),
+      intervals2.some(([s2, e2]) => s1 < e2 && s2 < e1),
     );
     expect(anyOverlap).toBe(true);
   });
