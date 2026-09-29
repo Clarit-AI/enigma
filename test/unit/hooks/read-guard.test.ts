@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -669,91 +669,90 @@ describe('PreToolUse read-guard', () => {
     });
   });
 
-  describe('bundled-CLI form: node flags with a separate value, and non-Enigma scripts (Issue #96)', () => {
-    let root: string;
-    let enigmaCli: string;
-    let foreignCli: string;
-    let nameless: string;
-    let broken: string;
-
-    function plant(name: string, manifest: string | null): string {
-      const dist = join(root, name, 'dist');
-      mkdirSync(dist, { recursive: true });
-      writeFileSync(join(dist, 'cli.mjs'), '');
-      if (manifest !== null) {
-        mkdirSync(join(root, name, '.claude-plugin'), { recursive: true });
-        writeFileSync(join(root, name, '.claude-plugin', 'plugin.json'), manifest);
-      }
-      return join(dist, 'cli.mjs');
-    }
-
-    beforeEach(() => {
-      root = mkdtempSync(join(tmpdir(), 'enigma-bundles-'));
-      enigmaCli = plant('enigma', JSON.stringify({ name: 'enigma', version: '0.3.1' }));
-      foreignCli = plant('foreign', JSON.stringify({ name: 'other-tool', version: '1.0.0' }));
-      nameless = plant('nameless', JSON.stringify({ version: '1.0.0' }));
-      broken = plant('broken', '{ not json');
-    });
-
-    afterEach(() => {
-      rmSync(root, { recursive: true, force: true });
-    });
-
-    it.each<[string]>([
-      ['--require'],
-      ['-r'],
-      ['--import'],
-      ['--loader'],
-      ['--experimental-loader'],
-      ['--conditions'],
-      ['-C'],
-    ])('denies an Enigma bundle behind `node %s <value>`', (flag) => {
-      expect(isDenied(bash(`node ${flag} ./preload.mjs ${enigmaCli} run -- printenv OPENAI_API_KEY`))).toBe(true);
-    });
-
-    it('denies with several value-taking flags and a plain flag mixed together', () => {
-      const command = `node --no-warnings --require ./a.mjs --import ./b.mjs ${enigmaCli} run --only FOO -- env`;
+  describe('bundled-CLI form is a `…/cli.mjs run` token pattern, with no filesystem check (Issue #96)', () => {
+    it.each<[string, string]>([
+      ['--env-file with a separate value', 'node --env-file cfg /any/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['--title with a separate value', 'node --title t /any/dist/cli.mjs run -- env'],
+      ['-r with a separate value', 'node -r ./pre.mjs /any/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['--require with a separate value', 'node --require ./pre.mjs /any/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['--import with a separate value', 'node --import ./pre.mjs /any/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['--watch-path with a separate value', 'node --watch-path p /any/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['several options, values and plain flags mixed', 'node --no-warnings --env-file cfg -r ./a.mjs /any/dist/cli.mjs run --only FOO -- env'],
+      ['--flag=value form', 'node --require=./pre.mjs /any/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['run flags before --', 'node /any/dist/cli.mjs run --only FOO -- printenv FOO'],
+      ['relative script', 'node ./dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['bare relative script', 'node cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['path to a nonexistent cli.mjs', 'node /nonexistent/nowhere/cli.mjs run -- printenv OPENAI_API_KEY'],
+      ['unexpanded variable in the path', 'node "$CLAUDE_PLUGIN_ROOT/dist/cli.mjs" run -- printenv OPENAI_API_KEY'],
+      ['a secret read as the child', 'node /any/dist/cli.mjs run -- enigma get FOO'],
+      ['assignment before node', 'FOO=1 node /any/dist/cli.mjs run -- printenv OPENAI_API_KEY'],
+    ])('denies: %s', (_label, command) => {
       expect(isDenied(bash(command))).toBe(true);
     });
 
-    it('denies the `--flag=value` form, which is a single token', () => {
-      expect(isDenied(bash(`node --require=./preload.mjs ${enigmaCli} run -- printenv OPENAI_API_KEY`))).toBe(true);
+    it.each<[string, string]>([
+      ['ordinary child', 'node /any/dist/cli.mjs run -- npm run dev'],
+      ['ordinary child after options with values', 'node --env-file cfg /any/dist/cli.mjs run --only FOO -- node server.js'],
+      ['plain script', 'node server.js'],
+      ['plain script with an option value', 'node --require ./pre.mjs server.js'],
+      ['options only', 'node --require ./pre.mjs'],
+      ['another cli.mjs subcommand', 'node /any/dist/cli.mjs doctor'],
+      ['cli.mjs run with no child', 'node /any/dist/cli.mjs run'],
+      ['cli.mjs run with an empty child', 'node /any/dist/cli.mjs run --only FOO --'],
+      ['run is not right after cli.mjs', 'node /any/dist/cli.mjs list run -- npm start'],
+      // Not an Enigma-run wrapper, so the top-level rules alone decide, and none
+      // of them match `node …/other.mjs`. Pinned so a change here is deliberate.
+      ['a script that is not named cli.mjs', 'node /any/dist/other.mjs run -- printenv OPENAI_API_KEY'],
+    ])('allows: %s', (_label, command) => {
+      expect(isDenied(bash(command))).toBe(false);
     });
 
-    it('a flag value is not mistaken for the script: `node --require x` with no script allows', () => {
-      expect(isDenied(bash('node --require ./preload.mjs server.js'))).toBe(false);
-      expect(isDenied(bash('node --require ./preload.mjs'))).toBe(false);
-    });
+    describe('nothing on disk changes the answer', () => {
+      let root: string;
 
-    it('resolves a relative script against the hook cwd', () => {
-      const command = 'node dist/cli.mjs run -- printenv OPENAI_API_KEY';
-      expect(isDenied(bash(command, join(root, 'enigma')))).toBe(true);
-      expect(isDenied(bash(command, join(root, 'foreign')))).toBe(false);
-    });
-
-    describe('a cli.mjs that is not an Enigma bundle', () => {
-      it('is allowed when its plugin manifest is readable and names another plugin', () => {
-        expect(isDenied(bash(`node ${foreignCli} run -- printenv OPENAI_API_KEY`))).toBe(false);
+      beforeEach(() => {
+        root = mkdtempSync(join(tmpdir(), 'enigma-bundles-'));
       });
 
-      it('is allowed when its readable manifest has no name', () => {
-        expect(isDenied(bash(`node ${nameless} run -- printenv OPENAI_API_KEY`))).toBe(false);
+      afterEach(() => {
+        rmSync(root, { recursive: true, force: true });
       });
 
-      it('is still denied when the same child is run bare after it', () => {
-        expect(isDenied(bash(`node ${foreignCli} run -- npm start && printenv OPENAI_API_KEY`))).toBe(true);
-      });
-    });
+      function plant(name: string, manifest: string | null, withCli = true): string {
+        const dist = join(root, name, 'dist');
+        mkdirSync(dist, { recursive: true });
+        if (withCli) writeFileSync(join(dist, 'cli.mjs'), '');
+        if (manifest !== null) {
+          mkdirSync(join(root, name, '.claude-plugin'), { recursive: true });
+          writeFileSync(join(root, name, '.claude-plugin', 'plugin.json'), manifest);
+        }
+        return join(dist, 'cli.mjs');
+      }
 
-    describe('a script that cannot be resolved keeps denying (conservative default)', () => {
-      it.each<[string, () => string]>([
-        ['not laid out as <root>/dist/cli.mjs', () => '/some/other/project/cli.mjs'],
-        ['missing file and manifest', () => join(root, 'gone', 'dist', 'cli.mjs')],
-        ['bundle with no manifest', () => plant('bare', null)],
-        ['unparseable manifest', () => broken],
-        ['unexpanded variable', () => '"$CLAUDE_PLUGIN_ROOT/dist/cli.mjs"'],
-      ])('%s', (_label, script) => {
-        expect(isDenied(bash(`node ${script()} run -- printenv OPENAI_API_KEY`))).toBe(true);
+      it.each<[string, string, boolean]>([
+        ['a bundle whose manifest names enigma', JSON.stringify({ name: 'enigma' }), true],
+        ['a bundle whose manifest names another plugin', JSON.stringify({ name: 'other-tool' }), true],
+        ['a bundle whose manifest has no name', JSON.stringify({ version: '1.0.0' }), true],
+        ['a bundle with an unparseable manifest', '{ not json', true],
+        ['a bundle with no manifest', '', true],
+        ['a foreign manifest beside a missing cli.mjs', JSON.stringify({ name: 'other-tool' }), false],
+      ])('denies %s', (_label, manifest, withCli) => {
+        const cli = plant('bundle', manifest === '' ? null : manifest, withCli);
+        expect(isDenied(bash(`node ${cli} run -- printenv OPENAI_API_KEY`))).toBe(true);
+      });
+
+      it('denies a foreign dist/cli.mjs that is a symlink to another file', () => {
+        const target = plant('real', JSON.stringify({ name: 'enigma' }));
+        const foreign = plant('linked', JSON.stringify({ name: 'other-tool' }), false);
+        symlinkSync(target, foreign);
+        expect(isDenied(bash(`node ${foreign} run -- printenv OPENAI_API_KEY`))).toBe(true);
+      });
+
+      it('gives the same answer for a relative script whatever the hook cwd is', () => {
+        plant('bundle', JSON.stringify({ name: 'enigma' }));
+        const command = 'node dist/cli.mjs run -- printenv OPENAI_API_KEY';
+        expect(isDenied(bash(command, join(root, 'bundle')))).toBe(true);
+        expect(isDenied(bash(command, root))).toBe(true);
       });
     });
   });

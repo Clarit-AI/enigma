@@ -145,7 +145,7 @@ import { basename, resolve, sep } from 'node:path';
 import { existsSync, statSync } from 'node:fs';
 import { enigmaHome } from '../core/paths.js';
 import { readIndex } from '../core/index-store.js';
-import { readBundleManifest, runHint } from '../core/shim.js';
+import { runHint } from '../core/shim.js';
 import type { PreToolUseInput, PreToolUseOutput } from './types.js';
 
 const DOTENV_EXEMPT = new Set(['.env.example']);
@@ -155,10 +155,6 @@ const BARE_ENV_DUMP_COMMANDS = new Set(['env', 'printenv']);
  * options and change what runs, so stripping them is a parser, not a prefix skip. */
 const TRANSPARENT_PREFIX_WORDS = new Set(['time', 'command']);
 const ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
-/** `node` options that take their value as the NEXT token (`--require ./x`),
- * so the value is not the script (Issue #96). `--opt=value` is one token and
- * needs no entry. */
-const NODE_VALUE_FLAGS = new Set(['--require', '-r', '--import', '--loader', '--experimental-loader', '--conditions', '-C']);
 /** Commands that touch a .env path without reading its content into this
  * session (metadata/lifecycle operations, or existence checks) — referencing
  * `.env` as an argument to one of these is not a leak. */
@@ -627,16 +623,16 @@ function segmentIsOpRead(segment: string): boolean {
  *
  * Also recognises `node <…>/cli.mjs run …`, the form `runHint()` recommends
  * when the PATH shim is absent — otherwise the denial text would point at a
- * bypass. Node options are skipped to find the script, including the ones that
- * take a separate value (`--require ./preload.mjs`, see `NODE_VALUE_FLAGS`).
- * The script counts only if it is an Enigma plugin bundle: a `cli.mjs` whose
- * plugin manifest is readable and names something else is another program's CLI
- * (Issue #96). A script that cannot be resolved or read stays recognised — the
- * conservative default, since a `$VAR` or relative path we cannot follow is
- * exactly what the bundled form looks like from here. The child is re-joined
- * from dequoted tokens, which can only make a quoted argument that contains a
- * space look like two tokens (a rare false positive), never hide a token from
- * the checks.
+ * bypass. It is a pure token pattern: any token after `node` whose basename is
+ * `cli.mjs` and that is immediately followed by `run` (Issue #96). Scanning for
+ * it, rather than skipping node options to reach the script, means an option
+ * with a separate value (`--env-file cfg`, `--title t`, `-r ./pre.mjs`) needs no
+ * enumeration. There is deliberately no filesystem access: a manifest or path
+ * check can be defeated by a renamed copy, a symlink, or a missing file, and a
+ * foreign `cli.mjs run -- printenv X` prints the ambient environment, which a
+ * bare `printenv X` is already denied for. The child is re-joined from dequoted
+ * tokens, which can only make a quoted argument that contains a space look like
+ * two tokens (a rare false positive), never hide a token from the checks.
  *
  * Leading `NAME=value`/`time`/`command` are skipped before the head is read
  * (`commandTokens`), so they do not hide the form either.
@@ -645,19 +641,15 @@ function segmentIsOpRead(segment: string): boolean {
  * wrapped in `sh -c '…'`/`bash -c '…'` is not unwrapped, exactly as it is not
  * unwrapped for a bare segment either.
  */
-function enigmaRunChild(segment: string, cwd: string): string | undefined {
+function enigmaRunChild(segment: string): string | undefined {
   const tokens = commandTokens(segment);
   const head = commandName(tokens[0] ?? '');
   let runIndex: number;
   if (head === 'enigma') {
     runIndex = 1;
   } else if (head === 'node') {
-    let script = 1;
-    while (tokens[script]?.startsWith('-')) script += NODE_VALUE_FLAGS.has(tokens[script] as string) ? 2 : 1;
-    const scriptPath = tokens[script] ?? '';
-    if (commandName(scriptPath) !== 'cli.mjs') return undefined;
-    const manifest = readBundleManifest(resolve(cwd, scriptPath));
-    if (manifest !== null && manifest.name !== 'enigma') return undefined;
+    const script = tokens.findIndex((t, i) => i > 0 && commandName(t) === 'cli.mjs' && tokens[i + 1] === 'run');
+    if (script === -1) return undefined;
     runIndex = script + 1;
   } else {
     return undefined;
@@ -912,7 +904,7 @@ export function runReadGuard(input: PreToolUseInput): PreToolUseOutput | undefin
         while (current !== undefined) {
           const denied = checkSegment(current, cwd, known, viaRun);
           if (denied) return denied;
-          current = enigmaRunChild(current, cwd);
+          current = enigmaRunChild(current);
           viaRun = true;
         }
       }
