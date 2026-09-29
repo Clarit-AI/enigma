@@ -1506,7 +1506,6 @@ var DOTENV_EXEMPT = /* @__PURE__ */ new Set([".env.example"]);
 var BARE_ENV_DUMP_COMMANDS = /* @__PURE__ */ new Set(["env", "printenv"]);
 var TRANSPARENT_PREFIX_WORDS = /* @__PURE__ */ new Set(["time", "command"]);
 var ENV_ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
-var NODE_VALUE_FLAGS = /* @__PURE__ */ new Set(["--require", "-r", "--import", "--loader", "--experimental-loader", "--conditions", "-C"]);
 var NON_READING_BASH_VERBS = /* @__PURE__ */ new Set(["rm", "mv", "touch", "chmod", "stat", "ls", "find", "test"]);
 var DOTENV_EXCLUDE_GLOB = "!.env*";
 var MAX_SUBSTITUTION_DEPTH = 10;
@@ -1713,19 +1712,15 @@ function segmentIsOpRead(segment) {
   const [head, sub] = commandTokens(segment);
   return commandName(head ?? "") === "op" && sub === "read";
 }
-function enigmaRunChild(segment, cwd) {
+function enigmaRunChild(segment) {
   const tokens = commandTokens(segment);
   const head = commandName(tokens[0] ?? "");
   let runIndex;
   if (head === "enigma") {
     runIndex = 1;
   } else if (head === "node") {
-    let script = 1;
-    while (tokens[script]?.startsWith("-")) script += NODE_VALUE_FLAGS.has(tokens[script]) ? 2 : 1;
-    const scriptPath = tokens[script] ?? "";
-    if (commandName(scriptPath) !== "cli.mjs") return void 0;
-    const manifest = readBundleManifest(resolve4(cwd, scriptPath));
-    if (manifest !== null && manifest.name !== "enigma") return void 0;
+    const script = tokens.findIndex((t, i) => i > 0 && commandName(t) === "cli.mjs" && tokens[i + 1] === "run");
+    if (script === -1) return void 0;
     runIndex = script + 1;
   } else {
     return void 0;
@@ -1898,7 +1893,7 @@ function runReadGuard(input) {
         while (current !== void 0) {
           const denied = checkSegment(current, cwd, known, viaRun);
           if (denied) return denied;
-          current = enigmaRunChild(current, cwd);
+          current = enigmaRunChild(current);
           viaRun = true;
         }
       }
