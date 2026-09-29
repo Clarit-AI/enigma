@@ -44,7 +44,7 @@
  * `src/core/index-store.ts`.
  */
 import { chmodSync, closeSync, ftruncateSync, mkdirSync, openSync, realpathSync, writeSync } from 'node:fs';
-import { dirname, isAbsolute, relative, sep } from 'node:path';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { EnigmaError } from './errors.js';
 import { loadIndexLock } from './native-lock.js';
 import { enigmaHome } from './paths.js';
@@ -95,7 +95,9 @@ export interface Lock {
  * caller that points us at a non-existent path is implicitly asking us
  * to bring it into existence. `mkdirSync(..., { recursive: true })`
  * returns success on a pre-existing dir, so this is a no-op for the
- * common case.
+ * common case. New dirs are created at `0700` only when the path is
+ * (lexically) under `enigmaHome()`; a caller-owned path outside it gets
+ * the process umask default, like any other directory the caller makes.
  *
  * The chmod runs only INSIDE `enigmaHome()`: the index lock, the
  * ledger lock, and the per-target `<enigmaHome>/locks/<hash>.lock`
@@ -118,7 +120,8 @@ function ensureLockDir(lockPath: string): void {
   // openSync and surfaces as a clear E_LOCK_TIMEOUT with the
   // underlying errno (wrapAcquireError formats errno.code).
   try {
-    mkdirSync(dir, { recursive: true, mode: 0o700 });
+    const underHome = isWithin(resolve(enigmaHome()), resolve(dir));
+    mkdirSync(dir, underHome ? { recursive: true, mode: 0o700 } : { recursive: true });
   } catch {
     // Already exists, owned by another user, or a file at this path —
     // surface from openSync if the dir is genuinely missing.
@@ -153,9 +156,13 @@ function realInsideEnigmaHome(dir: string): string | undefined {
   } catch {
     return undefined;
   }
-  const rel = relative(realHome, realDir);
-  const inside = rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
-  return inside ? realDir : undefined;
+  return isWithin(realHome, realDir) ? realDir : undefined;
+}
+
+/** True when `child` is `parent` or below it, split on a separator boundary (so `..x` is below). */
+function isWithin(parent: string, child: string): boolean {
+  const rel = relative(parent, child);
+  return rel === '' || (rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel));
 }
 
 /**
@@ -229,9 +236,10 @@ function writeInfoMetadata(fd: number): void {
  * the message; never lets a raw `node:fs` error escape.
  *
  * The anchor at `lockPath` is created on first use at mode `0600`; its
- * inode is stable for the lifetime of the install. The parent dir is
- * created at mode `0700` if it does not already exist AND lives inside
- * `enigmaHome()` (see `ensureLockDir`).
+ * inode is stable for the lifetime of the install. A missing parent dir
+ * is always created: at `0700` under `enigmaHome()`, at the umask
+ * default elsewhere. Only a dir whose real path is inside
+ * `enigmaHome()` is then tightened to `0700` (see `ensureLockDir`).
  */
 export function acquireFileLock(lockPath: string, label: string = 'the lock'): Lock {
   ensureLockDir(lockPath);

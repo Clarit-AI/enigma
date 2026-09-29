@@ -178,6 +178,7 @@ export function listIndexEntries(
  *   `rotate=false` for the same name may leave the loser's value as
  *   an orphan in the depository; see ADR-003 and Issue #70.
  */
+
 /**
  * Acquire the index lock — a thin wrapper around `acquireFileLock` that
  * labels the lock as `"the index lock"` so an `E_LOCK_TIMEOUT` message

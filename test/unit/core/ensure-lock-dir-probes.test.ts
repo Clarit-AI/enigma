@@ -146,11 +146,11 @@ describe('ensureLockDir path containment — round-2 review H1 / B1 (BLOCKING re
     try {
       expect(existsSync(dirname(anchor))).toBe(true);
       expect(existsSync(anchor)).toBe(true);
-      // The new parent dir was created at the mode mkdirSync was
-      // called with (0700) but, being OUTSIDE enigmaHome(), was NOT
-      // re-chmodded by ensureLockDir.
-      // (We don't assert the exact mode — the kernel mask can clip it
-      // on some systems — just that the lock acquisition completed.)
+      // Outside the home, a new dir gets the umask default, same as a
+      // plain mkdirSync in the same place: not forced to 0700 (Kilo r4).
+      const control = join(callerRoot, 'control');
+      mkdirSync(control);
+      expect(statSync(dirname(anchor)).mode & 0o777).toBe(statSync(control).mode & 0o777);
     } finally {
       lock.release();
     }
