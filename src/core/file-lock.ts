@@ -21,7 +21,7 @@
  * closed with `E_LOCK_UNAVAILABLE` — there is no pure-JS fallback by
  * design.
  *
- * Anchor invariants (shared with `acquireIndexLock`):
+ * Anchor invariants:
  * - Created ONCE (`O_EXCL`); the inode is never renamed, unlinked, or
  *   replaced for the lifetime of the install — the kernel ties the
  *   lock to the open file description, so the inode must be stable.
@@ -38,15 +38,12 @@
  *   — any death, including SIGKILL — so a crashed holder can never
  *   wedge the file.
  *
- * Asymmetry from `acquireIndexLock` (intentional, narrow):
- *   `acquireIndexLock` runs inside a code path whose own caller owns
- *   the parent dir (the index writer). Here, a generic caller may hand
- *   us a path whose parent dir does not exist yet — so `ensureLockDir`
- *   is called on every acquire, not skipped as it is in the index
- *   path. Behaviour is otherwise identical.
+ * Index-specific notes (writer set, upgrade protocol, ADR-003 /
+ * Issue #70 limitation) live next to `acquireIndexLock` in
+ * `src/core/index-store.ts`.
  */
 import { chmodSync, closeSync, ftruncateSync, mkdirSync, openSync, writeSync } from 'node:fs';
-import { dirname } from 'node:path';
+import { dirname, isAbsolute, relative, resolve } from 'node:path';
 import { EnigmaError } from './errors.js';
 import { loadIndexLock } from './native-lock.js';
 import { enigmaHome } from './paths.js';
@@ -89,32 +86,54 @@ export interface Lock {
 }
 
 /**
- * Best-effort mkdir+chmod of the parent dir, scoped to the Enigma config
- * tree. ENOENT/EEXIST are expected — the dir already exists at the right
- * mode from any prior Enigma write. Anything else is swallowed here and
- * surfaces from the open below if the dir is genuinely
- * missing/unwritable.
+ * Best-effort mkdir of the parent dir, with mode-tightening scoped to
+ * the Enigma config tree.
  *
- * Only directories that live INSIDE `enigmaHome()` are touched (and
- * tightened to `0700`): the index lock, the ledger lock, and the
- * per-target `<enigmaHome>/locks/<hash>.lock` anchors. A caller passing
- * a lock path outside the Enigma config tree (e.g. a future hook that
- * wants kernel-held exclusion on a caller-owned file) is assumed to own
- * the parent dir; we leave it alone — preserves a pre-existing `0755`
- * or any other mode the caller set.
+ * The mkdir ALWAYS runs (even for caller-owned dirs outside
+ * `enigmaHome()`): `openSync` below needs a real directory, and a
+ * caller that points us at a non-existent path is implicitly asking us
+ * to bring it into existence. `mkdirSync(..., { recursive: true })`
+ * returns success on a pre-existing dir, so this is a no-op for the
+ * common case.
+ *
+ * The chmod runs only INSIDE `enigmaHome()`: the index lock, the
+ * ledger lock, and the per-target `<enigmaHome>/locks/<hash>.lock`
+ * anchors all live there, and we tighten their mode to `0700`. A
+ * caller passing a path outside the Enigma config tree is assumed to
+ * own the parent dir; we leave its mode alone — preserves a
+ * pre-existing `0755` or any other mode the caller set.
+ *
+ * Containment is boundary-aware: both the home and the dir are
+ * `resolve()`d first, then compared via `relative()`. Trailing slashes,
+ * relative paths, and `..` segments in `ENIGMA_HOME` no longer fool
+ * the comparison (round-2 review H1 / B1 regression fix).
  */
 function ensureLockDir(lockPath: string): void {
   const dir = dirname(lockPath);
-  const home = enigmaHome();
-  const insideHome = dir === home || dir.startsWith(`${home}/`);
-  if (!insideHome) return;
+  const homeResolved = resolve(enigmaHome());
+  const dirResolved = resolve(dir);
+  const rel = relative(homeResolved, dirResolved);
+  const inside = rel === '' || (!rel.startsWith('..') && !isAbsolute(rel));
+
+  // Always mkdir — see header for the "even outside enigmaHome()"
+  // rationale. EEXIST (parent is a file, not a dir) bubbles up to
+  // openSync and surfaces as a clear E_LOCK_TIMEOUT with the
+  // underlying errno (wrapAcquireError formats errno.code).
   try {
     mkdirSync(dir, { recursive: true, mode: 0o700 });
-    chmodSync(dir, 0o700);
   } catch {
-    // Already exists at the right mode, or owned by another user — fall
-    // through to openSync and let it surface a clear error if the dir is
-    // genuinely missing/unwritable.
+    // Already exists, owned by another user, or a file at this path —
+    // surface from openSync if the dir is genuinely missing.
+  }
+
+  // Mode-tightening only for Enigma-owned dirs.
+  if (inside) {
+    try {
+      chmodSync(dir, 0o700);
+    } catch {
+      // best-effort: tightening a pre-existing dir to 0700 is
+      // optional when the dir already exists.
+    }
   }
 }
 
@@ -123,13 +142,20 @@ function ensureLockDir(lockPath: string): void {
  * `E_LOCK_TIMEOUT`. The acquirer's only recourse on a hard failure is to
  * surface the lock-acquisition error, and `E_LOCK_TIMEOUT` is the closest
  * code we have — the message names the cause via the original error's
- * constructor name.
+ * constructor name plus its errno `code` when present, so an operator
+ * can tell ENOENT (parent dir missing) from EACCES (no write
+ * permission) from a bare fs failure. The errno `code` is the most
+ * useful piece of a `node:fs` error for triage, and we never include
+ * the error's `message` body (could echo a path or value).
  */
 function wrapAcquireError(err: unknown, lockPath: string): EnigmaError {
-  const cause = err instanceof Error ? err.constructor.name : String(err);
+  const causeName = err instanceof Error ? err.constructor.name : String(err);
+  const errno = err instanceof Error && 'code' in err && typeof (err as NodeJS.ErrnoException).code === 'string'
+    ? ` (${(err as NodeJS.ErrnoException).code})`
+    : '';
   return new EnigmaError({
     code: 'E_LOCK_TIMEOUT',
-    message: `Failed to acquire ${lockPath}: ${cause}`,
+    message: `Failed to acquire ${lockPath}: ${causeName}${errno}`,
   });
 }
 

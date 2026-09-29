@@ -184,6 +184,29 @@ describe('acquireFileLock — generic kernel-held interprocess lock (Issue #106)
     }
   });
 
+  it('E_LOCK_TIMEOUT message includes the underlying errno code (e.g. ENOTDIR) so a missing dir is distinguishable (QA L4)', () => {
+    // Place a FILE at the lock path's parent. mkdirSync(..., { recursive:
+    // true }) on a path that is a file fails (EEXIST or ENOTDIR — we
+    // swallow it); openSync then fails with ENOTDIR because the parent
+    // is a file, not a directory. The wrapped error's message must
+    // surface that errno so an operator can tell ENOTDIR from a bare
+    // fs failure. Also: never include any path contents.
+    const blocker = join(tmpHome, 'blocker-file');
+    writeFileSync(blocker, 'not-a-directory');
+    const lockPath = join(blocker, 'lockfile');
+    let captured: { code?: string; message: string } | undefined;
+    try {
+      acquireFileLock(lockPath);
+    } catch (err) {
+      captured = err as { code?: string; message: string };
+    }
+    expect(captured).toBeDefined();
+    expect(captured!.code).toBe('E_LOCK_TIMEOUT');
+    // errno code is named in the message; never the file's body.
+    expect(captured!.message).toMatch(/\(E[A-Z]+\)/);
+    expect(captured!.message).not.toContain('sk-sentinel-value');
+  });
+
   it('exposes EnigmaError with the documented code on every failure path', () => {
     const path = anchor('CODE');
     mkdirSync(dirname(path), { recursive: true, mode: 0o700 });

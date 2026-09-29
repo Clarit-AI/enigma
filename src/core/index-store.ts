@@ -145,83 +145,38 @@ export function listIndexEntries(
 }
 
 /* ------------------------------------------------------------------ *
- *  Index lock — kernel-held critical section for every index write    *
+ *  Index lock + index write critical section (Issue #66)               *
  * ------------------------------------------------------------------ *
  *
- * Issue #66: `writeIndex` is atomic (tmp + rename, secure-file.ts) but not
- * locked. `setSecret` reads the index, awaits the depository write, then
- * writes back its stale copy — a concurrent index write from another MCP or
- * CLI process can therefore be silently lost. Goal: every index writer runs
- * its change inside a short, interprocess-locked critical section that
- * reads the index again before applying it.
+ * Index-specific notes — the generic lock protocol (kernel `flock(2)`,
+ * persistent anchor, create-once semantics, fd cleanup, crash recovery)
+ * is documented at the top of `src/core/file-lock.ts`. The points below
+ * are about who the lock's cooperating set is and what happens when
+ * that set changes.
  *
- * Mechanism (superseding the earlier name-based O_EXCL + stale-threshold
- * protocol, which is removed in full): exclusion is a kernel `flock(2)` on
- * a PERSISTENT anchor file at `<ENIGMA_HOME>/index.lock` (mode 0600),
- * through the first-party N-API addon (`native/index-lock.cc`, committed
- * per-platform under `plugins/enigma/native/<os>-<arch>/`). There is no
- * pure-JS fallback — unsupported platforms fail closed with
- * `E_LOCK_UNAVAILABLE` rather than running a second, weaker protocol.
+ * - The anchor is a kernel flock on the persistent
+ *   `<ENIGMA_HOME>/index.lock` file (`indexLockPath`), through the
+ *   first-party N-API addon (`plugins/enigma/native/<os>-<arch>/`).
+ *   Unsupported platforms fail closed with `E_LOCK_UNAVAILABLE` — there
+ *   is no pure-JS fallback by design.
  *
- * Invariants:
- * - The anchor is created ONCE (`openSync(path, 'wx', 0o600)`; `EEXIST` →
- *   open the existing file). It is NEVER renamed, unlinked, or replaced —
- *   including at release. The kernel ties the lock to the open file
- *   description, so the inode must be stable; deleting the name would let
- *   two holders end up on different inodes.
- * - Acquire = `flock(fd, LOCK_EX | LOCK_NB)` in a bounded retry loop with
- *   `Atomics.wait` sleep (no busy-spin). Exhaustion → `E_LOCK_TIMEOUT`
- *   naming the path (Issue #66, AC #2). Unexpected fs/native errors during
- *   acquire are wrapped the same way — no raw `node:fs` error escapes
- *   `mutateIndex`.
- * - Release = `flock(fd, LOCK_UN)` + `close(fd)`, run in `finally` (Issue
- *   #66, AC #1). It never touches the file's name or body.
- * - Crash recovery is the kernel's (Issue #66, AC #3): the lock dies with
- *   the process — any death, including SIGKILL — so a crashed holder can
- *   never wedge the index and no staleness heuristic is needed. A paused
- *   but ALIVE owner is waited out and never evicted.
- * - The body (`<pid>\n<createdAtMs>\n`) is OPTIONAL INFORMATIONAL
- *   metadata written after the lock is held, via the held fd. It is never
- *   read for safety; a leftover legacy body (empty, partial, or old-format)
- *   is simply overwritten on the next successful acquire.
+ * - flock is ADVISORY: exclusion holds among cooperating processes.
+ *   Every index writer — `setSecret`, `deleteSecret`, `move` (via
+ *   `setSecret(..., rotate: true)`), `import-commit` (via per-entry
+ *   `setSecret`) — goes through `mutateIndex`, so the cooperating set
+ *   is exactly Enigma's writers. Slow depository I/O (1Password prompts,
+ *   keychain operations) stays OUT of the critical section — see
+ *   `mutateIndex` below.
  *
- * Assumptions / scope (documented, not assumed away):
- * - flock is ADVISORY: exclusion holds among cooperating processes. Every
- *   index writer — `setSecret`, `deleteSecret`, `move` (via `setSecret(…,
- *   rotate: true)`), `import-commit` (via per-entry `setSecret`) — goes
- *   through this helper, so the cooperating set is exactly Enigma's
- *   writers. Slow depository I/O (1Password prompts, keychain) stays OUT
- *   of the critical section.
  * - Upgrade is stop/restart ALL writers: a long-running MCP server keeps
  *   the old protocol in memory until it restarts. There is NO
- *   mixed-protocol guarantee — a process running the removed name-based
- *   protocol can unlink/replace the anchor and split exclusion across two
- *   inodes. `enigma doctor` can hint at running writers; it does NOT prove
- *   they are all stopped.
+ *   mixed-protocol guarantee — see ADR-003 in `docs/architecture.md`.
+ *   `enigma doctor` can hint at running writers; it does NOT prove they
+ *   are all stopped.
+ *
  * - Known limitation (unchanged): two concurrent `set` calls with
- *   `rotate=false` for the same name may leave the loser's value as an
- *   orphan in the depository; see `docs/architecture.md` ADR-003 and
- *   Issue #70.
- */
-/**
- * Apply `delta` to the index under an interprocess lock so a concurrent
- * writer can never silently overwrite another writer's just-committed
- * entry (Issue #66). Critical section:
- *
- *   lock → re-read index → delta(current) → write → unlock
- *
- * The body is intentionally synchronous — there is **no `await` of
- * depository I/O inside the lock**. Slow depository work (1Password
- * prompts, keychain operations) belongs in the caller, OUTSIDE the lock.
- * Callers compute their delta from the `current` index passed to the
- * closure, which is the authoritative state at the moment the lock was
- * acquired.
- *
- * The lock is a kernel flock on the persistent `<ENIGMA_HOME>/index.lock`
- * anchor (`indexLockPath`); see ADR-003 in `docs/architecture.md` for the
- * mechanism decision, the stop/restart-all-writers upgrade requirement, and
- * the known limitation around same-name concurrent `set` with
- * `rotate=false`.
+ *   `rotate=false` for the same name may leave the loser's value as
+ *   an orphan in the depository; see ADR-003 and Issue #70.
  */
 /**
  * Acquire the index lock — a thin wrapper around `acquireFileLock` that
@@ -235,6 +190,20 @@ function acquireIndexLock(): Lock {
   return acquireFileLock(indexLockPath(), 'the index lock');
 }
 
+/**
+ * Apply `delta` to the index under an interprocess lock so a concurrent
+ * writer can never silently overwrite another writer's just-committed
+ * entry (Issue #66). Critical section:
+ *
+ *   lock → re-read index → delta(current) → write → unlock
+ *
+ * The body is intentionally synchronous — there is **no `await` of
+ * depository I/O inside the lock**. Slow depository work (1Password
+ * prompts, keychain operations) belongs in the caller, OUTSIDE the lock.
+ * Callers compute their delta from the `current` index passed to the
+ * closure, which is the authoritative state at the moment the lock was
+ * acquired.
+ */
 export function mutateIndex(delta: (current: IndexFile) => IndexFile): void {
   const lock = acquireIndexLock();
   try {

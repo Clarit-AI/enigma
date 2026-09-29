@@ -248,17 +248,15 @@ export function removeNames(names: readonly string[]): void {
     let dirty = false;
     for (const target of current.targets) {
       const remaining = target.names.filter((n) => !drop.has(n));
-      if (remaining.length < target.names.length) dirty = true;
-      if (remaining.length > 0) {
-        if (remaining.length < target.names.length) {
-          next.push({ ...target, names: remaining });
-        } else {
-          next.push(target);
-        }
-      } else if (target.names.length > 0) {
-        // target was dropped (its non-empty list became empty).
-        dirty = true;
+      // Unchanged target — re-emit as-is; no ledger write needed.
+      if (remaining.length === target.names.length) {
+        next.push(target);
+        continue;
       }
+      // Something changed on this target.
+      dirty = true;
+      if (remaining.length > 0) next.push({ ...target, names: remaining });
+      // else: non-empty list became empty → drop the target entirely
     }
     if (!dirty) return;
     writeJsonFileAtomic(renderLedgerPath(), { ...current, targets: next });
