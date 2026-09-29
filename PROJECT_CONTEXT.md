@@ -30,8 +30,8 @@
 
 ## Current Status
 
-- **Last updated**: 2026-09-28
-- **Current iteration goal**: none open. `v0.3.2` shipped 2026-09-28; the next milestone is not yet scoped. Plan and critique of record for the `v0.3.0` wave: Traycer artifacts `v0-3-0-plan` and `v0-3-0-plan-critique`, with the post-release resync in `v0-3-0-resync`.
+- **Last updated**: 2026-09-29
+- **Current iteration goal**: `v0.4.0` — render delivery (milestone "v0.4.0 — .env render delivery", Issues #106–#111; git hook deferred to #105). Apps read secrets from a managed block in each worktree's `.env`, rendered from the authoritative depository. Direction of record: PR #91 assessment (Design B) and Traycer artifacts `encrypted-default-direction`, `encrypted-default-design`.
 - **Shipped**: `0.3.2` (`enigma--v0.3.2`) — read-guard checks the child of `enigma run`, and PATH-shim fixes (stale-link re-point, build-embedded version, world-writable directories refused). Previous: `0.3.1` (`enigma--v0.3.1`, `enigma` on `PATH` after a marketplace install), `0.3.0` (`enigma--v0.3.0`) — repo-level project scope + `enigma migrate-scope`, `flock(2)` index-write serialization, rotate-then-remove, extensible request form, wake-on-submit, `/enigma:remove`, project-scoped audit attribution, and the KHA Entertainment marketplace cross-listing. Before that: `0.2.0` (`enigma--v0.2.0`).
 - **Install channel**: the plugin marketplace is the only supported install path. The npm package `@clarit.ai/enigma` is **shelved** — never published, and `RELEASING.md` records it as such. Revisit when support for harnesses beyond Claude Code grows.
 - **Known tech debt**: see the bottom of `docs/feature-log.md`
@@ -55,6 +55,19 @@
 - **Rotate replaces, then removes the old copy** in the same depository; a failed cleanup warns and audits but does not fail the rotate (#70).
 - **Request form** parses a pasted `.env` blob server-side on submit; unvalidated name text is counted, never echoed (#71).
 - **Fallback wake-up** via `GET /r/:id/status` (state only); the local server never idles out while a request is open; a used record swept without results surfaces `E_OUTCOME_UNKNOWN` (#69).
+
+### v0.4.0 decisions — render delivery (confirmed 2026-09-29)
+
+- **Product scope**: keep secret values out of the agent's context window while apps read secrets the normal way. Enigma is a delivery layer, not a vault or a security product; prompt friction belongs only to stores the user picks for it (Keychain, 1Password).
+- **Storage vs delivery**: the depository is authoritative; `encrypted` stays the default (already the code default). `env` remains for compatibility, labelled "plaintext, this worktree only".
+- **Delivery**: a managed block in the worktree's `.env` (`# enigma:render:begin` / `# enigma:render:end`, distinct from the `env` depository's markers), written `0600` via temp file + rename, never read back.
+- **Render set**: every project-scoped secret for this repository in a no-prompt store (`encrypted`, `env`); globals are not rendered; optional `.enigma.json` `render` key narrows, retargets, or disables. Prompting stores are never auto-rendered; `enigma render NAME` renders one explicitly.
+- **Per-worktree axis**: a names-only ledger at `<config dir>/render-ledger.json` (`enigmaHome()` in `src/core/paths.ts`, so `ENIGMA_HOME` redirects it like `index.json`) records render targets; the index keeps one entry per repository.
+- **Triggers**: `enigma render`; SessionStart; set/rotate/remove/move fan-out using the value already in hand. No value-resolving call under `src/mcp/**` or `src/web/**`. Git `post-checkout` hook deferred (#105).
+- **Locking**: target files use the #66 native lock through a generic `acquireFileLock(path)`. The anchor lives under `<config dir>/locks/` and is named by a hash of the target's resolved absolute path — never its basename, because every worktree has its own `.env` at the same relative name and a basename key would make worktrees contend.
+- **Audit**: new op `render`, one line per name with the worktree path.
+- **Tripwire**: unchanged. It warns when a tracked value appears in a tool's output. The agent's direct reads of a rendered file are already denied by the read-guard, so a tripwire hit after rendering means the value really reached the agent's context (app logs, `docker inspect`, …): correct, not noise. No suppression for rendered values.
+- **Where the interfaces are documented**: `enigma render`, the ledger format, the render markers, the `render` audit op and the `.enigma.json` `render` key land in `docs/api-contracts.md` with #107 (and #110 for doctor output); the render-delivery ADR lands in `docs/architecture.md` with #111.
 
 ---
 
