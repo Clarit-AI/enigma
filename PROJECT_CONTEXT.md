@@ -72,15 +72,11 @@ implementation:
     model: sonnet
     reasoning_effort: high
 fix:
-  harness: opencode
-  model: minimax-coding-plan:MiniMax-M3
+  harness: claude
+  model: sonnet
   profile: null
-  reasoning_effort: thinking
+  reasoning_effort: high
   permission_mode: full_access
-  alternate:
-    harness: claude
-    model: sonnet
-    reasoning_effort: high
 prototype: {}
 explore:
   harness: devin
@@ -89,8 +85,8 @@ explore:
   reasoning_effort: null
   permission_mode: full_access
 qa:
-  harness: opencode
-  model: xiaomi-token-plan-sgp:mimo-v2.6-pro
+  harness: claude
+  model: opus
   profile: null
   reasoning_effort: high
   permission_mode: full_access
@@ -102,7 +98,7 @@ review:
   permission_mode: full_access
 ```
 
-Routes updated by the user 2026-09-23 for v0.3.0. Lanes that must run Claude-native executable skills stay on `claude`. Per the standing approval of 2026-09-08, a delegated lane may move to Opus or Fable when the task genuinely needs it; the lead states why. `full_access` is Traycer's default; QA and review are read-only by prompt and are verified by clean-worktree and unchanged-head checks.
+Routes updated by the user 2026-09-23 for v0.3.0. On 2026-09-28 the user moved `fix` to Claude Sonnet and `qa` to Claude Opus after the OpenCode routes failed twice in one session (a model-list probe timeout, then a QA turn that returned an empty reply). Lanes that must run Claude-native executable skills stay on `claude`. Per the standing approval of 2026-09-08, a delegated lane may move to Opus or Fable when the task genuinely needs it; the lead states why. `full_access` is Traycer's default; QA and review are read-only by prompt and are verified by clean-worktree and unchanged-head checks.
 
 ---
 
