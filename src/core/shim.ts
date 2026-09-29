@@ -20,14 +20,32 @@
 // only ever:
 //   - considers ABSOLUTE directories that are already on PATH (a relative entry
 //     like `./bin` is someone else's project directory, not ours to write into);
-//   - replaces an existing `enigma` only when it is a DANGLING symlink, which
-//     is safe by construction — nothing can be using a link whose target does
-//     not exist, and a dead link is exactly what a plugin upgrade leaves behind;
-//   - never touches a regular file, a directory, or a working symlink, so a real
-//     `enigma` install further down PATH is reported, not shadowed;
+//   - only writes into a directory that is writable by this user and NOT by
+//     group or other (`/tmp`, a sticky world-writable dir, is not a place to
+//     leave an executable that a session will later run);
+//   - replaces an existing `enigma` only when it is a DANGLING symlink (safe by
+//     construction — nothing can be using a link whose target does not exist,
+//     and a dead link is exactly what a plugin upgrade leaves behind) or a
+//     symlink to an OLDER Enigma plugin install's CLI that is still on disk
+//     (an upgrade that keeps the previous version around leaves this one);
+//   - never touches a regular file, a directory, or a working symlink to
+//     anything that is not an Enigma plugin bundle, so a real `enigma` install
+//     further down PATH is reported, not shadowed;
 //   - never throws. A hook that throws breaks the user's session.
-import { accessSync, constants, existsSync, lstatSync, readlinkSync, renameSync, rmSync, symlinkSync } from 'node:fs';
-import { delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
+import {
+  accessSync,
+  constants,
+  existsSync,
+  lstatSync,
+  readFileSync,
+  readlinkSync,
+  realpathSync,
+  renameSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+} from 'node:fs';
+import { basename, delimiter, dirname, isAbsolute, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export type ShimStatus =
@@ -35,7 +53,7 @@ export type ShimStatus =
   | 'installed'
   /** Already correct — Enigma is on PATH. Nothing was written. */
   | 'present'
-  /** A dangling shim (dead plugin root) was re-pointed at the current CLI. */
+  /** A stale shim (dead plugin root, or an older plugin install) was re-pointed at the current CLI. */
   | 'repointed'
   /** Something else called `enigma` is on PATH and already resolves. Left alone. */
   | 'occupied'
@@ -77,17 +95,41 @@ function pathDirs(pathEnv: string): string[] {
   return dirs;
 }
 
+/**
+ * A directory this user can write, and that nobody else can. A group- or
+ * world-writable directory (`/tmp`, or `/usr/local/bin` on a shared admin
+ * group) would let another account swap the link's neighbours, so it is never
+ * a shim location even when `accessSync` says we may write there.
+ */
 function isWritableDir(dir: string): boolean {
   try {
     accessSync(dir, constants.W_OK | constants.X_OK);
-    return true;
+    return (statSync(dir).mode & 0o022) === 0;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * True for `<root>/dist/cli.mjs` where `<root>` is an Enigma plugin install
+ * (its manifest names the plugin `enigma`). The filename alone is not enough:
+ * `dist/cli.mjs` is a common name in unrelated projects, and this module never
+ * replaces something it cannot show is its own.
+ */
+function isEnigmaPluginCli(realCli: string): boolean {
+  try {
+    if (basename(realCli) !== 'cli.mjs') return false;
+    const dist = dirname(realCli);
+    if (basename(dist) !== 'dist') return false;
+    const manifest: unknown = JSON.parse(readFileSync(join(dirname(dist), '.claude-plugin', 'plugin.json'), 'utf8'));
+    return typeof manifest === 'object' && manifest !== null && (manifest as { name?: unknown }).name === 'enigma';
   } catch {
     return false;
   }
 }
 
 /** What currently occupies `<dir>/enigma`. */
-type Slot = 'free' | 'dangling' | 'ours' | 'foreign';
+type Slot = 'free' | 'dangling' | 'stale' | 'ours' | 'foreign';
 
 function classify(dest: string, cli: string): { slot: Slot; link: string | null } {
   let stats;
@@ -114,7 +156,19 @@ function classify(dest: string, cli: string): { slot: Slot; link: string | null 
     resolves = false;
   }
   if (!resolves) return { slot: 'dangling', link };
-  return link === cli ? { slot: 'ours', link } : { slot: 'foreign', link };
+
+  // Compare real paths so a link that reaches the current CLI through another
+  // symlink (a symlinked plugin root, macOS `/var` -> `/private/var`) is still
+  // ours. Anything else that resolves is only replaceable when it is provably an
+  // older Enigma plugin bundle; a real `enigma` binary is never touched.
+  try {
+    const realLink = realpathSync(link);
+    if (realLink === realpathSync(cli)) return { slot: 'ours', link };
+    if (isEnigmaPluginCli(realLink)) return { slot: 'stale', link };
+  } catch {
+    // unresolvable after the F_OK probe (raced away, permission) — leave it alone
+  }
+  return { slot: 'foreign', link };
 }
 
 /**
@@ -210,10 +264,17 @@ export function ensureCliShim(options: EnsureOptions = {}): ShimResult {
       if (slot === 'foreign') {
         return { status: 'occupied', target: dest, cli, link, detail: `${dest} is not a shim and was left alone` };
       }
-      if (slot === 'dangling') {
-        if (!isWritableDir(dir)) continue;
-        if (!write) return { status: 'pending', target: dest, cli, link: cli, detail: 'a dangling shim would be refreshed here' };
+      if (slot === 'dangling' || slot === 'stale') {
+        if (!isWritableDir(dir)) {
+          // A dead link is inert, so keep looking. A stale link still RUNS, an
+          // older Enigma, and would shadow any shim created further down PATH:
+          // report it instead of pretending a new one would help.
+          if (slot === 'dangling') continue;
+          return { status: 'occupied', target: dest, cli, link, detail: `${dest} points at an older Enigma install and ${dir} is not safely writable` };
+        }
+        if (!write) return { status: 'pending', target: dest, cli, link: cli, detail: `a ${slot} shim would be refreshed here` };
         if (linkShim(dest, cli)) return { status: 'repointed', target: dest, cli, link: cli, detail: null };
+        if (slot === 'stale') return { status: 'failed', target: dest, cli, link, detail: `could not refresh ${dest}` };
         continue;
       }
       if (firstFree === null && isWritableDir(dir)) firstFree = dest;
@@ -270,7 +331,7 @@ export function describeShim(result: ShimResult): string | null {
     case 'installed':
       return `Enigma: put "enigma" on PATH at ${result.target} so "enigma run" works. If the shell has not picked it up yet, run: hash -r`;
     case 'repointed':
-      return `Enigma: refreshed the "enigma" PATH shim at ${result.target} (it pointed at a plugin version that is gone).`;
+      return `Enigma: refreshed the "enigma" PATH shim at ${result.target} (it pointed at an older or removed plugin version).`;
     case 'occupied':
       return `Enigma: ${result.detail} — "enigma" on your PATH may not be this Enigma. Run this Enigma directly: node "${result.cli ?? ''}"`;
     case 'no-writable-dir':

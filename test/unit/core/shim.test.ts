@@ -50,6 +50,18 @@ describe('PATH shim', () => {
     rmSync(tmp, { recursive: true, force: true });
   });
 
+  /** A plugin install laid out like a marketplace one; `manifestName` null omits the manifest. */
+  function makePlugin(root: string, manifestName: string | null): string {
+    mkdirSync(join(root, 'dist'), { recursive: true });
+    const bundle = join(root, 'dist', 'cli.mjs');
+    writeFileSync(bundle, '#!/usr/bin/env node\n');
+    if (manifestName !== null) {
+      mkdirSync(join(root, '.claude-plugin'));
+      writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: manifestName }));
+    }
+    return bundle;
+  }
+
   it('creates the shim in the first writable directory on PATH', () => {
     const result = ensureCliShim({ pluginRoot, pathEnv: binDir });
 
@@ -122,6 +134,129 @@ describe('PATH shim', () => {
 
       expect(ensureCliShim({ pluginRoot, pathEnv: binDir }).status).toBe('repointed');
       expect(readlinkSync(join(binDir, 'enigma'))).toBe(cli);
+    });
+  });
+
+  // Issue #94: a plugin upgrade that keeps the previous version on disk leaves a
+  // WORKING link to the old bundle. That is stale, not somebody else's `enigma`.
+  describe('self-heals a link to an older Enigma plugin install that still exists', () => {
+    it('re-points it at the current CLI', () => {
+      const older = makePlugin(join(tmp, 'older-plugin'), 'enigma');
+      symlinkSync(older, join(binDir, 'enigma'));
+
+      const result = ensureCliShim({ pluginRoot, pathEnv: binDir });
+
+      expect(result.status).toBe('repointed');
+      expect(readlinkSync(join(binDir, 'enigma'))).toBe(cli);
+      expect(readdirSync(binDir)).toEqual(['enigma']);
+    });
+
+    it('resolves a relative link to the older install', () => {
+      makePlugin(join(tmp, 'older-plugin'), 'enigma');
+      symlinkSync('../older-plugin/dist/cli.mjs', join(binDir, 'enigma'));
+
+      expect(ensureCliShim({ pluginRoot, pathEnv: binDir }).status).toBe('repointed');
+      expect(readlinkSync(join(binDir, 'enigma'))).toBe(cli);
+    });
+
+    it('reports pending instead of writing in read-only mode', () => {
+      const older = makePlugin(join(tmp, 'older-plugin'), 'enigma');
+      symlinkSync(older, join(binDir, 'enigma'));
+
+      const result = ensureCliShim({ pluginRoot, pathEnv: binDir, write: false });
+
+      expect(result.status).toBe('pending');
+      expect(readlinkSync(join(binDir, 'enigma'))).toBe(older);
+    });
+
+    it('reports occupied, not a shadowing new shim, when the stale link sits in an unsafe directory', () => {
+      const older = makePlugin(join(tmp, 'older-plugin'), 'enigma');
+      symlinkSync(older, join(binDir, 'enigma'));
+      chmodSync(binDir, 0o775);
+
+      const result = ensureCliShim({ pluginRoot, pathEnv: `${binDir}:${otherBin}` });
+
+      expect(result.status).toBe('occupied');
+      expect(readlinkSync(join(binDir, 'enigma'))).toBe(older);
+      expect(existsSync(join(otherBin, 'enigma'))).toBe(false);
+    });
+
+    it('treats a link that reaches the current CLI through another symlink as already correct', () => {
+      const aliasRoot = join(tmp, 'plugin-alias');
+      symlinkSync(pluginRoot, aliasRoot);
+      symlinkSync(join(aliasRoot, 'dist', 'cli.mjs'), join(binDir, 'enigma'));
+
+      const result = ensureCliShim({ pluginRoot, pathEnv: binDir });
+
+      expect(result.status).toBe('present');
+      expect(readlinkSync(join(binDir, 'enigma'))).toBe(join(aliasRoot, 'dist', 'cli.mjs'));
+    });
+  });
+
+  describe('still leaves a working link to anything that is not an Enigma plugin bundle', () => {
+    it('reports occupied for a symlink to a real enigma binary', () => {
+      const real = join(tmp, 'real-install', 'enigma');
+      mkdirSync(join(tmp, 'real-install'));
+      writeFileSync(real, '#!/bin/sh\necho a real enigma\n', { mode: 0o755 });
+      symlinkSync(real, join(binDir, 'enigma'));
+
+      const result = ensureCliShim({ pluginRoot, pathEnv: binDir });
+
+      expect(result.status).toBe('occupied');
+      expect(readlinkSync(join(binDir, 'enigma'))).toBe(real);
+    });
+
+    it('reports occupied for another project\'s dist/cli.mjs that has no Enigma manifest', () => {
+      const lookalike = makePlugin(join(tmp, 'someone-elses-tool'), null);
+      symlinkSync(lookalike, join(binDir, 'enigma'));
+
+      expect(ensureCliShim({ pluginRoot, pathEnv: binDir }).status).toBe('occupied');
+      expect(readlinkSync(join(binDir, 'enigma'))).toBe(lookalike);
+    });
+
+    it('reports occupied for a plugin whose manifest names a different plugin', () => {
+      const other = makePlugin(join(tmp, 'other-plugin'), 'not-enigma');
+      symlinkSync(other, join(binDir, 'enigma'));
+
+      expect(ensureCliShim({ pluginRoot, pathEnv: binDir }).status).toBe('occupied');
+      expect(readlinkSync(join(binDir, 'enigma'))).toBe(other);
+    });
+
+    it('reports occupied when the manifest is not valid JSON', () => {
+      const broken = makePlugin(join(tmp, 'broken-plugin'), 'enigma');
+      writeFileSync(join(tmp, 'broken-plugin', '.claude-plugin', 'plugin.json'), '{ not json');
+      symlinkSync(broken, join(binDir, 'enigma'));
+
+      expect(ensureCliShim({ pluginRoot, pathEnv: binDir }).status).toBe('occupied');
+    });
+  });
+
+  describe('never uses a directory that group or other can write', () => {
+    it.each(['775', '757', '777', '1777'])('skips a mode-%s directory as a shim location', (octal) => {
+      chmodSync(binDir, parseInt(octal, 8));
+
+      const result = ensureCliShim({ pluginRoot, pathEnv: `${binDir}:${otherBin}` });
+
+      expect(result.status).toBe('installed');
+      expect(result.target).toBe(join(otherBin, 'enigma'));
+      expect(existsSync(join(binDir, 'enigma'))).toBe(false);
+    });
+
+    it('reports no-writable-dir when every candidate is shared', () => {
+      chmodSync(binDir, 0o777);
+
+      expect(ensureCliShim({ pluginRoot, pathEnv: binDir }).status).toBe('no-writable-dir');
+      expect(existsSync(join(binDir, 'enigma'))).toBe(false);
+    });
+
+    it('does not refresh a dangling link in a shared directory either', () => {
+      symlinkSync(join(tmp, 'old-plugin', 'dist', 'cli.mjs'), join(binDir, 'enigma'));
+      chmodSync(binDir, 0o777);
+
+      const result = ensureCliShim({ pluginRoot, pathEnv: binDir });
+
+      expect(result.status).toBe('no-writable-dir');
+      expect(readlinkSync(join(binDir, 'enigma'))).toBe(join(tmp, 'old-plugin', 'dist', 'cli.mjs'));
     });
   });
 
