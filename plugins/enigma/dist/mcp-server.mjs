@@ -44544,21 +44544,41 @@ function pathDirs(pathEnv) {
 function isWritableDir(dir) {
   try {
     accessSync(dir, constants.W_OK | constants.X_OK);
-    return (statSync2(dir).mode & 18) === 0;
+    return (statSync2(dir).mode & 2) === 0;
   } catch {
     return false;
   }
 }
-function isEnigmaPluginCli(realCli) {
+function readBundleManifest(cli) {
   try {
-    if (basename4(realCli) !== "cli.mjs") return false;
-    const dist = dirname5(realCli);
-    if (basename4(dist) !== "dist") return false;
-    const manifest = JSON.parse(readFileSync5(join5(dirname5(dist), ".claude-plugin", "plugin.json"), "utf8"));
-    return typeof manifest === "object" && manifest !== null && manifest.name === "enigma";
+    if (basename4(cli) !== "cli.mjs") return null;
+    const dist = dirname5(cli);
+    if (basename4(dist) !== "dist") return null;
+    const root = dirname5(dist);
+    const manifest = JSON.parse(readFileSync5(join5(root, ".claude-plugin", "plugin.json"), "utf8"));
+    if (typeof manifest !== "object" || manifest === null) return null;
+    const { name, version: version2 } = manifest;
+    return { name: typeof name === "string" ? name : null, version: typeof version2 === "string" ? version2 : null, root };
   } catch {
-    return false;
+    return null;
   }
+}
+function parseSemver(v) {
+  const m = v === null ? null : /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+.*)?$/.exec(v.trim());
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3]), m[4] ?? ""] : null;
+}
+function isOlder(a, b) {
+  const x = parseSemver(a);
+  const y = parseSemver(b);
+  if (!x || !y) return false;
+  for (let i = 0; i < 3; i++) {
+    const [xi, yi] = [x[i], y[i]];
+    if (xi !== yi) return xi < yi;
+  }
+  if (x[3] === y[3]) return false;
+  if (x[3] === "") return false;
+  if (y[3] === "") return true;
+  return x[3] < y[3];
 }
 function classify(dest, cli) {
   let stats;
@@ -44584,8 +44604,17 @@ function classify(dest, cli) {
   if (!resolves) return { slot: "dangling", link };
   try {
     const realLink = realpathSync3(link);
-    if (realLink === realpathSync3(cli)) return { slot: "ours", link };
-    if (isEnigmaPluginCli(realLink)) return { slot: "stale", link };
+    const realCli = realpathSync3(cli);
+    if (realLink === realCli) return { slot: "ours", link };
+    const other = readBundleManifest(realLink);
+    if (other?.name === "enigma") {
+      if (isOlder(other.version, readBundleManifest(realCli)?.version ?? null)) return { slot: "stale", link };
+      return {
+        slot: "foreign",
+        link,
+        detail: `${dest} points at another Enigma install (${other.root}, version ${other.version ?? "unknown"}) and was left alone`
+      };
+    }
   } catch {
   }
   return { slot: "foreign", link };
@@ -44635,17 +44664,19 @@ function ensureCliShim(options = {}) {
     let firstFree = null;
     for (const dir of dirs) {
       const dest = join5(dir, "enigma");
-      const { slot, link } = classify(dest, cli);
+      const { slot, link, detail: slotDetail } = classify(dest, cli);
       if (slot === "ours") return { status: "present", target: dest, cli, link, detail: null };
       if (slot === "foreign") {
-        return { status: "occupied", target: dest, cli, link, detail: `${dest} is not a shim and was left alone` };
+        return { status: "occupied", target: dest, cli, link, detail: slotDetail ?? `${dest} is not a shim and was left alone` };
       }
       if (slot === "dangling" || slot === "stale") {
         if (!isWritableDir(dir)) {
           if (slot === "dangling") continue;
-          return { status: "occupied", target: dest, cli, link, detail: `${dest} points at an older Enigma install and ${dir} is not safely writable` };
+          return { status: "occupied", target: dest, cli, link, detail: `${dest} points at an older Enigma install and ${dir} cannot be safely written to` };
         }
-        if (!write) return { status: "pending", target: dest, cli, link: cli, detail: `a ${slot} shim would be refreshed here` };
+        if (!write) {
+          return slot === "stale" ? { status: "stale", target: dest, cli, link, detail: "a working shim points at an older Enigma install; a session would re-point it" } : { status: "pending", target: dest, cli, link: cli, detail: "a dangling shim would be refreshed here" };
+        }
         if (linkShim(dest, cli)) return { status: "repointed", target: dest, cli, link: cli, detail: null };
         if (slot === "stale") return { status: "failed", target: dest, cli, link, detail: `could not refresh ${dest}` };
         continue;
@@ -44677,7 +44708,7 @@ function describeShim(result) {
     case "repointed":
       return `Enigma: refreshed the "enigma" PATH shim at ${result.target} (it pointed at an older or removed plugin version).`;
     case "occupied":
-      return `Enigma: ${result.detail} \u2014 "enigma" on your PATH may not be this Enigma. Run this Enigma directly: node "${result.cli ?? ""}"`;
+      return `Enigma: ${result.detail} \u2014 "enigma" on your PATH may not be this Enigma. Run this Enigma directly: node "${result.cli ?? ""}" run -- <command>`;
     case "no-writable-dir":
     case "failed":
       return `Enigma: could not put "enigma" on PATH (${result.detail}). Run commands through: node "${result.cli ?? ""}" run -- <command>`;
@@ -44685,6 +44716,8 @@ function describeShim(result) {
     case "present":
     case "unavailable":
       return null;
+    case "stale":
+      return `Enigma: "enigma" on PATH points at an older Enigma install (${result.link}); the next session start will re-point it to this version.`;
     case "pending":
       return `Enigma: "enigma" is not on PATH yet; the next session start will create it at ${result.target}.`;
   }
