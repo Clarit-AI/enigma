@@ -57,7 +57,18 @@ if (mode === 'upsert') {
   }
   if (gate === 'gate') {
     process.stdout.write('ready\n');
-    readSync(0, Buffer.alloc(1)); // blocks until the parent releases both children
+    // Block until the parent releases both children. EAGAIN (non-blocking
+    // stdin) → retry; any other error or EOF → start without waiting, so
+    // the fixture never dies at top level (Kilo r5).
+    for (;;) {
+      try {
+        readSync(0, Buffer.alloc(1));
+        break;
+      } catch (err) {
+        if ((err as NodeJS.ErrnoException).code !== 'EAGAIN') break;
+        Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 5);
+      }
+    }
   }
   for (let i = 0; i < iters; i++) {
     const lock = acquireFileLock(anchor, 'timed worker');

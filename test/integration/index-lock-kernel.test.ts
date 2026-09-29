@@ -293,11 +293,19 @@ describe('acquireFileLock — real processes against the committed flock addon (
     // Start barrier (ready/go handshake): each child prints `ready` and
     // blocks on stdin; once BOTH are ready the parent releases them
     // together, so a slow spawn cannot make them miss each other.
+    // If either child exits before `ready`, release the other at once so it
+    // cannot sit blocked on stdin until the test timeout (Kilo r5).
     const children: ChildProcess[] = [];
     let readyCount = 0;
+    let released = false;
+    const releaseAll = (): void => {
+      if (released) return;
+      released = true;
+      for (const c of children) c.stdin!.end('go\n');
+    };
     const onReady = (): void => {
       readyCount += 1;
-      if (readyCount === 2) for (const c of children) c.stdin!.end('go\n');
+      if (readyCount === 2) releaseAll();
     };
     const runTimed = (anchor: string): Promise<{ code: number | null; stdout: string }> =>
       new Promise((resolvePromise) => {
@@ -310,6 +318,8 @@ describe('acquireFileLock — real processes against the committed flock addon (
           },
         );
         children.push(child);
+        // A child that already exited makes `end()` raise EPIPE; ignore it.
+        child.stdin!.on('error', () => {});
         let stdout = '';
         let sawReady = false;
         child.stdout!.on('data', (chunk: Buffer) => {
@@ -319,7 +329,10 @@ describe('acquireFileLock — real processes against the committed flock addon (
             onReady();
           }
         });
-        child.on('exit', (code) => resolvePromise({ code, stdout }));
+        child.on('exit', (code) => {
+          if (!sawReady) releaseAll();
+          resolvePromise({ code, stdout });
+        });
       });
 
     const [r1, r2] = await Promise.all([runTimed(anchor1), runTimed(anchor2)]);
