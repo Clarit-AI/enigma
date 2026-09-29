@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { runSessionStart } from '../../../src/hooks/session-start.js';
 import { RequestStore } from '../../../src/request/store.js';
 import { mutateIndex, upsertIndexEntry } from '../../../src/core/index-store.js';
@@ -20,10 +20,17 @@ describe('SessionStart', () => {
     process.env.ENIGMA_HOME = tmpHome;
     tmpProject = mkdtempSync(join(tmpdir(), 'enigma-project-'));
     mkdirSync(join(tmpProject, '.git'));
+    // runSessionStart runs the PATH shim, which writes a symlink into a real
+    // PATH directory when it finds a plugin root with a CLI bundle. Point
+    // CLAUDE_PLUGIN_ROOT at a directory with no bundle so a developer's or a
+    // Claude session's ambient value can never reach the real filesystem.
+    vi.stubEnv('CLAUDE_PLUGIN_ROOT', join(tmpHome, 'no-plugin'));
+    vi.stubEnv('ENIGMA_NO_PATH_SHIM', '');
     RequestStore.__resetForTests();
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     if (originalHome === undefined) delete process.env.ENIGMA_HOME;
     else process.env.ENIGMA_HOME = originalHome;
     rmSync(tmpHome, { recursive: true, force: true });
@@ -199,8 +206,6 @@ describe('SessionStart', () => {
     // event that runs before the agent acts.
     let shimRoot: string;
     let shimBin: string;
-    let originalPath: string | undefined;
-    let originalPluginRoot: string | undefined;
 
     beforeEach(() => {
       shimRoot = mkdtempSync(join(tmpdir(), 'enigma-plugin-'));
@@ -208,17 +213,11 @@ describe('SessionStart', () => {
       mkdirSync(join(shimRoot, 'dist'));
       writeFileSync(join(shimRoot, 'dist', 'cli.mjs'), '#!/usr/bin/env node\n');
 
-      originalPath = process.env.PATH;
-      originalPluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
-      process.env.PATH = shimBin;
-      process.env.CLAUDE_PLUGIN_ROOT = shimRoot;
+      vi.stubEnv('PATH', shimBin);
+      vi.stubEnv('CLAUDE_PLUGIN_ROOT', shimRoot);
     });
 
     afterEach(() => {
-      if (originalPath === undefined) delete process.env.PATH;
-      else process.env.PATH = originalPath;
-      if (originalPluginRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
-      else process.env.CLAUDE_PLUGIN_ROOT = originalPluginRoot;
       rmSync(shimRoot, { recursive: true, force: true });
       rmSync(shimBin, { recursive: true, force: true });
     });
@@ -243,20 +242,19 @@ describe('SessionStart', () => {
     });
 
     it('is silent, and writes nothing, outside a plugin install', () => {
-      delete process.env.CLAUDE_PLUGIN_ROOT;
+      // Empty is falsy, so the root falls back to the one inferred from the
+      // module location: `src/` under test, which has no dist/cli.mjs.
+      vi.stubEnv('CLAUDE_PLUGIN_ROOT', '');
 
       expect(ctx()).not.toContain('on PATH');
       expect(existsSync(join(shimBin, 'enigma'))).toBe(false);
     });
 
     it('respects the ENIGMA_NO_PATH_SHIM opt-out', () => {
-      process.env.ENIGMA_NO_PATH_SHIM = '1';
-      try {
-        expect(ctx()).not.toContain('on PATH');
-        expect(existsSync(join(shimBin, 'enigma'))).toBe(false);
-      } finally {
-        delete process.env.ENIGMA_NO_PATH_SHIM;
-      }
+      vi.stubEnv('ENIGMA_NO_PATH_SHIM', '1');
+
+      expect(ctx()).not.toContain('on PATH');
+      expect(existsSync(join(shimBin, 'enigma'))).toBe(false);
     });
 
     it('never puts a value in the shim line', async () => {
