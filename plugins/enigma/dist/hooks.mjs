@@ -1232,8 +1232,20 @@ function computeManifestGaps(cwd) {
 }
 
 // src/core/shim.ts
-import { accessSync, constants, existsSync as existsSync7, lstatSync, readlinkSync, renameSync as renameSync2, rmSync, symlinkSync } from "node:fs";
-import { delimiter, dirname as dirname4, isAbsolute, join as join5, resolve as resolve3 } from "node:path";
+import {
+  accessSync,
+  constants,
+  existsSync as existsSync7,
+  lstatSync,
+  readFileSync as readFileSync5,
+  readlinkSync,
+  realpathSync as realpathSync3,
+  renameSync as renameSync2,
+  rmSync,
+  statSync as statSync2,
+  symlinkSync
+} from "node:fs";
+import { basename as basename3, delimiter, dirname as dirname4, isAbsolute, join as join5, resolve as resolve3 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function pathDirs(pathEnv) {
   const seen = /* @__PURE__ */ new Set();
@@ -1251,10 +1263,60 @@ function pathDirs(pathEnv) {
 function isWritableDir(dir) {
   try {
     accessSync(dir, constants.W_OK | constants.X_OK);
-    return true;
+    return (statSync2(dir).mode & 2) === 0;
   } catch {
     return false;
   }
+}
+function readBundleManifest(cli) {
+  try {
+    if (basename3(cli) !== "cli.mjs") return null;
+    const dist = dirname4(cli);
+    if (basename3(dist) !== "dist") return null;
+    const root = dirname4(dist);
+    const manifest = JSON.parse(readFileSync5(join5(root, ".claude-plugin", "plugin.json"), "utf8"));
+    if (typeof manifest !== "object" || manifest === null) return null;
+    const { name, version } = manifest;
+    return { name: typeof name === "string" ? name : null, version: typeof version === "string" ? version : null, root };
+  } catch {
+    return null;
+  }
+}
+function parseSemver(v) {
+  const m = v === null ? null : /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+.*)?$/.exec(v.trim());
+  return m ? [Number(m[1]), Number(m[2]), Number(m[3]), m[4] ?? ""] : null;
+}
+function comparePrerelease(a, b) {
+  const xs = a.split(".");
+  const ys = b.split(".");
+  for (let i = 0; i < Math.min(xs.length, ys.length); i++) {
+    const x = xs[i];
+    const y = ys[i];
+    const xNum = /^\d+$/.test(x);
+    const yNum = /^\d+$/.test(y);
+    if (xNum && yNum) {
+      const [nx, ny] = [BigInt(x), BigInt(y)];
+      if (nx !== ny) return nx < ny ? -1 : 1;
+    } else if (xNum !== yNum) {
+      return xNum ? -1 : 1;
+    } else if (x !== y) {
+      return x < y ? -1 : 1;
+    }
+  }
+  return Math.sign(xs.length - ys.length);
+}
+function isOlder(a, b) {
+  const x = parseSemver(a);
+  const y = parseSemver(b);
+  if (!x || !y) return false;
+  for (let i = 0; i < 3; i++) {
+    const [xi, yi] = [x[i], y[i]];
+    if (xi !== yi) return xi < yi;
+  }
+  if (x[3] === y[3]) return false;
+  if (x[3] === "") return false;
+  if (y[3] === "") return true;
+  return comparePrerelease(x[3], y[3]) < 0;
 }
 function classify(dest, cli) {
   let stats;
@@ -1278,7 +1340,22 @@ function classify(dest, cli) {
     resolves = false;
   }
   if (!resolves) return { slot: "dangling", link };
-  return link === cli ? { slot: "ours", link } : { slot: "foreign", link };
+  try {
+    const realLink = realpathSync3(link);
+    const realCli = realpathSync3(cli);
+    if (realLink === realCli) return { slot: "ours", link };
+    const other = readBundleManifest(realLink);
+    if (other?.name === "enigma") {
+      if (isOlder(other.version, readBundleManifest(realCli)?.version ?? null)) return { slot: "stale", link };
+      return {
+        slot: "foreign",
+        link,
+        detail: `${dest} points at another Enigma install (${other.root}, version ${other.version ?? "unknown"}) and was left alone`
+      };
+    }
+  } catch {
+  }
+  return { slot: "foreign", link };
 }
 function linkShim(dest, cli) {
   const tmp = `${dest}.enigma-tmp-${process.pid}`;
@@ -1325,15 +1402,21 @@ function ensureCliShim(options = {}) {
     let firstFree = null;
     for (const dir of dirs) {
       const dest = join5(dir, "enigma");
-      const { slot, link } = classify(dest, cli);
+      const { slot, link, detail: slotDetail } = classify(dest, cli);
       if (slot === "ours") return { status: "present", target: dest, cli, link, detail: null };
       if (slot === "foreign") {
-        return { status: "occupied", target: dest, cli, link, detail: `${dest} is not a shim and was left alone` };
+        return { status: "occupied", target: dest, cli, link, detail: slotDetail ?? `${dest} is not a shim and was left alone` };
       }
-      if (slot === "dangling") {
-        if (!isWritableDir(dir)) continue;
-        if (!write) return { status: "pending", target: dest, cli, link: cli, detail: "a dangling shim would be refreshed here" };
+      if (slot === "dangling" || slot === "stale") {
+        if (!isWritableDir(dir)) {
+          if (slot === "dangling") continue;
+          return { status: "occupied", target: dest, cli, link, detail: `${dest} points at an older Enigma install and ${dir} cannot be safely written to` };
+        }
+        if (!write) {
+          return slot === "stale" ? { status: "stale", target: dest, cli, link, detail: "a working shim points at an older Enigma install; a session would re-point it" } : { status: "pending", target: dest, cli, link: cli, detail: "a dangling shim would be refreshed here" };
+        }
         if (linkShim(dest, cli)) return { status: "repointed", target: dest, cli, link: cli, detail: null };
+        if (slot === "stale") return { status: "failed", target: dest, cli, link, detail: `could not refresh ${dest}` };
         continue;
       }
       if (firstFree === null && isWritableDir(dir)) firstFree = dest;
@@ -1367,9 +1450,9 @@ function describeShim(result) {
     case "installed":
       return `Enigma: put "enigma" on PATH at ${result.target} so "enigma run" works. If the shell has not picked it up yet, run: hash -r`;
     case "repointed":
-      return `Enigma: refreshed the "enigma" PATH shim at ${result.target} (it pointed at a plugin version that is gone).`;
+      return `Enigma: refreshed the "enigma" PATH shim at ${result.target} (it pointed at an older or removed plugin version).`;
     case "occupied":
-      return `Enigma: ${result.detail} \u2014 "enigma" on your PATH may not be this Enigma. Run this Enigma directly: node "${result.cli ?? ""}"`;
+      return `Enigma: ${result.detail} \u2014 "enigma" on your PATH may not be this Enigma. Run this Enigma directly: node "${result.cli ?? ""}" run -- <command>`;
     case "no-writable-dir":
     case "failed":
       return `Enigma: could not put "enigma" on PATH (${result.detail}). Run commands through: node "${result.cli ?? ""}" run -- <command>`;
@@ -1377,6 +1460,8 @@ function describeShim(result) {
     case "present":
     case "unavailable":
       return null;
+    case "stale":
+      return `Enigma: "enigma" on PATH points at an older Enigma install (${result.link}); the next session start will re-point it to this version.`;
     case "pending":
       return `Enigma: "enigma" is not on PATH yet; the next session start will create it at ${result.target}.`;
   }
@@ -1415,8 +1500,8 @@ function runSessionStart(input) {
 }
 
 // src/hooks/read-guard.ts
-import { basename as basename3, resolve as resolve4, sep } from "node:path";
-import { existsSync as existsSync8, statSync as statSync2 } from "node:fs";
+import { basename as basename4, resolve as resolve4, sep } from "node:path";
+import { existsSync as existsSync8, statSync as statSync3 } from "node:fs";
 var DOTENV_EXEMPT = /* @__PURE__ */ new Set([".env.example"]);
 var BARE_ENV_DUMP_COMMANDS = /* @__PURE__ */ new Set(["env", "printenv"]);
 var NON_READING_BASH_VERBS = /* @__PURE__ */ new Set(["rm", "mv", "touch", "chmod", "stat", "ls", "find", "test"]);
@@ -1428,7 +1513,7 @@ function isDotEnvBasename(name) {
   return name === ".env" || name.startsWith(".env.");
 }
 function targetsDotEnv(pathLike) {
-  return isDotEnvBasename(basename3(pathLike.trim()));
+  return isDotEnvBasename(basename4(pathLike.trim()));
 }
 function targetsEnigmaConfig(pathLike, cwd) {
   const home = resolve4(enigmaHome());
@@ -1656,7 +1741,7 @@ function isKnownNonDirectoryPath(pathLike, cwd) {
   if (!pathLike) return false;
   try {
     const resolved = resolve4(cwd, pathLike.trim());
-    return existsSync8(resolved) && !statSync2(resolved).isDirectory();
+    return existsSync8(resolved) && !statSync3(resolved).isDirectory();
   } catch {
     return false;
   }

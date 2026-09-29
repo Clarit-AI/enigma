@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -321,6 +321,124 @@ describe('enigma_doctor', () => {
       expect(text).not.toContain('sk-sentinel-value-should-never-appear');
 
       await pair.close();
+    });
+  });
+
+  // Issue #94: `describeShim` returns null for present, disabled AND unavailable,
+  // and the tool used to turn every null into "enigma is on PATH". Only `present`
+  // may say that.
+  describe('PATH shim line (Issue #94)', () => {
+    let shimTmp: string;
+    let originalPluginRoot: string | undefined;
+    let originalPath: string | undefined;
+
+    beforeEach(() => {
+      shimTmp = mkdtempSync(join(tmpdir(), 'enigma-doctor-shim-'));
+      originalPluginRoot = process.env.CLAUDE_PLUGIN_ROOT;
+      originalPath = process.env.PATH;
+      delete process.env.ENIGMA_NO_PATH_SHIM;
+    });
+
+    afterEach(() => {
+      delete process.env.ENIGMA_NO_PATH_SHIM;
+      if (originalPluginRoot === undefined) delete process.env.CLAUDE_PLUGIN_ROOT;
+      else process.env.CLAUDE_PLUGIN_ROOT = originalPluginRoot;
+      if (originalPath === undefined) delete process.env.PATH;
+      else process.env.PATH = originalPath;
+      rmSync(shimTmp, { recursive: true, force: true });
+    });
+
+    async function shimLine(): Promise<string> {
+      const pair = await connectWithCapabilities({});
+      const result = await pair.client.callTool({ name: 'enigma_doctor', arguments: {} });
+      await pair.close();
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+      const line = text.split('\n').find((l) => l.startsWith('PATH shim:'));
+      expect(line).toBeDefined();
+      return line ?? '';
+    }
+
+    it('disabled (ENIGMA_NO_PATH_SHIM=1) names the status and does not claim enigma is on PATH', async () => {
+      process.env.ENIGMA_NO_PATH_SHIM = '1';
+
+      const line = await shimLine();
+
+      expect(line).toContain('disabled');
+      expect(line).toContain('ENIGMA_NO_PATH_SHIM=1');
+      expect(line).toContain('"enigma run" is unavailable from PATH');
+      expect(line).not.toContain('enigma is on PATH');
+    });
+
+    it('unavailable (no dist/cli.mjs under the plugin root) names the status and does not claim enigma is on PATH', async () => {
+      const emptyRoot = join(shimTmp, 'empty-plugin');
+      mkdirSync(emptyRoot);
+      process.env.CLAUDE_PLUGIN_ROOT = emptyRoot;
+
+      const line = await shimLine();
+
+      expect(line).toContain('unavailable');
+      expect(line).toContain('"enigma run" is unavailable from PATH');
+      expect(line).not.toContain('enigma is on PATH');
+    });
+
+    it('present is unchanged: enigma is on PATH', async () => {
+      const root = join(shimTmp, 'plugin');
+      const bin = join(shimTmp, 'bin');
+      mkdirSync(join(root, 'dist'), { recursive: true });
+      mkdirSync(bin);
+      writeFileSync(join(root, 'dist', 'cli.mjs'), '#!/usr/bin/env node\n');
+      symlinkSync(join(root, 'dist', 'cli.mjs'), join(bin, 'enigma'));
+      process.env.CLAUDE_PLUGIN_ROOT = root;
+      // The temp dir goes first, so the scan stops at our link before it can
+      // reach whatever `enigma` the developer's real PATH holds.
+      process.env.PATH = `${bin}:${originalPath ?? ''}`;
+
+      const line = await shimLine();
+
+      expect(line).toBe('PATH shim: enigma is on PATH — use `enigma run -- <command>`');
+    });
+
+    /** A plugin root with a CLI bundle and a manifest, pointed at by CLAUDE_PLUGIN_ROOT or by a link. */
+    function makeInstall(name: string, version: string): { root: string; cli: string } {
+      const root = join(shimTmp, name);
+      mkdirSync(join(root, 'dist'), { recursive: true });
+      mkdirSync(join(root, '.claude-plugin'));
+      writeFileSync(join(root, 'dist', 'cli.mjs'), '#!/usr/bin/env node\n');
+      writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'enigma', version }));
+      return { root, cli: join(root, 'dist', 'cli.mjs') };
+    }
+
+    it('occupied names the runnable `node "<cli>" run -- <command>` form (exact line)', async () => {
+      const current = makeInstall('current', '2.0.0');
+      const bin = join(shimTmp, 'bin');
+      mkdirSync(bin);
+      writeFileSync(join(bin, 'enigma'), '#!/bin/sh\necho someone else\n', { mode: 0o755 });
+      process.env.CLAUDE_PLUGIN_ROOT = current.root;
+      process.env.PATH = `${bin}:${originalPath ?? ''}`;
+
+      const line = await shimLine();
+
+      expect(line).toBe(
+        `PATH shim: Enigma: ${join(bin, 'enigma')} is not a shim and was left alone — "enigma" on your PATH may not be this Enigma. Run this Enigma directly: node "${current.cli}" run -- <command>`,
+      );
+    });
+
+    it('a working link to an older install says it will be re-pointed, never "not on PATH yet" (exact line)', async () => {
+      const current = makeInstall('current', '2.0.0');
+      const older = makeInstall('older', '1.0.0');
+      const bin = join(shimTmp, 'bin');
+      mkdirSync(bin);
+      symlinkSync(older.cli, join(bin, 'enigma'));
+      process.env.CLAUDE_PLUGIN_ROOT = current.root;
+      process.env.PATH = `${bin}:${originalPath ?? ''}`;
+
+      const line = await shimLine();
+
+      expect(line).toBe(
+        `PATH shim: Enigma: "enigma" on PATH points at an older Enigma install (${older.cli}); the next session start will re-point it to this version.`,
+      );
+      // doctor is read-only: the link must not have been touched.
+      expect(readlinkSync(join(bin, 'enigma'))).toBe(older.cli);
     });
   });
 });

@@ -7,7 +7,7 @@ import { EnigmaError } from '../../core/errors.js';
 import { classifyLegacyScopeEntries, legacyScopeCountsLine, readIndex } from '../../core/index-store.js';
 import { computeManifestGaps } from '../../core/manifest-gaps.js';
 import { auditLogPath, configPath, enigmaHome, indexPath, keyPath, secretsPath } from '../../core/paths.js';
-import { ensureCliShim, describeShim } from '../../core/shim.js';
+import { ensureCliShim, describeShim, type ShimResult } from '../../core/shim.js';
 import { RequestStore } from '../../request/store.js';
 import { detectAll } from '../../storage/detect.js';
 import { supportsFormElicitation, supportsUrlElicitation } from '../elicit.js';
@@ -22,6 +22,24 @@ async function binaryStatus(command: string, args: string[]): Promise<{ availabl
     return { available: true, version: stdout.trim() || null };
   } catch {
     return { available: false, version: null };
+  }
+}
+
+/**
+ * The `PATH shim:` line. `describeShim` is the SessionStart hook's "what is
+ * news" phrasing and returns `null` for `present`, `disabled` and `unavailable`;
+ * only `present` means `enigma` is actually on PATH, so the other two must say
+ * so rather than fall through to the same reassurance.
+ */
+function pathShimLine(shim: ShimResult): string {
+  switch (shim.status) {
+    case 'present':
+      return 'enigma is on PATH — use `enigma run -- <command>`';
+    case 'disabled':
+    case 'unavailable':
+      return `${shim.status} (${shim.detail ?? 'no detail'}) — "enigma run" is unavailable from PATH`;
+    default:
+      return describeShim(shim) ?? `${shim.status}${shim.detail ? ` (${shim.detail})` : ''}`;
   }
 }
 
@@ -80,10 +98,11 @@ export function registerDoctorTool(server: McpServer): void {
         // Whether `enigma run` — the only delivery path that keeps a value out
         // of the context window — is actually runnable from a shell. Read-only:
         // the SessionStart hook installs the shim, this only reports on it. When
-        // the status is not `present`, the exact invocation is given so the
-        // agent has something it can actually execute. Paths and a status word
-        // only, never a value (ADR-001).
-        `PATH shim: ${describeShim(ensureCliShim({ write: false })) ?? 'enigma is on PATH — use `enigma run -- <command>`'}`,
+        // the status is not `present`, the line says so (and, where a CLI bundle
+        // is known, gives the exact invocation) so the agent has something it
+        // can actually execute. Paths and a status word only, never a value
+        // (ADR-001).
+        `PATH shim: ${pathShimLine(ensureCliShim({ write: false }))}`,
       ];
       if (legacyScopeLine) lines.push(`Legacy scope entries: ${legacyScopeLine}`);
 
