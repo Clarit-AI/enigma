@@ -16,11 +16,11 @@
   targets report occupied; directories writable by the world are never shim
   locations; realpaths are compared so a symlinked plugin root still counts as
   present; read-only doctor reports a distinct `stale` status.
-- Read-guard follow-ups from #95 (Issue #96): node options that take a
-  separate value are skipped when locating the bundled CLI; `node <script> run`
-  is recognised only for an Enigma plugin bundle (unresolvable scripts still
-  deny); leading `NAME=value`, `time` and `command` are skipped before the
-  command head at top level and on the `enigma run` child.
+- Read-guard follow-ups from #95 (Issue #96): the bundled-CLI form is
+  recognised by a `node … cli.mjs run -- <child>` token pattern, so node
+  options that take a separate value cannot hide it and no filesystem or
+  manifest check is involved; leading `NAME=value`, `time` and `command` are
+  skipped before the command head at top level and on the `enigma run` child.
 
 ### `v0.3.0` — shipped 2026-09-24 as `enigma--v0.3.0` (PR #86)
 
