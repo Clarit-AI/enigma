@@ -2983,7 +2983,7 @@ var require_compile = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve5.call(this, root, ref);
+      let _sch = resolve6.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -3010,7 +3010,7 @@ var require_compile = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve5(root, ref) {
+    function resolve6(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -3840,7 +3840,7 @@ var require_fast_uri = __commonJS({
       }
       return uri;
     }
-    function resolve5(baseURI, relativeURI, options) {
+    function resolve6(baseURI, relativeURI, options) {
       const schemelessOptions = options ? Object.assign({ scheme: "null" }, options) : { scheme: "null" };
       const {
         parsed: baseParsed,
@@ -4209,7 +4209,7 @@ var require_fast_uri = __commonJS({
     var fastUri = {
       SCHEMES,
       normalize,
-      resolve: resolve5,
+      resolve: resolve6,
       resolveComponent,
       equal,
       serialize,
@@ -10000,7 +10000,7 @@ var require_compile2 = __commonJS({
       const schOrFunc = root.refs[ref];
       if (schOrFunc)
         return schOrFunc;
-      let _sch = resolve5.call(this, root, ref);
+      let _sch = resolve6.call(this, root, ref);
       if (_sch === void 0) {
         const schema = (_a3 = root.localRefs) === null || _a3 === void 0 ? void 0 : _a3[ref];
         const { schemaId } = this.opts;
@@ -10027,7 +10027,7 @@ var require_compile2 = __commonJS({
     function sameSchemaEnv(s1, s2) {
       return s1.schema === s2.schema && s1.root === s2.root && s1.baseId === s2.baseId;
     }
-    function resolve5(root, ref) {
+    function resolve6(root, ref) {
       let sch;
       while (typeof (sch = this.refs[ref]) == "string")
         ref = sch;
@@ -21555,7 +21555,7 @@ var recursive = /* @__PURE__ */ new WeakMap();
 var NONE = 0;
 var ASSUMED = 1;
 var PROVEN = 2;
-function isRecursive(inst, stack, resolve5) {
+function isRecursive(inst, stack, resolve6) {
   const cached3 = recursive.get(inst);
   if (cached3 !== void 0)
     return cached3 ? PROVEN : NONE;
@@ -21565,7 +21565,7 @@ function isRecursive(inst, stack, resolve5) {
   let result = NONE;
   const check2 = (child) => {
     if (result !== PROVEN && child?._zod) {
-      const answer = isRecursive(child, stack, resolve5);
+      const answer = isRecursive(child, stack, resolve6);
       if (answer > result)
         result = answer;
     }
@@ -21576,7 +21576,7 @@ function isRecursive(inst, stack, resolve5) {
       const desc = Object.getOwnPropertyDescriptor(sh, key);
       if (spread && !desc.enumerable)
         continue;
-      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve5) : NONE;
+      const child = desc.get ? ASSUMED : desc.value?._zod ? isRecursive(desc.value, stack, resolve6) : NONE;
       if (child > answer)
         answer = child;
     }
@@ -21640,7 +21640,7 @@ function isRecursive(inst, stack, resolve5) {
       break;
     // `$ZodLazy` caches its inner on the def, so a resolved edge is followed exactly
     case "lazy": {
-      const inner = def._cachedInner ?? (resolve5 ? inst._zod.innerType : void 0);
+      const inner = def._cachedInner ?? (resolve6 ? inst._zod.innerType : void 0);
       merge2(inner ? isRecursive(inner, stack, false) : ASSUMED);
       break;
     }
@@ -40048,7 +40048,7 @@ var Protocol = class {
           return;
         }
         const pollInterval = task2.pollInterval ?? this._options?.defaultTaskPollInterval ?? 1e3;
-        await new Promise((resolve5) => setTimeout(resolve5, pollInterval));
+        await new Promise((resolve6) => setTimeout(resolve6, pollInterval));
         options?.signal?.throwIfAborted();
       }
     } catch (error62) {
@@ -40065,7 +40065,7 @@ var Protocol = class {
    */
   request(request, resultSchema, options) {
     const { relatedRequestId, resumptionToken, onresumptiontoken, task, relatedTask } = options ?? {};
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       const earlyReject = (error62) => {
         reject(error62);
       };
@@ -40143,7 +40143,7 @@ var Protocol = class {
           if (!parseResult.success) {
             reject(parseResult.error);
           } else {
-            resolve5(parseResult.data);
+            resolve6(parseResult.data);
           }
         } catch (error62) {
           reject(error62);
@@ -40404,12 +40404,12 @@ var Protocol = class {
       }
     } catch {
     }
-    return new Promise((resolve5, reject) => {
+    return new Promise((resolve6, reject) => {
       if (signal.aborted) {
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
         return;
       }
-      const timeoutId = setTimeout(resolve5, interval);
+      const timeoutId = setTimeout(resolve6, interval);
       signal.addEventListener("abort", () => {
         clearTimeout(timeoutId);
         reject(new McpError(ErrorCode.InvalidRequest, "Request cancelled"));
@@ -41500,7 +41500,7 @@ var McpServer = class {
     let task = createTaskResult.task;
     const pollInterval = task.pollInterval ?? 5e3;
     while (task.status !== "completed" && task.status !== "failed" && task.status !== "cancelled") {
-      await new Promise((resolve5) => setTimeout(resolve5, pollInterval));
+      await new Promise((resolve6) => setTimeout(resolve6, pollInterval));
       const updatedTask = await extra.taskStore.getTask(taskId);
       if (!updatedTask) {
         throw new McpError(ErrorCode.InternalError, `Task ${taskId} not found during polling`);
@@ -42164,12 +42164,12 @@ var StdioServerTransport = class {
     this.onclose?.();
   }
   send(message) {
-    return new Promise((resolve5) => {
+    return new Promise((resolve6) => {
       const json2 = serializeMessage(message);
       if (this._stdout.write(json2)) {
-        resolve5();
+        resolve6();
       } else {
-        this._stdout.once("drain", resolve5);
+        this._stdout.once("drain", resolve6);
       }
     });
   }
@@ -42210,13 +42210,13 @@ var REVEAL_TTL_MS = 5 * 60 * 1e3;
 var SWEEP_INTERVAL_MS = 60 * 1e3;
 var USED_GRACE_MS = 5 * 60 * 1e3;
 function deferred() {
-  let resolve5;
+  let resolve6;
   let reject;
   const promise2 = new Promise((res, rej) => {
-    resolve5 = res;
+    resolve6 = res;
     reject = rej;
   });
-  return { promise: promise2, resolve: resolve5, reject };
+  return { promise: promise2, resolve: resolve6, reject };
 }
 function defaultTtlMs(kind) {
   return kind === "reveal" ? REVEAL_TTL_MS : REQUEST_TTL_MS;
@@ -42516,8 +42516,8 @@ var RequestStore = {
 import { execFile } from "node:child_process";
 var DETECT_TIMEOUT_MS = 2e3;
 function checkBinary(command, args) {
-  return new Promise((resolve5) => {
-    execFile(command, args, { timeout: DETECT_TIMEOUT_MS, maxBuffer: 4096 }, (error62) => resolve5(!error62));
+  return new Promise((resolve6) => {
+    execFile(command, args, { timeout: DETECT_TIMEOUT_MS, maxBuffer: 4096 }, (error62) => resolve6(!error62));
   });
 }
 function detectCloudflared() {
@@ -42536,7 +42536,7 @@ function remoteUnavailable(detail) {
   return new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: `cloudflared: ${detail}` });
 }
 function startCloudflaredTunnel(targetUrl) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     const child = spawn("cloudflared", ["tunnel", "--url", targetUrl], { stdio: ["ignore", "ignore", "pipe"] });
     child.unref();
     let stderrBuf = "";
@@ -42574,7 +42574,7 @@ function startCloudflaredTunnel(targetUrl) {
         const killer = setTimeout(() => child.kill("SIGKILL"), 2e3);
         killer.unref();
       };
-      resolve5({
+      resolve6({
         url: match[0],
         binary: "cloudflared",
         stop,
@@ -42603,13 +42603,13 @@ function remoteUnavailable2(detail) {
   return new EnigmaError({ code: "E_REMOTE_UNAVAILABLE", message: `tailscale: ${detail}` });
 }
 function runTailscale(args, timeoutMs) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     execFile2("tailscale", args, { timeout: timeoutMs, maxBuffer: 1024 * 1024 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve6({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
@@ -42637,7 +42637,7 @@ function offBestEffort() {
 async function startTailscaleServe(port) {
   const dnsName = await selfDnsName();
   const target = `http://127.0.0.1:${port}`;
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     const child = spawn2("tailscale", ["serve", `--https=${SERVE_PORT}`, target], { stdio: "ignore" });
     child.unref();
     let settled2 = false;
@@ -42657,7 +42657,7 @@ async function startTailscaleServe(port) {
     const graceTimer = setTimeout(() => {
       if (settled2) return;
       settled2 = true;
-      resolve5({ url: `https://${dnsName}`, binary: "tailscale", stop, waitForUnexpectedExit: () => unexpectedExit });
+      resolve6({ url: `https://${dnsName}`, binary: "tailscale", stop, waitForUnexpectedExit: () => unexpectedExit });
     }, START_GRACE_MS);
     graceTimer.unref();
     child.on("error", () => {
@@ -43024,11 +43024,11 @@ function appendAuditEvent(event) {
 
 // src/core/index-store.ts
 import { existsSync as existsSync4 } from "node:fs";
-import { resolve as resolve3 } from "node:path";
+import { resolve as resolve4 } from "node:path";
 
 // src/core/file-lock.ts
 import { chmodSync as chmodSync2, closeSync, ftruncateSync, mkdirSync as mkdirSync2, openSync, realpathSync as realpathSync2, writeSync } from "node:fs";
-import { dirname as dirname5, isAbsolute, relative, sep } from "node:path";
+import { dirname as dirname5, isAbsolute, relative, resolve as resolve3, sep } from "node:path";
 
 // src/core/native-lock.ts
 import { createRequire } from "node:module";
@@ -43107,7 +43107,8 @@ function syncSleep(ms) {
 function ensureLockDir(lockPath) {
   const dir = dirname5(lockPath);
   try {
-    mkdirSync2(dir, { recursive: true, mode: 448 });
+    const underHome = isWithin(resolve3(enigmaHome()), resolve3(dir));
+    mkdirSync2(dir, underHome ? { recursive: true, mode: 448 } : { recursive: true });
   } catch {
   }
   const realDir = realInsideEnigmaHome(dir);
@@ -43126,9 +43127,11 @@ function realInsideEnigmaHome(dir) {
   } catch {
     return void 0;
   }
-  const rel = relative(realHome, realDir);
-  const inside = rel === "" || rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
-  return inside ? realDir : void 0;
+  return isWithin(realHome, realDir) ? realDir : void 0;
+}
+function isWithin(parent, child) {
+  const rel = relative(parent, child);
+  return rel === "" || rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
 }
 function wrapAcquireError(err, lockPath) {
   const causeName = err instanceof Error ? err.constructor.name : String(err);
@@ -43275,7 +43278,7 @@ var ORPHAN_ADOPTABLE_DEPOSITORIES = /* @__PURE__ */ new Set([
 function classifyLegacyScopeEntries(index, opts) {
   const identityPath = findRepoIdentityPath(opts.cwd);
   const pid = projectId(opts.cwd);
-  const fromResolved = opts.from === void 0 ? void 0 : resolve3(opts.from);
+  const fromResolved = opts.from === void 0 ? void 0 : resolve4(opts.from);
   const items = [];
   const pool = [];
   for (const entry of index.entries) {
@@ -43289,7 +43292,7 @@ function classifyLegacyScopeEntries(index, opts) {
       items.push({ entry, class: "orphaned-unrecoverable", rekeyable: false, detail: `value is gone; re-request ${entry.name}` });
       continue;
     }
-    if (fromResolved !== void 0 && recordedPath !== void 0 && resolve3(recordedPath) === fromResolved) {
+    if (fromResolved !== void 0 && recordedPath !== void 0 && resolve4(recordedPath) === fromResolved) {
       pool.push({ entry, orphan: true });
     } else {
       items.push({
@@ -43609,24 +43612,24 @@ var PROBE_REF = "__enigma_detect_probe__";
 var REF_PATTERN = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH = 512;
 function runSecretTool(args) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     execFile3(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve6({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecretToolWithStdin(args, value) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     const child = execFile3(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve6({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -43771,24 +43774,24 @@ var REF_PATTERN2 = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH2 = 512;
 var MARKER_BYTE = 1;
 function runSecurity(args) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     execFile4(SECURITY_BIN, args, { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve6({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecurityBatch(line) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     const child = execFile4(SECURITY_BIN, ["-i"], { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve6({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -43950,24 +43953,24 @@ var REF_MAX_LENGTH3 = 512;
 var VAULT_MISSING_PATTERN = /isn't a vault|no vault named|could not find vault/i;
 var ITEM_MISSING_PATTERN = /isn't an item|could not find item|item.*not found/i;
 function runOp(args) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     execFile5(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve6({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runOpWithStdin(args, stdinData) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     const child = execFile5(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error62, stdout, stderr) => {
       if (error62) {
         reject(Object.assign(error62, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve6({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -44556,7 +44559,7 @@ import {
   statSync as statSync2,
   symlinkSync
 } from "node:fs";
-import { basename as basename5, delimiter, dirname as dirname6, isAbsolute as isAbsolute2, join as join5, resolve as resolve4 } from "node:path";
+import { basename as basename5, delimiter, dirname as dirname6, isAbsolute as isAbsolute2, join as join5, resolve as resolve5 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function pathDirs(pathEnv) {
   const seen = /* @__PURE__ */ new Set();
@@ -44564,7 +44567,7 @@ function pathDirs(pathEnv) {
   for (const raw of pathEnv.split(delimiter)) {
     const entry = raw.trim();
     if (entry.length === 0 || !isAbsolute2(entry)) continue;
-    const abs = resolve4(entry);
+    const abs = resolve5(entry);
     if (seen.has(abs)) continue;
     seen.add(abs);
     dirs.push(abs);
@@ -44643,7 +44646,7 @@ function classify(dest, cli) {
   } catch {
     return { slot: "foreign", link: null };
   }
-  const link = isAbsolute2(raw) ? resolve4(raw) : resolve4(dirname6(dest), raw);
+  const link = isAbsolute2(raw) ? resolve5(raw) : resolve5(dirname6(dest), raw);
   let resolves = true;
   try {
     accessSync(link, constants.F_OK);
@@ -44687,7 +44690,7 @@ function defaultPluginRoot() {
   const fromEnv = process.env.CLAUDE_PLUGIN_ROOT;
   if (fromEnv) return fromEnv;
   try {
-    return resolve4(dirname6(fileURLToPath2(import.meta.url)), "..");
+    return resolve5(dirname6(fileURLToPath2(import.meta.url)), "..");
   } catch {
     return null;
   }
@@ -44701,7 +44704,7 @@ function ensureCliShim(options = {}) {
     if (!pluginRoot) {
       return { status: "unavailable", target: null, cli: null, link: null, detail: "not running from a plugin install" };
     }
-    const cli = resolve4(pluginRoot, "dist", "cli.mjs");
+    const cli = resolve5(pluginRoot, "dist", "cli.mjs");
     if (!existsSync8(cli)) {
       return { status: "unavailable", target: null, cli: null, link: null, detail: `no CLI bundle at ${cli}` };
     }
@@ -45509,7 +45512,7 @@ var PayloadTooLargeError = class extends Error {
   }
 };
 function readBody(req, maxBytes = MAX_BODY_BYTES) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     const chunks = [];
     let total = 0;
     let settled2 = false;
@@ -45530,7 +45533,7 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
     req.on("end", () => {
       if (settled2) return;
       settled2 = true;
-      resolve5(Buffer.concat(chunks));
+      resolve6(Buffer.concat(chunks));
     });
     req.on("error", settleError);
   });
@@ -47896,7 +47899,7 @@ var MIN_REARM_DELAY_MS = 1e3;
 var state;
 var starting;
 function settled(value) {
-  return new Promise((resolve5) => resolve5(value));
+  return new Promise((resolve6) => resolve6(value));
 }
 function toHandle(s) {
   return { port: s.port, origin: `http://${s.host}:${s.port}`, close: stopServer };
@@ -47932,7 +47935,7 @@ function startServer(opts = {}) {
       (_resolve, reject) => reject(new Error(`refusing to bind ${host} over plain HTTP; pass allowInsecureHttp to override (ADR-005)`))
     );
   }
-  starting = new Promise((resolve5, reject) => {
+  starting = new Promise((resolve6, reject) => {
     const server = http.createServer((req, res) => {
       if (state) resetIdleTimer(state);
       void handleRequest(req, res);
@@ -47948,7 +47951,7 @@ function startServer(opts = {}) {
       state = newState;
       resetIdleTimer(newState);
       starting = void 0;
-      resolve5(toHandle(newState));
+      resolve6(toHandle(newState));
     });
   });
   return starting;
@@ -47958,7 +47961,7 @@ function stopServer() {
   if (!current) return settled(void 0);
   state = void 0;
   if (current.idleTimer) clearTimeout(current.idleTimer);
-  return new Promise((resolve5) => current.server.close(() => resolve5()));
+  return new Promise((resolve6) => current.server.close(() => resolve6()));
 }
 
 // src/mcp/schemas.ts
@@ -48157,7 +48160,7 @@ function buildHiddenAnswerScript(name, reason) {
 // src/native/exec.ts
 import { spawn as spawn3 } from "node:child_process";
 function execWithStdin(command, args, input2, opts) {
-  return new Promise((resolve5, reject) => {
+  return new Promise((resolve6, reject) => {
     const child = spawn3(command, args, { stdio: ["pipe", "pipe", "pipe"] });
     let stdout = "";
     let stderr = "";
@@ -48199,7 +48202,7 @@ function execWithStdin(command, args, input2, opts) {
       finish(() => reject(new EnigmaError({ code: "E_UI_UNAVAILABLE", message: `${command} failed to start` })));
     });
     child.on("close", (code) => {
-      finish(() => resolve5({ code, stdout, stderr }));
+      finish(() => resolve6({ code, stdout, stderr }));
     });
     child.stdin.on("error", () => {
     });
