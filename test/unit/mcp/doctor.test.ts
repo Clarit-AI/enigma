@@ -1,4 +1,4 @@
-import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -396,6 +396,49 @@ describe('enigma_doctor', () => {
       const line = await shimLine();
 
       expect(line).toBe('PATH shim: enigma is on PATH — use `enigma run -- <command>`');
+    });
+
+    /** A plugin root with a CLI bundle and a manifest, pointed at by CLAUDE_PLUGIN_ROOT or by a link. */
+    function makeInstall(name: string, version: string): { root: string; cli: string } {
+      const root = join(shimTmp, name);
+      mkdirSync(join(root, 'dist'), { recursive: true });
+      mkdirSync(join(root, '.claude-plugin'));
+      writeFileSync(join(root, 'dist', 'cli.mjs'), '#!/usr/bin/env node\n');
+      writeFileSync(join(root, '.claude-plugin', 'plugin.json'), JSON.stringify({ name: 'enigma', version }));
+      return { root, cli: join(root, 'dist', 'cli.mjs') };
+    }
+
+    it('occupied names the runnable `node "<cli>" run -- <command>` form (exact line)', async () => {
+      const current = makeInstall('current', '2.0.0');
+      const bin = join(shimTmp, 'bin');
+      mkdirSync(bin);
+      writeFileSync(join(bin, 'enigma'), '#!/bin/sh\necho someone else\n', { mode: 0o755 });
+      process.env.CLAUDE_PLUGIN_ROOT = current.root;
+      process.env.PATH = `${bin}:${originalPath ?? ''}`;
+
+      const line = await shimLine();
+
+      expect(line).toBe(
+        `PATH shim: Enigma: ${join(bin, 'enigma')} is not a shim and was left alone — "enigma" on your PATH may not be this Enigma. Run this Enigma directly: node "${current.cli}" run -- <command>`,
+      );
+    });
+
+    it('a working link to an older install says it will be re-pointed, never "not on PATH yet" (exact line)', async () => {
+      const current = makeInstall('current', '2.0.0');
+      const older = makeInstall('older', '1.0.0');
+      const bin = join(shimTmp, 'bin');
+      mkdirSync(bin);
+      symlinkSync(older.cli, join(bin, 'enigma'));
+      process.env.CLAUDE_PLUGIN_ROOT = current.root;
+      process.env.PATH = `${bin}:${originalPath ?? ''}`;
+
+      const line = await shimLine();
+
+      expect(line).toBe(
+        `PATH shim: Enigma: "enigma" on PATH points at an older Enigma install (${older.cli}); the next session start will re-point it to this version.`,
+      );
+      // doctor is read-only: the link must not have been touched.
+      expect(readlinkSync(join(bin, 'enigma'))).toBe(older.cli);
     });
   });
 });
