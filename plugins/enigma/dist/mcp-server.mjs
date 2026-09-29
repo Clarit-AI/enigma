@@ -12894,7 +12894,7 @@ var require_dist = __commonJS({
 });
 
 // src/mcp/server.ts
-import { realpathSync as realpathSync3 } from "node:fs";
+import { realpathSync as realpathSync4 } from "node:fs";
 import { pathToFileURL } from "node:url";
 
 // node_modules/zod/v3/helpers/util.js
@@ -44513,8 +44513,20 @@ function computeManifestGaps(cwd) {
 }
 
 // src/core/shim.ts
-import { accessSync, constants, existsSync as existsSync8, lstatSync, readlinkSync, renameSync as renameSync2, rmSync, symlinkSync } from "node:fs";
-import { delimiter, dirname as dirname5, isAbsolute, join as join5, resolve as resolve4 } from "node:path";
+import {
+  accessSync,
+  constants,
+  existsSync as existsSync8,
+  lstatSync,
+  readFileSync as readFileSync5,
+  readlinkSync,
+  realpathSync as realpathSync3,
+  renameSync as renameSync2,
+  rmSync,
+  statSync as statSync2,
+  symlinkSync
+} from "node:fs";
+import { basename as basename4, delimiter, dirname as dirname5, isAbsolute, join as join5, resolve as resolve4 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function pathDirs(pathEnv) {
   const seen = /* @__PURE__ */ new Set();
@@ -44532,7 +44544,18 @@ function pathDirs(pathEnv) {
 function isWritableDir(dir) {
   try {
     accessSync(dir, constants.W_OK | constants.X_OK);
-    return true;
+    return (statSync2(dir).mode & 18) === 0;
+  } catch {
+    return false;
+  }
+}
+function isEnigmaPluginCli(realCli) {
+  try {
+    if (basename4(realCli) !== "cli.mjs") return false;
+    const dist = dirname5(realCli);
+    if (basename4(dist) !== "dist") return false;
+    const manifest = JSON.parse(readFileSync5(join5(dirname5(dist), ".claude-plugin", "plugin.json"), "utf8"));
+    return typeof manifest === "object" && manifest !== null && manifest.name === "enigma";
   } catch {
     return false;
   }
@@ -44559,7 +44582,13 @@ function classify(dest, cli) {
     resolves = false;
   }
   if (!resolves) return { slot: "dangling", link };
-  return link === cli ? { slot: "ours", link } : { slot: "foreign", link };
+  try {
+    const realLink = realpathSync3(link);
+    if (realLink === realpathSync3(cli)) return { slot: "ours", link };
+    if (isEnigmaPluginCli(realLink)) return { slot: "stale", link };
+  } catch {
+  }
+  return { slot: "foreign", link };
 }
 function linkShim(dest, cli) {
   const tmp = `${dest}.enigma-tmp-${process.pid}`;
@@ -44611,10 +44640,14 @@ function ensureCliShim(options = {}) {
       if (slot === "foreign") {
         return { status: "occupied", target: dest, cli, link, detail: `${dest} is not a shim and was left alone` };
       }
-      if (slot === "dangling") {
-        if (!isWritableDir(dir)) continue;
-        if (!write) return { status: "pending", target: dest, cli, link: cli, detail: "a dangling shim would be refreshed here" };
+      if (slot === "dangling" || slot === "stale") {
+        if (!isWritableDir(dir)) {
+          if (slot === "dangling") continue;
+          return { status: "occupied", target: dest, cli, link, detail: `${dest} points at an older Enigma install and ${dir} is not safely writable` };
+        }
+        if (!write) return { status: "pending", target: dest, cli, link: cli, detail: `a ${slot} shim would be refreshed here` };
         if (linkShim(dest, cli)) return { status: "repointed", target: dest, cli, link: cli, detail: null };
+        if (slot === "stale") return { status: "failed", target: dest, cli, link, detail: `could not refresh ${dest}` };
         continue;
       }
       if (firstFree === null && isWritableDir(dir)) firstFree = dest;
@@ -44642,7 +44675,7 @@ function describeShim(result) {
     case "installed":
       return `Enigma: put "enigma" on PATH at ${result.target} so "enigma run" works. If the shell has not picked it up yet, run: hash -r`;
     case "repointed":
-      return `Enigma: refreshed the "enigma" PATH shim at ${result.target} (it pointed at a plugin version that is gone).`;
+      return `Enigma: refreshed the "enigma" PATH shim at ${result.target} (it pointed at an older or removed plugin version).`;
     case "occupied":
       return `Enigma: ${result.detail} \u2014 "enigma" on your PATH may not be this Enigma. Run this Enigma directly: node "${result.cli ?? ""}"`;
     case "no-writable-dir":
@@ -44693,6 +44726,17 @@ async function binaryStatus(command, args) {
     return { available: false, version: null };
   }
 }
+function pathShimLine(shim) {
+  switch (shim.status) {
+    case "present":
+      return "enigma is on PATH \u2014 use `enigma run -- <command>`";
+    case "disabled":
+    case "unavailable":
+      return `${shim.status} (${shim.detail ?? "no detail"}) \u2014 "enigma run" is unavailable from PATH`;
+    default:
+      return describeShim(shim) ?? `${shim.status}${shim.detail ? ` (${shim.detail})` : ""}`;
+  }
+}
 function registerDoctorTool(server) {
   server.registerTool(
     "enigma_doctor",
@@ -44739,10 +44783,11 @@ function registerDoctorTool(server) {
         // Whether `enigma run` — the only delivery path that keeps a value out
         // of the context window — is actually runnable from a shell. Read-only:
         // the SessionStart hook installs the shim, this only reports on it. When
-        // the status is not `present`, the exact invocation is given so the
-        // agent has something it can actually execute. Paths and a status word
-        // only, never a value (ADR-001).
-        `PATH shim: ${describeShim(ensureCliShim({ write: false })) ?? "enigma is on PATH \u2014 use `enigma run -- <command>`"}`
+        // the status is not `present`, the line says so (and, where a CLI bundle
+        // is known, gives the exact invocation) so the agent has something it
+        // can actually execute. Paths and a status word only, never a value
+        // (ADR-001).
+        `PATH shim: ${pathShimLine(ensureCliShim({ write: false }))}`
       ];
       if (legacyScopeLine) lines.push(`Legacy scope entries: ${legacyScopeLine}`);
       const pendingRequests = RequestStore.listUnconsumedFulfilled();
@@ -44764,7 +44809,7 @@ function registerDoctorTool(server) {
 }
 
 // src/mcp/tools/import.ts
-import { existsSync as existsSync11, readFileSync as readFileSync6 } from "node:fs";
+import { existsSync as existsSync11, readFileSync as readFileSync7 } from "node:fs";
 import { isAbsolute as isAbsolute2, join as join6 } from "node:path";
 
 // src/storage/dotenv-file.ts
@@ -44926,7 +44971,7 @@ function removeDotEnvEntries(content, names, opts = {}) {
 
 // src/storage/import-commit.ts
 import { randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync10, readFileSync as readFileSync5, renameSync as renameSync3, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync10, readFileSync as readFileSync6, renameSync as renameSync3, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 var FILE_MODE4 = 384;
 function writeFileAtomic(path, content, mode) {
   const tmpPath = `${path}.${randomBytes4(6).toString("hex")}.tmp`;
@@ -45006,7 +45051,7 @@ async function commitImport(opts) {
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
-  const currentContent = existsSync10(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
+  const currentContent = existsSync10(opts.envFilePath) ? readFileSync6(opts.envFilePath, "utf8") : "";
   const valueByName = new Map(opts.entries.map((e) => [e.name, e.value]));
   const currentValueByName = new Map(parseDotEnv(currentContent).entries.map((e) => [e.name, e.value]));
   const toRemove = [];
@@ -47875,7 +47920,7 @@ function registerImportTool(server) {
       if (!existsSync11(absPath)) {
         return errorResult(new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` }));
       }
-      const content = readFileSync6(absPath, "utf8");
+      const content = readFileSync7(absPath, "utf8");
       const parsed = parseDotEnv(content);
       if (parsed.entries.length === 0) {
         return textResult(
@@ -48418,7 +48463,7 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
 }
-var isMainModule = process.argv[1] !== void 0 && import.meta.url === pathToFileURL(realpathSync3(process.argv[1])).href;
+var isMainModule = process.argv[1] !== void 0 && import.meta.url === pathToFileURL(realpathSync4(process.argv[1])).href;
 if (isMainModule) {
   main().catch((err) => {
     console.error("enigma mcp server failed to start:", err instanceof Error ? err.message : err);

@@ -1858,8 +1858,20 @@ function computeManifestGaps(cwd) {
 }
 
 // src/core/shim.ts
-import { accessSync, constants, existsSync as existsSync8, lstatSync, readlinkSync, renameSync as renameSync2, rmSync, symlinkSync } from "node:fs";
-import { delimiter, dirname as dirname5, isAbsolute, join as join5, resolve as resolve4 } from "node:path";
+import {
+  accessSync,
+  constants,
+  existsSync as existsSync8,
+  lstatSync,
+  readFileSync as readFileSync5,
+  readlinkSync,
+  realpathSync as realpathSync3,
+  renameSync as renameSync2,
+  rmSync,
+  statSync as statSync2,
+  symlinkSync
+} from "node:fs";
+import { basename as basename4, delimiter, dirname as dirname5, isAbsolute, join as join5, resolve as resolve4 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function pathDirs(pathEnv) {
   const seen = /* @__PURE__ */ new Set();
@@ -1877,7 +1889,18 @@ function pathDirs(pathEnv) {
 function isWritableDir(dir) {
   try {
     accessSync(dir, constants.W_OK | constants.X_OK);
-    return true;
+    return (statSync2(dir).mode & 18) === 0;
+  } catch {
+    return false;
+  }
+}
+function isEnigmaPluginCli(realCli) {
+  try {
+    if (basename4(realCli) !== "cli.mjs") return false;
+    const dist = dirname5(realCli);
+    if (basename4(dist) !== "dist") return false;
+    const manifest = JSON.parse(readFileSync5(join5(dirname5(dist), ".claude-plugin", "plugin.json"), "utf8"));
+    return typeof manifest === "object" && manifest !== null && manifest.name === "enigma";
   } catch {
     return false;
   }
@@ -1904,7 +1927,13 @@ function classify(dest, cli) {
     resolves = false;
   }
   if (!resolves) return { slot: "dangling", link };
-  return link === cli ? { slot: "ours", link } : { slot: "foreign", link };
+  try {
+    const realLink = realpathSync3(link);
+    if (realLink === realpathSync3(cli)) return { slot: "ours", link };
+    if (isEnigmaPluginCli(realLink)) return { slot: "stale", link };
+  } catch {
+  }
+  return { slot: "foreign", link };
 }
 function linkShim(dest, cli) {
   const tmp = `${dest}.enigma-tmp-${process.pid}`;
@@ -1956,10 +1985,14 @@ function ensureCliShim(options = {}) {
       if (slot === "foreign") {
         return { status: "occupied", target: dest, cli, link, detail: `${dest} is not a shim and was left alone` };
       }
-      if (slot === "dangling") {
-        if (!isWritableDir(dir)) continue;
-        if (!write) return { status: "pending", target: dest, cli, link: cli, detail: "a dangling shim would be refreshed here" };
+      if (slot === "dangling" || slot === "stale") {
+        if (!isWritableDir(dir)) {
+          if (slot === "dangling") continue;
+          return { status: "occupied", target: dest, cli, link, detail: `${dest} points at an older Enigma install and ${dir} is not safely writable` };
+        }
+        if (!write) return { status: "pending", target: dest, cli, link: cli, detail: `a ${slot} shim would be refreshed here` };
         if (linkShim(dest, cli)) return { status: "repointed", target: dest, cli, link: cli, detail: null };
+        if (slot === "stale") return { status: "failed", target: dest, cli, link, detail: `could not refresh ${dest}` };
         continue;
       }
       if (firstFree === null && isWritableDir(dir)) firstFree = dest;
@@ -2095,7 +2128,7 @@ async function cmdGet(argv) {
 }
 
 // src/cli/commands/import.ts
-import { existsSync as existsSync11, readFileSync as readFileSync6 } from "node:fs";
+import { existsSync as existsSync11, readFileSync as readFileSync7 } from "node:fs";
 import { isAbsolute as isAbsolute2, join as join6 } from "node:path";
 
 // src/request/store.ts
@@ -2609,7 +2642,7 @@ function removeDotEnvEntries(content, names, opts = {}) {
 
 // src/storage/import-commit.ts
 import { randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync10, readFileSync as readFileSync5, renameSync as renameSync3, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync10, readFileSync as readFileSync6, renameSync as renameSync3, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
 var FILE_MODE4 = 384;
 function writeFileAtomic(path, content, mode) {
   const tmpPath = `${path}.${randomBytes4(6).toString("hex")}.tmp`;
@@ -2689,7 +2722,7 @@ async function commitImport(opts) {
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
-  const currentContent = existsSync10(opts.envFilePath) ? readFileSync5(opts.envFilePath, "utf8") : "";
+  const currentContent = existsSync10(opts.envFilePath) ? readFileSync6(opts.envFilePath, "utf8") : "";
   const valueByName = new Map(opts.entries.map((e) => [e.name, e.value]));
   const currentValueByName = new Map(parseDotEnv(currentContent).entries.map((e) => [e.name, e.value]));
   const toRemove = [];
@@ -5685,7 +5718,7 @@ async function cmdImport(argv) {
   if (!existsSync11(absPath)) {
     throw new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` });
   }
-  const content = readFileSync6(absPath, "utf8");
+  const content = readFileSync7(absPath, "utf8");
   const parsed = parseDotEnv(content);
   if (parsed.entries.length === 0) {
     return report(
@@ -5733,7 +5766,7 @@ async function cmdImport(argv) {
 }
 
 // src/cli/commands/install.ts
-import { existsSync as existsSync12, mkdirSync as mkdirSync3, readFileSync as readFileSync7, renameSync as renameSync4, writeFileSync as writeFileSync5 } from "node:fs";
+import { existsSync as existsSync12, mkdirSync as mkdirSync3, readFileSync as readFileSync8, renameSync as renameSync4, writeFileSync as writeFileSync5 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
 import { dirname as dirname6, join as join7 } from "node:path";
 var MARKETPLACE_NAME = "clarit-enigma";
@@ -5756,7 +5789,7 @@ function readSettings(path) {
   if (!existsSync12(path)) return { settings: {}, style: DEFAULT_STYLE };
   let raw;
   try {
-    raw = readFileSync7(path, "utf8");
+    raw = readFileSync8(path, "utf8");
   } catch (err) {
     throw new EnigmaError({
       code: "E_CLAUDE_SETTINGS_UNWRITABLE",
@@ -6184,12 +6217,12 @@ function notImplemented(command) {
 }
 
 // src/core/is-main-module.ts
-import { realpathSync as realpathSync3 } from "node:fs";
+import { realpathSync as realpathSync4 } from "node:fs";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 function isMainModule(metaUrl = import.meta.url, entry = process.argv[1]) {
   if (!entry) return false;
   try {
-    return realpathSync3(fileURLToPath3(metaUrl)) === realpathSync3(entry);
+    return realpathSync4(fileURLToPath3(metaUrl)) === realpathSync4(entry);
   } catch {
     return false;
   }

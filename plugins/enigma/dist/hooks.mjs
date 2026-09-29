@@ -1232,8 +1232,20 @@ function computeManifestGaps(cwd) {
 }
 
 // src/core/shim.ts
-import { accessSync, constants, existsSync as existsSync7, lstatSync, readlinkSync, renameSync as renameSync2, rmSync, symlinkSync } from "node:fs";
-import { delimiter, dirname as dirname4, isAbsolute, join as join5, resolve as resolve3 } from "node:path";
+import {
+  accessSync,
+  constants,
+  existsSync as existsSync7,
+  lstatSync,
+  readFileSync as readFileSync5,
+  readlinkSync,
+  realpathSync as realpathSync3,
+  renameSync as renameSync2,
+  rmSync,
+  statSync as statSync2,
+  symlinkSync
+} from "node:fs";
+import { basename as basename3, delimiter, dirname as dirname4, isAbsolute, join as join5, resolve as resolve3 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 function pathDirs(pathEnv) {
   const seen = /* @__PURE__ */ new Set();
@@ -1251,7 +1263,18 @@ function pathDirs(pathEnv) {
 function isWritableDir(dir) {
   try {
     accessSync(dir, constants.W_OK | constants.X_OK);
-    return true;
+    return (statSync2(dir).mode & 18) === 0;
+  } catch {
+    return false;
+  }
+}
+function isEnigmaPluginCli(realCli) {
+  try {
+    if (basename3(realCli) !== "cli.mjs") return false;
+    const dist = dirname4(realCli);
+    if (basename3(dist) !== "dist") return false;
+    const manifest = JSON.parse(readFileSync5(join5(dirname4(dist), ".claude-plugin", "plugin.json"), "utf8"));
+    return typeof manifest === "object" && manifest !== null && manifest.name === "enigma";
   } catch {
     return false;
   }
@@ -1278,7 +1301,13 @@ function classify(dest, cli) {
     resolves = false;
   }
   if (!resolves) return { slot: "dangling", link };
-  return link === cli ? { slot: "ours", link } : { slot: "foreign", link };
+  try {
+    const realLink = realpathSync3(link);
+    if (realLink === realpathSync3(cli)) return { slot: "ours", link };
+    if (isEnigmaPluginCli(realLink)) return { slot: "stale", link };
+  } catch {
+  }
+  return { slot: "foreign", link };
 }
 function linkShim(dest, cli) {
   const tmp = `${dest}.enigma-tmp-${process.pid}`;
@@ -1330,10 +1359,14 @@ function ensureCliShim(options = {}) {
       if (slot === "foreign") {
         return { status: "occupied", target: dest, cli, link, detail: `${dest} is not a shim and was left alone` };
       }
-      if (slot === "dangling") {
-        if (!isWritableDir(dir)) continue;
-        if (!write) return { status: "pending", target: dest, cli, link: cli, detail: "a dangling shim would be refreshed here" };
+      if (slot === "dangling" || slot === "stale") {
+        if (!isWritableDir(dir)) {
+          if (slot === "dangling") continue;
+          return { status: "occupied", target: dest, cli, link, detail: `${dest} points at an older Enigma install and ${dir} is not safely writable` };
+        }
+        if (!write) return { status: "pending", target: dest, cli, link: cli, detail: `a ${slot} shim would be refreshed here` };
         if (linkShim(dest, cli)) return { status: "repointed", target: dest, cli, link: cli, detail: null };
+        if (slot === "stale") return { status: "failed", target: dest, cli, link, detail: `could not refresh ${dest}` };
         continue;
       }
       if (firstFree === null && isWritableDir(dir)) firstFree = dest;
@@ -1367,7 +1400,7 @@ function describeShim(result) {
     case "installed":
       return `Enigma: put "enigma" on PATH at ${result.target} so "enigma run" works. If the shell has not picked it up yet, run: hash -r`;
     case "repointed":
-      return `Enigma: refreshed the "enigma" PATH shim at ${result.target} (it pointed at a plugin version that is gone).`;
+      return `Enigma: refreshed the "enigma" PATH shim at ${result.target} (it pointed at an older or removed plugin version).`;
     case "occupied":
       return `Enigma: ${result.detail} \u2014 "enigma" on your PATH may not be this Enigma. Run this Enigma directly: node "${result.cli ?? ""}"`;
     case "no-writable-dir":
@@ -1415,8 +1448,8 @@ function runSessionStart(input) {
 }
 
 // src/hooks/read-guard.ts
-import { basename as basename3, resolve as resolve4, sep } from "node:path";
-import { existsSync as existsSync8, statSync as statSync2 } from "node:fs";
+import { basename as basename4, resolve as resolve4, sep } from "node:path";
+import { existsSync as existsSync8, statSync as statSync3 } from "node:fs";
 var DOTENV_EXEMPT = /* @__PURE__ */ new Set([".env.example"]);
 var BARE_ENV_DUMP_COMMANDS = /* @__PURE__ */ new Set(["env", "printenv"]);
 var NON_READING_BASH_VERBS = /* @__PURE__ */ new Set(["rm", "mv", "touch", "chmod", "stat", "ls", "find", "test"]);
@@ -1428,7 +1461,7 @@ function isDotEnvBasename(name) {
   return name === ".env" || name.startsWith(".env.");
 }
 function targetsDotEnv(pathLike) {
-  return isDotEnvBasename(basename3(pathLike.trim()));
+  return isDotEnvBasename(basename4(pathLike.trim()));
 }
 function targetsEnigmaConfig(pathLike, cwd) {
   const home = resolve4(enigmaHome());
@@ -1656,7 +1689,7 @@ function isKnownNonDirectoryPath(pathLike, cwd) {
   if (!pathLike) return false;
   try {
     const resolved = resolve4(cwd, pathLike.trim());
-    return existsSync8(resolved) && !statSync2(resolved).isDirectory();
+    return existsSync8(resolved) && !statSync3(resolved).isDirectory();
   } catch {
     return false;
   }
