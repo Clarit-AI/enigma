@@ -30,9 +30,9 @@
 
 ## Current Status
 
-- **Last updated**: 2026-09-25
-- **Current iteration goal**: none open. `v0.3.0` closed out on 2026-09-24; the next milestone is not yet scoped. Plan and critique of record for the shipped wave: Traycer artifacts `v0-3-0-plan` and `v0-3-0-plan-critique`, with the post-release resync in `v0-3-0-resync`.
-- **Shipped**: `0.3.0` (`enigma--v0.3.0`) — repo-level project scope + `enigma migrate-scope`, `flock(2)` index-write serialization, rotate-then-remove, extensible request form, wake-on-submit, `/enigma:remove`, project-scoped audit attribution, and the KHA Entertainment marketplace cross-listing. Previous: `0.2.0` (`enigma--v0.2.0`).
+- **Last updated**: 2026-09-28
+- **Current iteration goal**: none open. `v0.3.2` shipped 2026-09-28; the next milestone is not yet scoped. Plan and critique of record for the `v0.3.0` wave: Traycer artifacts `v0-3-0-plan` and `v0-3-0-plan-critique`, with the post-release resync in `v0-3-0-resync`.
+- **Shipped**: `0.3.2` (`enigma--v0.3.2`) — read-guard checks the child of `enigma run`, and PATH-shim fixes (stale-link re-point, build-embedded version, world-writable directories refused). Previous: `0.3.1` (`enigma--v0.3.1`, `enigma` on `PATH` after a marketplace install), `0.3.0` (`enigma--v0.3.0`) — repo-level project scope + `enigma migrate-scope`, `flock(2)` index-write serialization, rotate-then-remove, extensible request form, wake-on-submit, `/enigma:remove`, project-scoped audit attribution, and the KHA Entertainment marketplace cross-listing. Before that: `0.2.0` (`enigma--v0.2.0`).
 - **Install channel**: the plugin marketplace is the only supported install path. The npm package `@clarit.ai/enigma` is **shelved** — never published, and `RELEASING.md` records it as such. Revisit when support for harnesses beyond Claude Code grows.
 - **Known tech debt**: see the bottom of `docs/feature-log.md`
 

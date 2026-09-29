@@ -2,7 +2,9 @@
 
 ## Completed
 
-### Unreleased — targeting `v0.3.2`
+### `v0.3.2` — shipped 2026-09-28 as `enigma--v0.3.2` (PR #103)
+
+Read-guard and PATH-shim corrections found after the first shim release.
 
 - Read-guard checks the child of `enigma run [flags] -- <child>` (and the
   bundled `node …/cli.mjs run` form the denial text recommends) through the
@@ -16,11 +18,43 @@
   targets report occupied; directories writable by the world are never shim
   locations; realpaths are compared so a symlinked plugin root still counts as
   present; read-only doctor reports a distinct `stale` status.
-- Read-guard follow-ups from #95 (Issue #96): the bundled-CLI form is
+- Read-guard follow-ups from #95: the bundled-CLI form is
   recognised by a `node … cli.mjs run -- <child>` token pattern, so node
   options that take a separate value cannot hide it and no filesystem or
   manifest check is involved; leading `NAME=value`, `time` and `command` are
-  skipped before the command head at top level and on the `enigma run` child.
+  skipped before the command head at top level and on the `enigma run` child
+  (PR #100 / Issue #96, 2026-09-28).
+- Build version embedded in every bundle (`ENIGMA_VERSION`, `src/core/version.ts`,
+  an esbuild define mirrored in `vitest.config.ts`), so the stale-link check
+  can compare against the running bundle in the npm-bin layout, which has no
+  `plugin.json` beside `dist/cli.mjs`. The linked old target still needs a
+  readable Enigma manifest: a manifest-less linked target is left `occupied`
+  (see the known limit in `docs/architecture.md`). The MCP server constructor
+  uses the same constant instead of a hardcoded string that two release bumps
+  had missed. Session-start and
+  read-guard tests now control `CLAUDE_PLUGIN_ROOT` instead of inheriting the
+  ambient value, and the shim docs record the re-point, group-write and ACL
+  rules (PR #101 / Issue #99, 2026-09-28).
+- Release: version bump across all manifests and `dist/` (PR #103 / Issue #102,
+  2026-09-28). The `package-lock.json` root versions had drifted at `0.3.0` and
+  were corrected. Docs loop closed in the same PR: PATH-shim replacement rule
+  and its no-manifest limit in `docs/architecture.md`.
+
+### `v0.3.1` — shipped 2026-09-26 as `enigma--v0.3.1`
+
+Put `enigma` on `PATH` after a marketplace install (Issue #90). The release
+branch landed on `main` via PR #93 on 2026-09-28.
+
+- The SessionStart hook symlinks the bundled CLI into a directory already on
+  `PATH`, so the `enigma run -- <command>` form read-guard recommends is
+  runnable after the only supported install. Absolute `PATH` entries only, the
+  whole `PATH` is scanned before a new link is created so a working `enigma`
+  is reported rather than shadowed, only a dangling link is re-pointed,
+  `ENIGMA_NO_PATH_SHIM=1` opts out, and `ensureCliShim` never throws. `enigma doctor` reports the state read-only.
+- Both bundles gate their entrypoint with `isMainModule()`
+  (`src/core/is-main-module.ts`, `realpathSync` on both sides): the old
+  `import.meta.url` comparison made the CLI a silent no-op when invoked
+  through any symlink.
 
 ### `v0.3.0` — shipped 2026-09-24 as `enigma--v0.3.0` (PR #86)
 
