@@ -19,7 +19,16 @@ import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { readLedger } from '../../src/render/ledger.js';
 
-const WORKER = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'ledger-worker.mjs');
+// The bundled worker fixture lives in a per-run tmpdir path (reviewer
+// r2 A2 — concurrent vitest runs would otherwise share one file).
+// vitest's globalSetup (`scripts/build-ledger-fixture.mjs`) sets
+// `ENIGMA_LEDGER_WORKER_PATH` before any test runs.
+const workerPath = process.env.ENIGMA_LEDGER_WORKER_PATH ?? '';
+if (!workerPath) {
+  throw new Error(
+    'ENIGMA_LEDGER_WORKER_PATH not set; scripts/build-ledger-fixture.mjs should set it via vitest globalSetup',
+  );
+}
 // Bundling the fixture breaks `native-lock.ts`'s layout-based
 // artifactLocation (it looks for `<pkg>/dist/` or `<repo>/src/core/`);
 // the override below is the AUTHORITATIVE path the child uses to
@@ -28,19 +37,23 @@ const NATIVE_DIR = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 
 
 function runWorker(args: string[], env: Record<string, string>): Promise<{ code: number | null; stdout: string; stderr: string }> {
   return new Promise((resolvePromise) => {
-    const child = spawn(process.execPath, [WORKER, ...args], {
+    const child = spawn(process.execPath, [workerPath, ...args], {
       stdio: ['ignore', 'pipe', 'pipe'],
       env: { ...process.env, ...env, ENIGMA_NATIVE_DIR: NATIVE_DIR },
     });
     let stdout = '';
     let stderr = '';
-    child.stdout!.on('data', (chunk: Buffer) => {
-      stdout += chunk.toString();
-    });
-    child.stderr!.on('data', (chunk: Buffer) => {
-      stderr += chunk.toString();
-    });
-    child.on('exit', (code) => resolvePromise({ code, stdout, stderr }));
+    if (child.stdout) {
+      child.stdout.on('data', (chunk: Buffer) => {
+        stdout += chunk.toString();
+      });
+    }
+    if (child.stderr) {
+      child.stderr.on('data', (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+    }
+    child.on('exit', (code: number | null) => resolvePromise({ code, stdout, stderr }));
   });
 }
 
@@ -136,7 +149,7 @@ describe('render ledger — concurrent upsert + removeNames through real process
     expect(ledger.targets[0]?.names).toEqual(['A', 'B', 'C']);
   });
 
-  it('a sequenced removeNames persists a partial removal even when another process upserts concurrently (regression for QA C1 / codex blocking)', async () => {
+  it('a removeNames in a separate process persists a partial removal (regression for QA C1 / codex blocking)', async () => {
     // First child upserts [A, B]; second child then removes [A].
     // Both run as separate processes so we exercise the real
     // `acquireFileLock` + `writeJsonFileAtomic` round-trip. The
@@ -153,5 +166,44 @@ describe('render ledger — concurrent upsert + removeNames through real process
     const ledger = readLedger();
     expect(ledger.targets).toHaveLength(1);
     expect(ledger.targets[0]?.names).toEqual(['B']);
+  });
+
+  it('a real concurrent removeNames racing an upsert never loses data (QA r2 L1)', async () => {
+    // Seed: parent process gives the target names [A, B] so a real
+    // removeNames can take a name that IS carried. Then two children
+    // race concurrently:
+    //   - child A: removeNames [A]  — actually removes from the seed
+    //   - child B: upsert [C]         — adds a third name
+    // The kernel-held ledger lock serializes them, but in an
+    // unspecified order — so the final state can be either:
+    //   * A runs first: target has [B]; then B upserts [C] → [B, C].
+    //   * B runs first: target has [A, B, C]; then A removes [A] → [B, C].
+    // Both serializations land on [B, C] (B is the only name that
+    // was never targeted by a removal). Either way the target
+    // survives and no phantom name appears.
+    const env = { ENIGMA_HOME: tmpHome };
+    writeFileSync(join(tmpHome, '.keep'), '');
+
+    // Seed: write [A, B] directly via the bundled worker (single
+    // process, deterministic) so the racing children see [A, B].
+    const seed = await runWorker(['upsert', 'proj-a', '/wt', '/wt/.env', 'A', 'B'], env);
+    expect(seed.code, `seed stderr: ${seed.stderr}`).toBe(0);
+
+    const results = await Promise.all([
+      runWorker(['remove', 'A'], env),
+      runWorker(['upsert', 'proj-a', '/wt', '/wt/.env', 'C'], env),
+    ]);
+    for (const r of results) {
+      expect(r.code, `child stderr: ${r.stderr}`).toBe(0);
+    }
+
+    const ledger = readLedger();
+    // The target survives — neither child could drop it (A only
+    // removes a name, not the whole target; B upserts to it).
+    expect(ledger.targets).toHaveLength(1);
+    const names = ledger.targets[0]?.names ?? [];
+    // Both serializations land on exactly [B, C] (see above). A lost C
+    // or a surviving A means one writer clobbered the other's write.
+    expect(names).toEqual(['B', 'C']);
   });
 });

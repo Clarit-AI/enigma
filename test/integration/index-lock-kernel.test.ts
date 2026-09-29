@@ -15,7 +15,7 @@
 import { spawn } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { __setLockTimingForTesting, LOCK_MAX_ATTEMPTS, LOCK_RETRY_INTERVAL_MS, mutateIndex, readIndex, upsertIndexEntry } from '../../src/core/index-store.js';
@@ -259,7 +259,7 @@ describe('acquireFileLock — real processes against the committed flock addon (
     expect(renderLockPath(env1)).not.toBe(renderLockPath(env2));
   });
 
-  it('two worktrees with the same `.env` basename contend on DIFFERENT anchors and parallel renders both finish (clarification comment)', async () => {
+  it('two worktrees with the same `.env` basename hold DIFFERENT anchors and their critical sections overlap (clarification comment, reviewer r2 A1)', async () => {
     const wt1 = join(tmpHome, 'wt1');
     const wt2 = join(tmpHome, 'wt2');
     mkdirSync(wt1, { recursive: true, mode: 0o755 });
@@ -271,32 +271,68 @@ describe('acquireFileLock — real processes against the committed flock addon (
     expect(anchor1).not.toBe(anchor2);
 
     // The render-lock anchors live under <ENIGMA_HOME>/locks/. The
-    // production acquire path auto-creates that dir; the worker fixture
-    // uses raw openSync and does not. Pre-create it for the children.
+    // production acquire path auto-creates that dir; pre-create it
+    // for the children so the timed-mode acquire sees a ready anchor.
     mkdirSync(dirname(anchor1), { recursive: true, mode: 0o700 });
 
-    const counter1 = join(wt1, 'counter');
-    const counter2 = join(wt2, 'counter');
-    writeFileSync(counter1, '0');
-    writeFileSync(counter2, '0');
+    // Each child prints `[startMs,endMs]` for every acquire/release
+    // cycle. We assert that AT LEAST ONE interval of child 1 overlaps
+    // an interval of child 2 — proving distinct anchors do not
+    // serialize (reviewer r2 A1). The wall-clock approach flaked on
+    // cold-CI spawn latency; the overlap check does not, because the
+    // intervals are produced inside each child's critical section
+    // and never depend on cross-process scheduling before t=0.
+    const ledgerWorker = process.env.ENIGMA_LEDGER_WORKER_PATH;
+    if (!ledgerWorker) {
+      throw new Error(
+        'ENIGMA_LEDGER_WORKER_PATH not set; scripts/build-ledger-fixture.mjs should set it via vitest globalSetup',
+      );
+    }
+    const nativeDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'plugins', 'enigma', 'native');
 
-    const t0 = Date.now();
-    const results = await Promise.all([
-      runWorker(['counter', ADDON, anchor1, counter1, '10', '10']),
-      runWorker(['counter', ADDON, anchor2, counter2, '10', '10']),
-    ]);
-    const elapsed = Date.now() - t0;
-    for (const r of results) expect(r.code).toBe(0);
-    expect(readFileSync(counter1, 'utf8')).toBe('10');
-    expect(readFileSync(counter2, 'utf8')).toBe('10');
-    // 20 iters of ~10ms each, two anchors in parallel ≈ 100ms of
-    // work. The two `spawn` calls in `Promise.all` add ~100-300ms
-    // each on cold CI runners — measured from BEFORE the spawns, that
-    // is part of the wall clock. Add slack the way the sibling
-    // cross-anchor test (`+ 1500`) does so a noisy CI runner cannot
-    // flake this test; the assertion still catches any regression
-    // that adds cross-anchor waits (a regression would add hundreds
-    // of ms, not a few hundred).
-    expect(elapsed).toBeLessThan(LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS + 1500);
+    const runTimed = (anchor: string): Promise<{ code: number | null; stdout: string }> =>
+      new Promise((resolvePromise) => {
+        const child = spawn(
+          process.execPath,
+          [ledgerWorker, 'timed', anchor, '10', '50'],
+          {
+            stdio: ['ignore', 'pipe', 'inherit'],
+            env: { ...process.env, ENIGMA_NATIVE_DIR: nativeDir },
+          },
+        );
+        let stdout = '';
+        child.stdout!.on('data', (chunk: Buffer) => {
+          stdout += chunk.toString();
+        });
+        child.on('exit', (code) => resolvePromise({ code, stdout }));
+      });
+
+    const [r1, r2] = await Promise.all([runTimed(anchor1), runTimed(anchor2)]);
+    expect(r1.code).toBe(0);
+    expect(r2.code).toBe(0);
+
+    const intervalsOf = (stdout: string): Array<[number, number]> =>
+      stdout
+        .split('\n')
+        .filter((line) => line.startsWith('['))
+        .map((line) => {
+          const m = /^\[(\d+),(\d+)\]$/.exec(line);
+          if (!m) throw new Error(`bad timed interval: ${line}`);
+          return [Number(m[1]), Number(m[2])];
+        });
+
+    const intervals1 = intervalsOf(r1.stdout);
+    const intervals2 = intervalsOf(r2.stdout);
+    expect(intervals1.length).toBe(10);
+    expect(intervals2.length).toBe(10);
+
+    // The proof: at least one critical section of child 1 overlaps a
+    // critical section of child 2. If distinct anchors serialized,
+    // every interval would be strictly before or after every other
+    // — no overlap, this assertion would fail.
+    const anyOverlap = intervals1.some(([s1, e1]) =>
+      intervals2.some(([s2, e2]) => s1 <= e2 && s2 <= e1),
+    );
+    expect(anyOverlap).toBe(true);
   });
 });

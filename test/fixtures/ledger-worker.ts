@@ -1,9 +1,9 @@
-// Real-process fixture for Issue #106's render-ledger concurrency test.
+// Real-process fixture for Issue #106's render-ledger tests.
 //
-// Bundled to `test/fixtures/ledger-worker.mjs` by the vitest globalSetup
-// (scripts/build-ledger-fixture.mjs) before the integration suite runs;
-// the integration test spawns the bundled file with `node`. The fixture
-// itself uses the same TypeScript imports a real caller would.
+// Bundled to a per-run path under os.tmpdir() by the vitest
+// globalSetup (scripts/build-ledger-fixture.mjs); the integration
+// test spawns the bundled file with `node`. The fixture itself uses
+// the same TypeScript imports a real caller would.
 //
 // Modes (chosen by argv[2]):
 //   upsert <projectId> <worktree> <file> <name1> <name2> ...
@@ -12,10 +12,18 @@
 //   remove <name1> <name2> ...
 //     Calls `removeNames` with the given args; prints "OK" on stdout,
 //     then exits 0.
+//   timed <anchor> <iters> <holdMs>
+//     Generic acquireFileLock exercise: `iters` cycles of
+//     acquire → sleep(holdMs) → release on the given anchor (a
+//     kernel lock file path). Prints `[startMs,endMs]` for each
+//     cycle on stdout so the parent test can assert the critical
+//     sections of two children on DIFFERENT anchors actually
+//     overlap — proving distinct anchors don't serialize.
 //
-// Argv is read positionally — names with spaces are not supported and
-// not needed for the test surface (the project ID, worktree, and file
-// come from the integration test as fixed strings).
+// Argv is read positionally — names with spaces are not supported
+// and not needed for the test surface (the project ID, worktree, and
+// file come from the integration test as fixed strings).
+import { acquireFileLock } from '../../src/core/file-lock.js';
 import { upsertTarget, removeNames } from '../../src/render/ledger.js';
 
 const [, , mode, ...rest] = process.argv;
@@ -35,6 +43,26 @@ if (mode === 'upsert') {
   }
   removeNames(rest);
   process.stdout.write('OK\n');
+} else if (mode === 'timed') {
+  const [anchor, itersRaw, holdMsRaw] = rest;
+  const iters = Number(itersRaw);
+  const holdMs = Number(holdMsRaw);
+  if (!anchor || !Number.isFinite(iters) || !Number.isFinite(holdMs)) {
+    process.stderr.write(`usage: timed <anchor> <iters> <holdMs>\n`);
+    process.exit(2);
+  }
+  for (let i = 0; i < iters; i++) {
+    const lock = acquireFileLock(anchor, 'timed worker');
+    try {
+      const start = Date.now();
+      // Cooperative sleep — the worker holds the lock for `holdMs`.
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, holdMs);
+      const end = Date.now();
+      process.stdout.write(`[${start},${end}]\n`);
+    } finally {
+      lock.release();
+    }
+  }
 } else {
   process.stderr.write(`unknown mode: ${mode}\n`);
   process.exit(2);
