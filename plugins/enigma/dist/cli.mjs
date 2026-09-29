@@ -110,13 +110,13 @@ async function readWithEchoDisabled(stdin, stderr) {
   };
   let handleSignal;
   try {
-    return await new Promise((resolve6, reject) => {
+    return await new Promise((resolve5, reject) => {
       let value = "";
       const onData = (chunk) => {
         for (const ch of chunk) {
           if (ch === "\r" || ch === "\n") {
             stdin.removeListener("data", onData);
-            resolve6(value);
+            resolve5(value);
             return;
           }
           if (ch === ETX) {
@@ -259,7 +259,7 @@ function loadProjectManifest(projectPath) {
 }
 
 // src/storage/manager.ts
-import { realpathSync as realpathSync2 } from "node:fs";
+import { realpathSync as realpathSync3 } from "node:fs";
 
 // src/core/naming.ts
 var NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
@@ -425,11 +425,11 @@ function appendAuditEvent(event) {
 
 // src/core/index-store.ts
 import { existsSync as existsSync4 } from "node:fs";
-import { resolve as resolve4 } from "node:path";
+import { resolve as resolve3 } from "node:path";
 
 // src/core/file-lock.ts
-import { chmodSync as chmodSync2, closeSync, ftruncateSync, mkdirSync as mkdirSync2, openSync, writeSync } from "node:fs";
-import { dirname as dirname5, isAbsolute, relative, resolve as resolve3 } from "node:path";
+import { chmodSync as chmodSync2, closeSync, ftruncateSync, mkdirSync as mkdirSync2, openSync, realpathSync as realpathSync2, writeSync } from "node:fs";
+import { dirname as dirname5, isAbsolute, relative, sep } from "node:path";
 
 // src/core/native-lock.ts
 import { createRequire } from "node:module";
@@ -507,20 +507,29 @@ function syncSleep(ms) {
 }
 function ensureLockDir(lockPath) {
   const dir = dirname5(lockPath);
-  const homeResolved = resolve3(enigmaHome());
-  const dirResolved = resolve3(dir);
-  const rel = relative(homeResolved, dirResolved);
-  const inside = rel === "" || !rel.startsWith("..") && !isAbsolute(rel);
   try {
     mkdirSync2(dir, { recursive: true, mode: 448 });
   } catch {
   }
-  if (inside) {
-    try {
-      chmodSync2(dir, 448);
-    } catch {
-    }
+  const realDir = realInsideEnigmaHome(dir);
+  if (realDir === void 0) return;
+  try {
+    chmodSync2(realDir, 448);
+  } catch {
   }
+}
+function realInsideEnigmaHome(dir) {
+  let realHome;
+  let realDir;
+  try {
+    realHome = realpathSync2(enigmaHome());
+    realDir = realpathSync2(dir);
+  } catch {
+    return void 0;
+  }
+  const rel = relative(realHome, realDir);
+  const inside = rel === "" || rel !== ".." && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+  return inside ? realDir : void 0;
 }
 function wrapAcquireError(err, lockPath) {
   const causeName = err instanceof Error ? err.constructor.name : String(err);
@@ -667,7 +676,7 @@ var ORPHAN_ADOPTABLE_DEPOSITORIES = /* @__PURE__ */ new Set([
 function classifyLegacyScopeEntries(index, opts) {
   const identityPath = findRepoIdentityPath(opts.cwd);
   const pid = projectId(opts.cwd);
-  const fromResolved = opts.from === void 0 ? void 0 : resolve4(opts.from);
+  const fromResolved = opts.from === void 0 ? void 0 : resolve3(opts.from);
   const items = [];
   const pool = [];
   for (const entry of index.entries) {
@@ -681,7 +690,7 @@ function classifyLegacyScopeEntries(index, opts) {
       items.push({ entry, class: "orphaned-unrecoverable", rekeyable: false, detail: `value is gone; re-request ${entry.name}` });
       continue;
     }
-    if (fromResolved !== void 0 && recordedPath2 !== void 0 && resolve4(recordedPath2) === fromResolved) {
+    if (fromResolved !== void 0 && recordedPath2 !== void 0 && resolve3(recordedPath2) === fromResolved) {
       pool.push({ entry, orphan: true });
     } else {
       items.push({
@@ -1030,24 +1039,24 @@ var PROBE_REF = "__enigma_detect_probe__";
 var REF_PATTERN = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH = 512;
 function runSecretTool(args) {
-  return new Promise((resolve6, reject) => {
+  return new Promise((resolve5, reject) => {
     execFile(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve6({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecretToolWithStdin(args, value) {
-  return new Promise((resolve6, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = execFile(SECRET_TOOL_BIN, args, { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER_BYTES }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve6({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -1192,24 +1201,24 @@ var REF_PATTERN2 = /^[A-Za-z0-9_./-]+$/;
 var REF_MAX_LENGTH2 = 512;
 var MARKER_BYTE = 1;
 function runSecurity(args) {
-  return new Promise((resolve6, reject) => {
+  return new Promise((resolve5, reject) => {
     execFile2(SECURITY_BIN, args, { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve6({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runSecurityBatch(line) {
-  return new Promise((resolve6, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = execFile2(SECURITY_BIN, ["-i"], { timeout: EXEC_TIMEOUT_MS2, maxBuffer: EXEC_MAX_BUFFER_BYTES2 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve6({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -1371,24 +1380,24 @@ var REF_MAX_LENGTH3 = 512;
 var VAULT_MISSING_PATTERN = /isn't a vault|no vault named|could not find vault/i;
 var ITEM_MISSING_PATTERN = /isn't an item|could not find item|item.*not found/i;
 function runOp(args) {
-  return new Promise((resolve6, reject) => {
+  return new Promise((resolve5, reject) => {
     execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve6({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
   });
 }
 function runOpWithStdin(args, stdinData) {
-  return new Promise((resolve6, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = execFile3(OP_BIN, args, { timeout: EXEC_TIMEOUT_MS3, maxBuffer: EXEC_MAX_BUFFER_BYTES3 }, (error, stdout, stderr) => {
       if (error) {
         reject(Object.assign(error, { stdout: String(stdout ?? ""), stderr: String(stderr ?? "") }));
         return;
       }
-      resolve6({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
+      resolve5({ stdout: String(stdout ?? ""), stderr: String(stderr ?? "") });
     });
     child.on("error", reject);
     if (!child.stdin) {
@@ -1638,7 +1647,7 @@ function projectPathFor(entry, cwd) {
 function canonicalPath(p) {
   if (p === void 0) return void 0;
   try {
-    return realpathSync2(p);
+    return realpathSync3(p);
   } catch {
     return p;
   }
@@ -1883,13 +1892,13 @@ import {
   lstatSync,
   readFileSync as readFileSync5,
   readlinkSync,
-  realpathSync as realpathSync3,
+  realpathSync as realpathSync4,
   renameSync as renameSync2,
   rmSync,
   statSync as statSync2,
   symlinkSync
 } from "node:fs";
-import { basename as basename5, delimiter, dirname as dirname6, isAbsolute as isAbsolute2, join as join5, resolve as resolve5 } from "node:path";
+import { basename as basename5, delimiter, dirname as dirname6, isAbsolute as isAbsolute2, join as join5, resolve as resolve4 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/core/version.ts
@@ -1902,7 +1911,7 @@ function pathDirs(pathEnv) {
   for (const raw of pathEnv.split(delimiter)) {
     const entry = raw.trim();
     if (entry.length === 0 || !isAbsolute2(entry)) continue;
-    const abs = resolve5(entry);
+    const abs = resolve4(entry);
     if (seen.has(abs)) continue;
     seen.add(abs);
     dirs.push(abs);
@@ -1981,7 +1990,7 @@ function classify(dest, cli) {
   } catch {
     return { slot: "foreign", link: null };
   }
-  const link = isAbsolute2(raw) ? resolve5(raw) : resolve5(dirname6(dest), raw);
+  const link = isAbsolute2(raw) ? resolve4(raw) : resolve4(dirname6(dest), raw);
   let resolves = true;
   try {
     accessSync(link, constants.F_OK);
@@ -1990,8 +1999,8 @@ function classify(dest, cli) {
   }
   if (!resolves) return { slot: "dangling", link };
   try {
-    const realLink = realpathSync3(link);
-    const realCli = realpathSync3(cli);
+    const realLink = realpathSync4(link);
+    const realCli = realpathSync4(cli);
     if (realLink === realCli) return { slot: "ours", link };
     const other = readBundleManifest(realLink);
     if (other?.name === "enigma") {
@@ -2025,7 +2034,7 @@ function defaultPluginRoot() {
   const fromEnv = process.env.CLAUDE_PLUGIN_ROOT;
   if (fromEnv) return fromEnv;
   try {
-    return resolve5(dirname6(fileURLToPath2(import.meta.url)), "..");
+    return resolve4(dirname6(fileURLToPath2(import.meta.url)), "..");
   } catch {
     return null;
   }
@@ -2039,7 +2048,7 @@ function ensureCliShim(options = {}) {
     if (!pluginRoot) {
       return { status: "unavailable", target: null, cli: null, link: null, detail: "not running from a plugin install" };
     }
-    const cli = resolve5(pluginRoot, "dist", "cli.mjs");
+    const cli = resolve4(pluginRoot, "dist", "cli.mjs");
     if (!existsSync8(cli)) {
       return { status: "unavailable", target: null, cli: null, link: null, detail: `no CLI bundle at ${cli}` };
     }
@@ -2219,13 +2228,13 @@ var REVEAL_TTL_MS = 5 * 60 * 1e3;
 var SWEEP_INTERVAL_MS = 60 * 1e3;
 var USED_GRACE_MS = 5 * 60 * 1e3;
 function deferred() {
-  let resolve6;
+  let resolve5;
   let reject;
   const promise = new Promise((res, rej) => {
-    resolve6 = res;
+    resolve5 = res;
     reject = rej;
   });
-  return { promise, resolve: resolve6, reject };
+  return { promise, resolve: resolve5, reject };
 }
 function defaultTtlMs(kind) {
   return kind === "reveal" ? REVEAL_TTL_MS : REQUEST_TTL_MS;
@@ -3171,7 +3180,7 @@ var PayloadTooLargeError = class extends Error {
   }
 };
 function readBody(req, maxBytes = MAX_BODY_BYTES) {
-  return new Promise((resolve6, reject) => {
+  return new Promise((resolve5, reject) => {
     const chunks = [];
     let total = 0;
     let settled2 = false;
@@ -3192,7 +3201,7 @@ function readBody(req, maxBytes = MAX_BODY_BYTES) {
     req.on("end", () => {
       if (settled2) return;
       settled2 = true;
-      resolve6(Buffer.concat(chunks));
+      resolve5(Buffer.concat(chunks));
     });
     req.on("error", settleError);
   });
@@ -5591,7 +5600,7 @@ var MIN_REARM_DELAY_MS = 1e3;
 var state;
 var starting;
 function settled(value) {
-  return new Promise((resolve6) => resolve6(value));
+  return new Promise((resolve5) => resolve5(value));
 }
 function toHandle(s) {
   return { port: s.port, origin: `http://${s.host}:${s.port}`, close: stopServer };
@@ -5627,7 +5636,7 @@ function startServer(opts = {}) {
       (_resolve, reject) => reject(new Error(`refusing to bind ${host} over plain HTTP; pass allowInsecureHttp to override (ADR-005)`))
     );
   }
-  starting = new Promise((resolve6, reject) => {
+  starting = new Promise((resolve5, reject) => {
     const server = http.createServer((req, res) => {
       if (state) resetIdleTimer(state);
       void handleRequest(req, res);
@@ -5643,7 +5652,7 @@ function startServer(opts = {}) {
       state = newState;
       resetIdleTimer(newState);
       starting = void 0;
-      resolve6(toHandle(newState));
+      resolve5(toHandle(newState));
     });
   });
   return starting;
@@ -5653,7 +5662,7 @@ function stopServer() {
   if (!current) return settled(void 0);
   state = void 0;
   if (current.idleTimer) clearTimeout(current.idleTimer);
-  return new Promise((resolve6) => current.server.close(() => resolve6()));
+  return new Promise((resolve5) => current.server.close(() => resolve5()));
 }
 
 // src/cli/commands/import.ts
@@ -6220,7 +6229,7 @@ function entriesToInject(entries, only) {
   return matched;
 }
 function spawnChild(command, args, env) {
-  return new Promise((resolve6, reject) => {
+  return new Promise((resolve5, reject) => {
     const child = spawn(command, args, { stdio: "inherit", env });
     const forward = (signal) => {
       child.kill(signal);
@@ -6237,10 +6246,10 @@ function spawnChild(command, args, env) {
       stopForwarding();
       if (signal) {
         const signum = osConstants.signals[signal] ?? 0;
-        resolve6(128 + signum);
+        resolve5(128 + signum);
         return;
       }
-      resolve6(code ?? 1);
+      resolve5(code ?? 1);
     });
   });
 }
@@ -6290,12 +6299,12 @@ function notImplemented(command) {
 }
 
 // src/core/is-main-module.ts
-import { realpathSync as realpathSync4 } from "node:fs";
+import { realpathSync as realpathSync5 } from "node:fs";
 import { fileURLToPath as fileURLToPath3 } from "node:url";
 function isMainModule(metaUrl = import.meta.url, entry = process.argv[1]) {
   if (!entry) return false;
   try {
-    return realpathSync4(fileURLToPath3(metaUrl)) === realpathSync4(entry);
+    return realpathSync5(fileURLToPath3(metaUrl)) === realpathSync5(entry);
   } catch {
     return false;
   }
