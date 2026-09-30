@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseDotEnv, removeDotEnvEntries } from '../../../src/storage/dotenv-file.js';
+import { parseDotEnv, removeDotEnvEntries, scanRenderMarkers } from '../../../src/storage/dotenv-file.js';
 import { ENV_BEGIN_MARKER, ENV_END_MARKER, RENDER_BEGIN_MARKER, RENDER_END_MARKER } from '../../../src/storage/dotenv-file.js';
 
 describe('parseDotEnv', () => {
@@ -307,5 +307,50 @@ describe('[r3.3] an unterminated render block runs to EOF and is never imported 
   it('the env depository block keeps its own handling: an unterminated one is not a block, so its lines are ordinary assignments', () => {
     const envDamaged = `${ENV_BEGIN_MARKER}\nB=2\n`;
     expect(parseDotEnv(envDamaged).entries.map((e) => e.name)).toEqual(['B']);
+  });
+});
+
+describe('[r4.2] every render marker is scanned: complete blocks and everything after the first unterminated begin are protected', () => {
+  const names = (content: string): string[] => parseDotEnv(content).entries.map((e) => e.name);
+
+  it('a valid block followed by a second unterminated begin: neither block\'s assignments are imported', () => {
+    const content = `A=1\n${RENDER_BEGIN_MARKER}\nR=old\n${RENDER_END_MARKER}\n${RENDER_BEGIN_MARKER}\nB=old\n`;
+    expect(names(content)).toEqual(['A']);
+  });
+
+  it('a valid block followed by a second unterminated begin: removal strips only the ordinary line, keeping R and B', () => {
+    const content = `A=1\n${RENDER_BEGIN_MARKER}\nR=old\n${RENDER_END_MARKER}\n${RENDER_BEGIN_MARKER}\nB=old\n`;
+    expect(removeDotEnvEntries(content, ['A', 'R', 'B'])).toBe(`${RENDER_BEGIN_MARKER}\nR=old\n${RENDER_END_MARKER}\n${RENDER_BEGIN_MARKER}\nB=old\n`);
+  });
+
+  it('two complete render blocks are both protected', () => {
+    const content = `${RENDER_BEGIN_MARKER}\nR1=x\n${RENDER_END_MARKER}\nX=1\n${RENDER_BEGIN_MARKER}\nR2=y\n${RENDER_END_MARKER}\n`;
+    expect(names(content)).toEqual(['X']);
+    expect(removeDotEnvEntries(content, ['R1', 'R2', 'X'])).toBe(`${RENDER_BEGIN_MARKER}\nR1=x\n${RENDER_END_MARKER}\n${RENDER_BEGIN_MARKER}\nR2=y\n${RENDER_END_MARKER}\n`);
+  });
+
+  it('a stray end marker protects nothing and does not hide the ordinary lines around it', () => {
+    const content = `A=1\n${RENDER_END_MARKER}\nB=2\n`;
+    expect(names(content)).toEqual(['A', 'B']);
+  });
+
+  it('a stray end marker before a complete block does not stop that block being protected', () => {
+    const content = `${RENDER_END_MARKER}\n${RENDER_BEGIN_MARKER}\nR=old\n${RENDER_END_MARKER}\nX=1\n`;
+    expect(names(content)).toEqual(['X']);
+  });
+
+  it('a nested begin inside a block keeps the whole block protected', () => {
+    const content = `${RENDER_BEGIN_MARKER}\nA=1\n${RENDER_BEGIN_MARKER}\nB=1\n${RENDER_END_MARKER}\nX=2\n`;
+    expect(names(content)).toEqual(['X']);
+  });
+
+  it('scanRenderMarkers reports damage for each failing shape and none for zero or one well-formed block', () => {
+    const lines = (s: string): string[] => s.split('\n');
+    expect(scanRenderMarkers(lines('A=1\n')).damaged).toBe(false);
+    expect(scanRenderMarkers(lines(`${RENDER_BEGIN_MARKER}\nA=1\n${RENDER_END_MARKER}\n`)).damaged).toBe(false);
+    expect(scanRenderMarkers(lines(`${RENDER_BEGIN_MARKER}\nA=1\n`)).damaged).toBe(true);
+    expect(scanRenderMarkers(lines(`${RENDER_END_MARKER}\n`)).damaged).toBe(true);
+    expect(scanRenderMarkers(lines(`${RENDER_BEGIN_MARKER}\n${RENDER_END_MARKER}\n${RENDER_BEGIN_MARKER}\n${RENDER_END_MARKER}\n`)).damaged).toBe(true);
+    expect(scanRenderMarkers(lines(`${RENDER_BEGIN_MARKER}\n${RENDER_BEGIN_MARKER}\n${RENDER_END_MARKER}\n`)).damaged).toBe(true);
   });
 });

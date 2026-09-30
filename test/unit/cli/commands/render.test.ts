@@ -430,4 +430,26 @@ describe('cmdRender', () => {
       expect(stderrText()).toContain('must name a file');
     });
   });
+  describe('[r4] fix batch round 4', () => {
+    it('[r4.2] a valid render block followed by a second unterminated begin exits 1, resolves nothing and writes nothing', async () => {
+      await set('A', 'value-a');
+      const damaged = '# enigma:render:begin\nR=old\n# enigma:render:end\n# enigma:render:begin\nB=old\n';
+      writeFileSync(target(), damaged, { mode: 0o600 });
+      vi.mocked(resolveSecret).mockClear();
+
+      expect(await main(['render'])).toBe(1);
+      expect(stderrText()).toContain('damaged');
+      expect(resolveSecret).not.toHaveBeenCalled();
+      expect(readFileSync(target(), 'utf8')).toBe(damaged);
+      expect(readLedger().targets).toEqual([]);
+    });
+
+    it('[r4.1] a render block at EOF without a newline is terminated by a re-render', async () => {
+      await set('A', 'value-a');
+      writeFileSync(target(), '# enigma:render:begin\nA=old\n# enigma:render:end', { mode: 0o600 });
+
+      expect(await cmdRender([])).toBe(0);
+      expect(readFileSync(target(), 'utf8')).toBe('# enigma:render:begin\nA=value-a\n# enigma:render:end\n');
+    });
+  });
 });

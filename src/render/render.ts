@@ -3,30 +3,40 @@
  * ------------------------------------------------------------------ *
  *
  * Writes the worktree's managed render block into the configured target
- * file (default `.env`), preserving everything outside the block byte-
- * for-byte, under a per-target lock from Issue #106, with the result
- * reflected in the names-only render ledger (`src/render/ledger.ts`).
+ * file (default `.env`) under a per-target lock from Issue #106, keeping
+ * every line outside the block byte-for-byte and recording the result in the
+ * names-only render ledger (`src/render/ledger.ts`).
  *
  * Split between `buildRenderPlan` (pure and names-only: no file I/O, no
  * value or line content ever appears in it) and `executeRender` (the I/O
- * path). The executor runs, in this order:
+ * path). `buildRenderPlan` validates `render.path` first (only when
+ * rendering is on). `executeRender` then runs, in this order:
  *
- *   1. resolve values that need resolving (no lock held, so an
+ *   0. validate the target, then an UNLOCKED advisory read of it: refuse a
+ *      damaged render block, and skip names already in the file's env block
+ *      so they never trigger a store prompt,
+ *   1. resolve the values that need resolving (no lock held, so an
  *      interactive prompt can never block another renderer),
- *   2. take the per-target lock (`renderLockPath(file)`),
- *   3. re-check the target is not a symlink, then read it ONCE,
- *   4. derive keep / remove / env-block-dedupe from THAT content,
- *   5. build the block, write atomically,
- *   6. only after the write result is known: update the ledger, audit,
+ *   2. take the per-target lock, keyed on the validated canonical path,
+ *   3. re-run the full target validation (a target that now resolves to a
+ *      different file than the locked one is refused), read the file ONCE,
+ *      and refuse a damaged render block again,
+ *   4. derive keep / remove / env-block-dedupe from THAT content (a name
+ *      skipped in step 0 that is no longer in the env block is reported
+ *      as `E_TARGET_CHANGED`, never guessed),
+ *   5. build the block and write atomically,
+ *   6. only after the write result is known: update the ledger, then audit,
  *   7. release the lock in `finally`.
  *
  * Rules:
  *
- *  - Target path: relative to the worktree, no `..`, parent must exist
- *    and resolve inside the worktree; a target that is itself a symlink
- *    is refused (never read through, never replaced). Validated in
- *    `buildRenderPlan`, i.e. before any read, and re-checked under the
- *    lock. All refusals are `E_WRITE_FAILED`.
+ *  - Target path: relative to the worktree, no `..`, not empty, `.` or ending
+ *    in a separator; the parent must exist and resolve inside the worktree;
+ *    the target must not be a symlink and must be a regular file or absent.
+ *    All refusals are `E_WRITE_FAILED`, names/paths only.
+ *  - Damaged block: anything other than zero or exactly one well-formed
+ *    render block (a begin with no end, a stray end, a nested begin, more
+ *    than one block) is refused before anything is resolved or written.
  *  - AC #3: a name that appears in THIS target file's env-depository
  *    block (`# enigma:begin` / `# enigma:end`) is never written into the
  *    render block; it is reported by name as "already in the env block".
@@ -37,9 +47,12 @@
  *    (`enigma render NAME`); once its line is in the block, a plain
  *    render keeps that line as bytes and never re-resolves it.
  *  - Lines already in the block are copied as bytes from the file read
- *    under the lock; the plan never holds them.
- *  - Explicit `enigma render NAME` merges: only NAME's line is added or
- *    updated; every other line in the block stays byte-identical.
+ *    under the lock; the plan never holds them. Existing lines keep their
+ *    order; new names are appended sorted. Explicit `enigma render NAME`
+ *    merges: only NAME's line is added or updated.
+ *  - The block always ends with an EOL in the file's style (an existing
+ *    block at EOF without one gains it), so `echo X >> file` cannot glue
+ *    onto the end marker.
  *  - A failed resolve keeps the name's previous line when there is one
  *    (reported under Failed, "kept previous line"), else the name is
  *    simply absent. Other names still render.
@@ -47,10 +60,10 @@
  *    into the outcome, stdout, stderr or the audit log.
  *  - Nothing to write and no existing block: the file is not touched. An
  *    existing block that would become empty is removed (markers
- *    included, outside bytes preserved).
- *  - Ledger names = exactly the names in the block that was written. On
- *    a failed write the ledger is unchanged and every attempted name is
- *    audited `ok: false`.
+ *    included).
+ *  - Ledger names = exactly the names in the block that was written, keyed
+ *    on the canonical path. On a failed write the ledger is unchanged and
+ *    every attempted name is audited `ok: false`.
  *
  * Wiring outside `src/mcp/**` and `src/web/**` (ADR-001, leak-fence).
  * The `resolveValue` callback in production is `resolveSecret` from
@@ -79,6 +92,7 @@ import {
   encodeValue,
   findBlock,
   readManagedBlockLines,
+  scanRenderMarkers,
   writeManagedBlock,
 } from '../storage/dotenv-file.js';
 import type { BlockMarkers } from '../storage/dotenv-file.js';
@@ -350,9 +364,11 @@ function staticWriteError(message: string | undefined): string {
 /* ----------------------------- execution --------------------------- */
 
 /**
- * Drop the render block (markers included), leaving every other byte in
- * place. `writeManagedBlock` gives an appended block the file's own EOF
- * state, so removing its lines restores the original bytes exactly.
+ * Drop the render block (markers included), leaving every other line in
+ * place. The block always ends with an EOL, so a file that had no trailing
+ * newline before the block was added keeps one EOL after it is removed;
+ * every other shape (mid-file block, file that already ended with an EOL,
+ * CRLF) comes back byte for byte.
  */
 function stripRenderBlock(content: string): string {
   const eol = detectEol(content);
@@ -365,15 +381,16 @@ function stripRenderBlock(content: string): string {
 type ResolveResult = { ok: true; value: string } | { ok: false; code: string };
 
 /**
- * Refuse a render block that has a begin marker but no end marker after it
- * (a damaged file, e.g. text glued onto the end marker). Writing on top of
- * it would append a second block, so nothing is resolved or written.
+ * Refuse a file that has anything other than zero or exactly one
+ * well-formed render block: a begin with no end (e.g. text glued onto the
+ * end marker), a stray end, a nested begin, or more than one block. Writing
+ * on top of it would append a second block or take another block's lines, so
+ * nothing is resolved or written. Scans every marker, not just the first pair.
  */
 function assertRenderBlockIntact(content: string, file: string): void {
-  const lines = content.split(detectEol(content));
-  if (lines.includes(RENDER_BEGIN_MARKER) && findBlock(lines, RENDER_BLOCK_MARKERS) === undefined) {
+  if (scanRenderMarkers(content.split(detectEol(content))).damaged) {
     throw writeRefusal(
-      `${file}: the render block is damaged: "${RENDER_BEGIN_MARKER}" has no matching "${RENDER_END_MARKER}" line. Fix the file by hand, then run enigma render again.`,
+      `${file}: the render block is damaged: a "${RENDER_BEGIN_MARKER}" has no matching "${RENDER_END_MARKER}" line, or a marker is stray, nested or repeated (only one render block is allowed). Fix the file by hand, then run enigma render again.`,
     );
   }
 }
@@ -423,7 +440,9 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
   const depositoryOf = new Map(plan.toResolve.map((t) => [t.name, t.depository] as const));
 
   // 2. Lock.
-  const lock = acquireFileLock(renderLockPath(plan.file));
+  //    Keyed on the validated canonical path, the same one that is written
+  //    and recorded in the ledger.
+  const lock = acquireFileLock(renderLockPath(peekPath));
   try {
     // 3. Re-run the full target validation now that the lock is held and
     //    before touching the file: resolving a value may have taken long
@@ -434,6 +453,9 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
     let current: string;
     try {
       target = validateTargetFile(plan.worktree, plan.file);
+      // The lock is held on the path validated before resolving; if the target
+      // now resolves elsewhere, it is not the file the lock protects.
+      if (target !== peekPath) throw writeRefusal('render.path now resolves to a different file than the one that was locked; run enigma render again');
       current = existsSync(target) ? readFileSync(target, 'utf8') : '';
       assertRenderBlockIntact(current, plan.file);
     } catch (err) {

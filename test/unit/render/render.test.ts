@@ -813,6 +813,89 @@ describe('[r3] fix batch round 3', () => {
   });
 });
 
+describe('[r4] fix batch round 4', () => {
+  describe('[r4.1] an existing block at EOF without a newline is terminated on re-render', () => {
+    it.each([
+      ['LF', '\n'],
+      ['CRLF', '\r\n'],
+    ])('%s: the block ends with an EOL afterwards, and an appended NEW=1 is its own variable while the rendered name is not importable', async (_label, eol) => {
+      const unterminated = `U=1${eol}${RENDER_BEGIN_MARKER}${eol}A=old${eol}${RENDER_END_MARKER}`;
+      writeFileSync(envPath(), unterminated, { mode: 0o600 });
+
+      await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'a2' }) });
+      expect(read()).toBe(`U=1${eol}${RENDER_BEGIN_MARKER}${eol}A=a2${eol}${RENDER_END_MARKER}${eol}`);
+
+      writeFileSync(envPath(), `${read()}NEW=1${eol}`, { mode: 0o600 });
+      expect(parseDotEnv(read()).entries.map((e) => e.name)).toEqual(['U', 'NEW']);
+      await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'a3' }) });
+      expect(read().split(RENDER_BEGIN_MARKER).length - 1).toBe(1);
+      expect(read()).toContain('NEW=1');
+    });
+
+    it('a block updated in place mid-file is not given extra EOLs', async () => {
+      const original = `U=1\n${block('A=old')}TAIL=2`;
+      writeFileSync(envPath(), original, { mode: 0o600 });
+      await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'new' }) });
+      expect(read()).toBe(`U=1\n${block('A=new')}TAIL=2`);
+    });
+  });
+
+  describe('[r4.2] every render marker is scanned', () => {
+    it.each([
+      ['a valid block then a second unterminated begin', `${block('R=old')}${RENDER_BEGIN_MARKER}\nB=old\n`],
+      ['a stray end marker', `U=1\n${RENDER_END_MARKER}\n`],
+      ['a valid block then a stray end marker', `${block('R=old')}${RENDER_END_MARKER}\n`],
+      ['two complete blocks', `${block('R=old')}U=1\n${block('S=old')}`],
+      ['a nested begin', `${RENDER_BEGIN_MARKER}\nA=1\n${RENDER_BEGIN_MARKER}\nB=1\n${RENDER_END_MARKER}\n`],
+    ])('%s: refused, nothing resolved, nothing written, ledger unchanged', async (_label, damaged) => {
+      writeFileSync(envPath(), damaged, { mode: 0o600 });
+      let resolves = 0;
+      await expect(run({ index: indexOf(entry('A')), resolve: async () => { resolves++; return 'v'; } })).rejects.toMatchObject({
+        code: 'E_WRITE_FAILED',
+        message: expect.stringContaining('damaged'),
+      });
+      expect(resolves).toBe(0);
+      expect(read()).toBe(damaged);
+      expect(readLedger().targets).toEqual([]);
+    });
+
+    it('a file with exactly one well-formed block still renders', async () => {
+      writeFileSync(envPath(), `U=1\n${block('R=old')}`, { mode: 0o600 });
+      await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'a' }) });
+      expect(read()).toBe(`U=1\n${block('A=a')}`);
+    });
+  });
+
+  describe('[r4.4] the lock is keyed on the validated canonical path', () => {
+    it('two lexical spellings of one target give the same lock path', () => {
+      mkdirSync(join(project, 'realdir'));
+      symlinkSync(join(project, 'realdir'), join(project, 'link'));
+      expect(renderLockPath(join(project, 'link', '.env'))).toBe(renderLockPath(join(project, 'realdir', '.env')));
+    });
+
+    it('an in-worktree symlinked parent repointed to another in-worktree directory while values resolve is refused, not written', async () => {
+      const dirA = join(project, 'a');
+      const dirB = join(project, 'b');
+      mkdirSync(dirA);
+      mkdirSync(dirB);
+      symlinkSync(dirA, join(project, 'link'));
+      const repoint: Resolver = async () => {
+        rmSync(join(project, 'link'));
+        symlinkSync(dirB, join(project, 'link'));
+        return 'v';
+      };
+      await expect(run({ index: indexOf(entry('A')), manifest: manifestOf({ render: { path: 'link/.env' } }), resolve: repoint })).rejects.toMatchObject({
+        code: 'E_WRITE_FAILED',
+        message: expect.stringContaining('different file'),
+      });
+      expect(readdirSync(dirB)).toEqual([]);
+      expect(readdirSync(dirA)).toEqual([]);
+      expect(readLedger().targets).toEqual([]);
+      expect(audits().map((a) => [a.name, a.ok])).toEqual([['A', false]]);
+    });
+  });
+});
+
 describe('[r1.13] cleanups', () => {
   it.each(['src/storage/depositories/env.ts', 'src/storage/dotenv-file.ts', 'src/core/config.ts'])('%s ends with a trailing newline', (file) => {
     const bytes = readFileSync(join(priorCwd, file), 'utf8');
