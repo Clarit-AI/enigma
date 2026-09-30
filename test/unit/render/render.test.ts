@@ -5,7 +5,7 @@
  * the worktree are temp dirs, values come from an injected resolver, and
  * no depository store (Keychain, 1Password, ...) is ever touched.
  */
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
@@ -175,6 +175,23 @@ describe('buildRenderPlan', () => {
       expect(planFor('escape/file.env')).toThrow(expect.objectContaining({ code: 'E_WRITE_FAILED' }));
     });
 
+    it('[r2.5] refuses a target that is a directory', () => {
+      mkdirSync(envPath());
+      expect(planFor('.env')).toThrow(expect.objectContaining({ code: 'E_WRITE_FAILED', message: expect.stringContaining('not a regular file') }));
+    });
+
+    it.each(['', '.', 'config/', 'config\\'])('[r2.5] refuses the path %j with a message saying it must name a file', (path) => {
+      mkdirSync(join(project, 'config'));
+      expect(planFor(path)).toThrow(expect.objectContaining({ code: 'E_WRITE_FAILED', message: expect.stringContaining('must name a file') }));
+    });
+
+    it('[r2.5] nothing is resolved when the target is refused up front', async () => {
+      mkdirSync(envPath());
+      let resolves = 0;
+      await expect(run({ index: indexOf(entry('A')), resolve: async () => { resolves++; return 'v'; } })).rejects.toMatchObject({ code: 'E_WRITE_FAILED' });
+      expect(resolves).toBe(0);
+    });
+
     it('[r1.4] refuses a target file that is a symlink, without reading through it or replacing it', async () => {
       const real = join(project, 'real.env');
       writeFileSync(real, 'REAL=1\n', { mode: 0o600 });
@@ -232,7 +249,8 @@ describe('executeRender', () => {
   it('keeps CRLF line endings and every byte outside the block', async () => {
     writeFileSync(envPath(), 'USER_LINE=1\r\nOTHER=2', { mode: 0o600 });
     await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'a' }) });
-    expect(read()).toBe(`USER_LINE=1\r\nOTHER=2\r\n${RENDER_BEGIN_MARKER}\r\nA=a\r\n${RENDER_END_MARKER}\r\n`);
+    // The new block inherits the file's EOF state: no trailing newline was there, none is added.
+    expect(read()).toBe(`USER_LINE=1\r\nOTHER=2\r\n${RENDER_BEGIN_MARKER}\r\nA=a\r\n${RENDER_END_MARKER}`);
   });
 
   it('render.enabled=false does nothing', async () => {
@@ -580,6 +598,98 @@ describe('[r1.8] checkEnvGitignore target parameter', () => {
     writeFileSync(join(dir, '.gitignore'), `${pattern}\n`);
     expect(checkEnvGitignore(dir, target)).toHaveLength(1);
     rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('[r2.1] the target is re-validated under the lock', () => {
+  it('a parent directory swapped for a symlink out of the worktree while values resolve: nothing is written outside, the run fails, the ledger is unchanged, and the attempted names are audited ok:false', async () => {
+    mkdirSync(join(project, 'sub'));
+    const outside = join(home, 'outside');
+    mkdirSync(outside);
+    const swap: Resolver = async () => {
+      rmSync(join(project, 'sub'), { recursive: true });
+      symlinkSync(outside, join(project, 'sub'));
+      return SENTINEL;
+    };
+    await expect(run({ index: indexOf(entry('A')), manifest: manifestOf({ render: { path: 'sub/.env' } }), resolve: swap })).rejects.toMatchObject({
+      code: 'E_WRITE_FAILED',
+      message: expect.stringContaining('outside the worktree'),
+    });
+    expect(readdirSync(outside)).toEqual([]);
+    expect(readLedger().targets).toEqual([]);
+    expect(audits().map((a) => [a.name, a.ok])).toEqual([['A', false]]);
+    expect(read(auditLogPath())).not.toContain(SENTINEL);
+  });
+
+  it('the target swapped for a directory while values resolve is refused, not a raw EISDIR', async () => {
+    const swap: Resolver = async () => {
+      mkdirSync(envPath());
+      return 'v';
+    };
+    await expect(run({ index: indexOf(entry('A')), resolve: swap })).rejects.toMatchObject({ code: 'E_WRITE_FAILED', message: expect.stringContaining('not a regular file') });
+    expect(audits().map((a) => [a.name, a.ok])).toEqual([['A', false]]);
+  });
+
+  it('the lock is released after a refusal', async () => {
+    mkdirSync(envPath());
+    await expect(run({ index: indexOf(entry('A')) })).rejects.toBeDefined();
+    acquireFileLock(renderLockPath(envPath())).release();
+  });
+});
+
+describe('[r2.2] line order', () => {
+  it('an explicit render keeps the existing lines in their current order and appends the new name last', async () => {
+    writeFileSync(envPath(), block('Z=zz', 'A=aa'), { mode: 0o600 });
+    await run({ index: indexOf(entry('A'), entry('B'), entry('Z')), explicitName: 'B', resolve: fixedValues({ B: 'bb' }) });
+    expect(read()).toBe(block('Z=zz', 'A=aa', 'B=bb'));
+  });
+
+  it('an explicit render of an existing name updates it in its position', async () => {
+    writeFileSync(envPath(), block('Z=old', 'A=aa'), { mode: 0o600 });
+    await run({ index: indexOf(entry('A'), entry('Z')), explicitName: 'Z', resolve: fixedValues({ Z: 'new' }) });
+    expect(read()).toBe(block('Z=new', 'A=aa'));
+  });
+
+  it('a plain re-render of an unsorted block with unchanged values is byte-identical', async () => {
+    const original = `USER=1\n${block('Z=zz', 'A=aa', 'M=mm')}TAIL=2\n`;
+    writeFileSync(envPath(), original, { mode: 0o600 });
+    await run({ index: indexOf(entry('A'), entry('M'), entry('Z')), resolve: fixedValues({ A: 'aa', M: 'mm', Z: 'zz' }) });
+    expect(read()).toBe(original);
+  });
+
+  it('a plain render appends new names after the existing lines, sorted among themselves; a dropped name leaves the order of the rest alone', async () => {
+    writeFileSync(envPath(), block('Z=zz', 'GONE=x', 'A=aa'), { mode: 0o600 });
+    await run({ index: indexOf(entry('A'), entry('Z'), entry('D'), entry('C')), resolve: fixedValues({ A: 'aa', Z: 'zz', D: 'dd', C: 'cc' }) });
+    expect(read()).toBe(block('Z=zz', 'A=aa', 'C=cc', 'D=dd'));
+  });
+
+  it('a kept prompting-store line stays in its position', async () => {
+    writeFileSync(envPath(), block('Z=zz', 'KC=kk'), { mode: 0o600 });
+    await run({ index: indexOf(entry('Z'), entry('KC', 'keychain'), entry('A')), resolve: fixedValues({ Z: 'zz', A: 'aa' }) });
+    expect(read()).toBe(block('Z=zz', 'KC=kk', 'A=aa'));
+  });
+});
+
+describe('[r2.4] removing the block restores the bytes outside it', () => {
+  it.each([
+    ['no trailing newline', 'U=1'],
+    ['a trailing newline', 'U=1\n'],
+    ['CRLF, no trailing newline', 'U=1\r\nV=2'],
+    ['CRLF, trailing newline', 'U=1\r\nV=2\r\n'],
+    ['an empty file', ''],
+  ])('render then empty the set: %s', async (_label, original) => {
+    writeFileSync(envPath(), original, { mode: 0o600 });
+    await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'a' }) });
+    expect(read().startsWith(original)).toBe(true);
+    expect(read()).not.toBe(original);
+    await run({ index: indexOf() });
+    expect(read()).toBe(original);
+  });
+
+  it('a block in the middle of a file is removed without touching either side', async () => {
+    writeFileSync(envPath(), `U=1\n${block('A=a')}TAIL=2`, { mode: 0o600 });
+    await run({ index: indexOf() });
+    expect(read()).toBe('U=1\nTAIL=2');
   });
 });
 

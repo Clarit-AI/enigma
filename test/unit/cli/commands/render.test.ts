@@ -5,7 +5,7 @@
  * the worktree are temp dirs, and `resolveSecret` is mocked so no depository
  * store is touched.
  */
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, realpathSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
@@ -14,12 +14,14 @@ const SENTINEL = 'sk-sentinel-value-should-never-appear-7c3a';
 
 const storedValues = new Map<string, string>();
 let resolveShouldFail = false;
+let onResolve: (() => void) | undefined;
 
 vi.mock('../../../../src/storage/manager.js', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../../../../src/storage/manager.js')>();
   return {
     ...actual,
     resolveSecret: vi.fn(async (name: string) => {
+      onResolve?.();
       if (resolveShouldFail) throw new Error(`resolve failure for ${name}; secret=${SENTINEL}-in-message`);
       const stored = storedValues.get(name);
       if (stored !== undefined) return stored;
@@ -49,6 +51,7 @@ describe('cmdRender', () => {
   beforeEach(() => {
     storedValues.clear();
     resolveShouldFail = false;
+    onResolve = undefined;
     tmpHome = mkdtempSync(join(tmpdir(), 'enigma-home-'));
     originalHome = process.env.ENIGMA_HOME;
     process.env.ENIGMA_HOME = tmpHome;
@@ -327,6 +330,51 @@ describe('cmdRender', () => {
       expect(await cmdRender([])).toBe(0);
       expect(stdoutText()).toContain('Skipped: B (excluded by .enigma.json render.names)');
       expect(stdoutText()).not.toContain('Removed');
+    });
+  });
+  describe('[r2] fix batch round 2', () => {
+    it('[r2.1] a parent directory swapped for a symlink out of the worktree while the value resolves: exit 1, E_WRITE_FAILED on stderr, nothing written outside', async () => {
+      await set('A', SENTINEL);
+      mkdirSync(join(tmpProject, 'sub'));
+      writeFileSync(join(tmpProject, '.enigma.json'), JSON.stringify({ render: { path: 'sub/.env' } }));
+      const outside = join(tmpHome, 'outside');
+      mkdirSync(outside);
+      onResolve = () => {
+        rmSync(join(tmpProject, 'sub'), { recursive: true });
+        symlinkSync(outside, join(tmpProject, 'sub'));
+      };
+
+      expect(await main(['render'])).toBe(1);
+      expect(stderrText()).toContain('E_WRITE_FAILED');
+      expect(readdirSync(outside)).toEqual([]);
+      expect(readLedger().targets).toEqual([]);
+      expect(stdoutText() + stderrText()).not.toContain(SENTINEL);
+    });
+
+    it.each([
+      ['a directory', 'as-dir', 'not a regular file'],
+      ['an empty path', '', 'must name a file'],
+      ['"."', '.', 'must name a file'],
+      ['a trailing slash', 'as-dir/', 'must name a file'],
+    ])('[r2.5] %s as render.path exits 1 with a clear message and resolves nothing', async (_label, path, message) => {
+      await set('A', 'value-a');
+      mkdirSync(join(tmpProject, 'as-dir'));
+      writeFileSync(join(tmpProject, '.enigma.json'), JSON.stringify({ render: { path } }));
+      vi.mocked(resolveSecret).mockClear();
+
+      expect(await main(['render'])).toBe(1);
+      expect(stderrText()).toContain(`E_WRITE_FAILED: render.path`);
+      expect(stderrText()).toContain(message);
+      expect(resolveSecret).not.toHaveBeenCalled();
+    });
+
+    it('[r2.6] no gitignore warning when rendering is off', async () => {
+      await set('A', 'value-a');
+      writeFileSync(join(tmpProject, '.enigma.json'), JSON.stringify({ render: { enabled: false } }));
+
+      expect(await cmdRender([])).toBe(0);
+      expect(stdoutText()).toContain('rendering is off');
+      expect(stdoutText()).not.toContain('gitignored');
     });
   });
 });

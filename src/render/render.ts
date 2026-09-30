@@ -57,7 +57,8 @@
  * `src/storage/manager.ts`, the sanctioned resolve path.
  */
 import { chmodSync, existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import type { Stats } from 'node:fs';
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { appendAuditEvent, auditScopeFields } from '../core/audit.js';
 import type { AuditActor } from '../core/audit.js';
 import { acquireFileLock } from '../core/file-lock.js';
@@ -187,30 +188,21 @@ function writeRefusal(message: string): EnigmaError {
   return new EnigmaError({ code: 'E_WRITE_FAILED', message });
 }
 
-/** Refuse a target that is itself a symlink. `lstat`, never `stat`: never read through it, never replace it. */
-function assertNotSymlink(file: string): void {
-  let isLink: boolean;
-  try {
-    isLink = lstatSync(file).isSymbolicLink();
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
-    throw writeRefusal(`cannot inspect render.path target: ${(err as NodeJS.ErrnoException).code ?? 'unknown error'}`);
-  }
-  if (isLink) throw writeRefusal('render.path target is a symlink; refusing to read through or replace it');
-}
-
 /**
- * Validate `renderPath` against the worktree and return the absolute
- * target. Runs before anything is read. Messages name the problem only.
+ * Validate the absolute target `file` against the worktree and return the
+ * path to read and write: the parent's realpath plus the file name.
+ *
+ *  - the parent directory exists and its realpath is inside the worktree's
+ *    realpath (so a parent swapped for a symlink out of the tree is refused);
+ *  - the target is not a symlink (`lstat`, never `stat`: never read through
+ *    it, never replace it);
+ *  - the target is a regular file, or does not exist yet.
+ *
+ * Runs once up front (before any value is resolved) and again under the
+ * lock, immediately before the read and write, because resolving a value
+ * can take arbitrarily long. Messages name the problem only.
  */
-function resolveRenderTarget(worktree: string, renderPath: string): string {
-  if (isAbsolute(renderPath)) {
-    throw writeRefusal('render.path must be relative to the worktree; absolute paths are refused');
-  }
-  if (PATH_TRAVERSAL_SEGMENT_RE.test(renderPath)) {
-    throw writeRefusal('render.path must not contain a parent-directory traversal segment');
-  }
-  const file = resolve(worktree, renderPath);
+function validateTargetFile(worktree: string, file: string): string {
   const parentDir = dirname(file);
   if (!existsSync(parentDir)) {
     throw writeRefusal("render.path target parent directory does not exist; Enigma never creates directories in the user's worktree");
@@ -227,7 +219,35 @@ function resolveRenderTarget(worktree: string, renderPath: string): string {
   if (rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) {
     throw writeRefusal('render.path resolves outside the worktree via a symlinked parent directory');
   }
-  assertNotSymlink(file);
+  const target = join(realParent, basename(file));
+  let stat: Stats;
+  try {
+    stat = lstatSync(target);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return target;
+    throw writeRefusal(`cannot inspect render.path target: ${(err as NodeJS.ErrnoException).code ?? 'unknown error'}`);
+  }
+  if (stat.isSymbolicLink()) throw writeRefusal('render.path target is a symlink; refusing to read through or replace it');
+  if (!stat.isFile()) throw writeRefusal('render.path target is not a regular file');
+  return target;
+}
+
+/**
+ * Validate `renderPath` against the worktree and return the absolute
+ * target. Runs before anything is read or resolved.
+ */
+function resolveRenderTarget(worktree: string, renderPath: string): string {
+  if (isAbsolute(renderPath)) {
+    throw writeRefusal('render.path must be relative to the worktree; absolute paths are refused');
+  }
+  if (PATH_TRAVERSAL_SEGMENT_RE.test(renderPath)) {
+    throw writeRefusal('render.path must not contain a parent-directory traversal segment');
+  }
+  if (renderPath.trim() === '' || renderPath === '.' || /[/\\]$/.test(renderPath)) {
+    throw writeRefusal('render.path must name a file, not be empty, "." or a directory path ending in a separator');
+  }
+  const file = resolve(worktree, renderPath);
+  validateTargetFile(worktree, file);
   return file;
 }
 
@@ -325,8 +345,8 @@ function staticWriteError(message: string | undefined): string {
 
 /**
  * Drop the render block (markers included), leaving every other byte in
- * place. `writeManagedBlock` appends the block at EOF, so the usual case
- * is the block as the file's tail.
+ * place. `writeManagedBlock` gives an appended block the file's own EOF
+ * state, so removing its lines restores the original bytes exactly.
  */
 function stripRenderBlock(content: string): string {
   const eol = detectEol(content);
@@ -375,10 +395,29 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
   // 2. Lock.
   const lock = acquireFileLock(renderLockPath(plan.file));
   try {
-    // 3. Re-check the symlink refusal under the lock (the path could have
-    //    changed since validation), then read once.
-    assertNotSymlink(plan.file);
-    const current = existsSync(plan.file) ? readFileSync(plan.file, 'utf8') : '';
+    // 3. Re-run the full target validation now that the lock is held and
+    //    before touching the file: resolving a value may have taken long
+    //    enough for the parent or the target to be swapped. The path it
+    //    returns is the one read and written below. A refusal writes
+    //    nothing, changes no ledger row, and audits every attempted name.
+    let target: string;
+    try {
+      target = validateTargetFile(plan.worktree, plan.file);
+    } catch (err) {
+      for (const item of plan.toResolve) {
+        appendAuditEvent({
+          op: 'render',
+          name: item.name,
+          depository: item.depository,
+          actor: opts.actor,
+          ok: false,
+          error: staticReasonFor('E_WRITE_FAILED'),
+          ...auditScopeFields({ scope: 'project', projectId: opts.projectId, projectPath: plan.worktree }),
+        });
+      }
+      throw err;
+    }
+    const current = existsSync(target) ? readFileSync(target, 'utf8') : '';
 
     // 4. Everything file-derived comes from `current`.
     const envBlockNames = new Set(blockLinesByName(current, ENV_BLOCK_MARKERS).keys());
@@ -427,7 +466,12 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
     }
 
     // 5. Build the next content.
-    const bodyNames = [...finalLines.keys()].sort((a, b) => a.localeCompare(b));
+    // Existing lines keep their file order and bytes (an updated name keeps
+    // its position); new names are appended in sorted order.
+    const bodyNames = [
+      ...[...existing.keys()].filter((n) => finalLines.has(n)),
+      ...[...finalLines.keys()].filter((n) => !existing.has(n)).sort((a, b) => a.localeCompare(b)),
+    ];
     let next: string | undefined;
     if (bodyNames.length > 0) next = writeManagedBlock(current, bodyNames.map((n) => finalLines.get(n)!), RENDER_BLOCK_MARKERS);
     else if (hasExistingBlock) next = stripRenderBlock(current);
@@ -435,7 +479,7 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
 
     let writeOk = true;
     if (next !== undefined) {
-      const result = writeFileAtomic(plan.file, next, FILE_MODE);
+      const result = writeFileAtomic(target, next, FILE_MODE);
       writeOk = result.ok;
       if (!result.ok) {
         outcome.writeError = staticWriteError(result.error);
@@ -447,7 +491,7 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
         }
       } else {
         try {
-          if ((statSync(plan.file).mode & 0o777) !== FILE_MODE) chmodSync(plan.file, FILE_MODE);
+          if ((statSync(target).mode & 0o777) !== FILE_MODE) chmodSync(target, FILE_MODE);
         } catch {
           // best-effort tighten
         }
@@ -492,6 +536,7 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
       if (!finalLines.has(name)) outcome.removed.push(name);
     }
     outcome.rendered.sort();
+    outcome.kept.sort();
     outcome.removed.sort();
     outcome.alreadyInEnvBlock.sort();
     return outcome;

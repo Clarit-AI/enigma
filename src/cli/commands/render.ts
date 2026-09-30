@@ -113,8 +113,8 @@ export async function cmdRender(argv: string[]): Promise<number> {
   }
 
   const plan = buildRenderPlan({ cwd, projectId, worktree, index: readIndex(), manifest, explicitName });
-  // Gitignore check for the configured target, not always `.env`.
-  plan.warnings.push(...checkEnvGitignore(worktree, relative(worktree, plan.file)));
+  // Gitignore check for the configured target, not always `.env`; nothing to warn about when rendering is off.
+  if (plan.enabled) plan.warnings.push(...checkEnvGitignore(worktree, relative(worktree, plan.file)));
 
   // `resolveSecret` is the sanctioned resolve path (ADR-001); it lives under
   // src/storage/**, outside the leak-fence's scan of src/mcp/** and src/web/**.

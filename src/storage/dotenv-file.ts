@@ -427,7 +427,15 @@ export function readManagedBlockLines(content: string, markers: BlockMarkers): s
   return block ? lines.slice(block.beginIdx + 1, block.endIdx) : [];
 }
 
-/** Append (or create) a block whose body is exactly `bodyLines` (raw `NAME=value` lines, already encoded). The block is placed at EOF, after any existing env block. */
+/**
+ * Write a block whose body is exactly `bodyLines` (raw `NAME=value` lines,
+ * already encoded). An existing block is rewritten in place, wherever it is;
+ * a new one is appended at EOF, after any existing env block. The appended
+ * block inherits the file's EOF state: a file that ended with a newline gets
+ * a block ending with one, a file that did not gets a block that does not
+ * (only the newline that starts the block is added). Removing the block's
+ * lines therefore restores exactly the bytes that were there before.
+ */
 export function writeManagedBlock(content: string, bodyLines: readonly string[], markers: BlockMarkers): string {
   const eol = detectEol(content);
   const existing = findBlock(content.length === 0 ? [] : content.split(eol), markers);
@@ -438,7 +446,8 @@ export function writeManagedBlock(content: string, bodyLines: readonly string[],
   }
   const needsNewline = content.length > 0 && !content.endsWith(eol);
   const prefix = needsNewline ? content + eol : content;
-  return `${prefix}${markers.begin}${eol}${bodyLines.join(eol)}${eol}${markers.end}${eol}`;
+  const tail = needsNewline ? '' : eol;
+  return `${prefix}${markers.begin}${eol}${bodyLines.join(eol)}${eol}${markers.end}${tail}`;
 }
 
 export { FILE_MODE };
