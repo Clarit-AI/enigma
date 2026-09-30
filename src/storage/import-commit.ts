@@ -2,10 +2,10 @@
 // command, the MCP tool, and the web picker route so the "loud abort, no
 // partial migration" contract can't drift between entry points. Lives in
 // src/storage/** — an allowed location for in-flight values (style-guide).
-import { randomBytes } from 'node:crypto';
-import { existsSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { appendAuditEvent, auditErrorText, auditScopeFields } from '../core/audit.js';
 import type { AuditActor } from '../core/audit.js';
+import { writeFileAtomic } from '../core/secure-file.js';
 import { EnigmaError } from '../core/errors.js';
 import type { Scope } from '../core/index-store.js';
 import { projectId as computeProjectId } from '../core/project.js';
@@ -16,45 +16,6 @@ import type { DepositoryId } from './interfaces.js';
 import { setSecret } from './manager.js';
 
 const FILE_MODE = 0o600;
-
-interface AtomicWriteResult {
-  ok: boolean;
-  /** Set iff !ok: the write/rename failure, safe to surface (never a value — this is filesystem error text, not file content). */
-  error?: string;
-  /** Set iff !ok AND the leftover temp file (holding the FULL rewritten content — every other credential in the file, not just the migrated ones) could not be cleaned up either. Names the path so the caller can tell the user, rather than leaving a plaintext file silently sitting in the project directory. */
-  leftoverPath?: string;
-}
-
-/**
- * Temp file + rename, in the same directory as `path` (so the rename is
- * atomic on the same filesystem). This rewrite touches the WHOLE file,
- * including keys that were never part of the import batch and have no
- * depository copy anywhere — unlike the `env` depository's own block-only
- * writes, a torn write here could destroy credentials this command was
- * never asked to touch (Issue #13 review, round 2, A1).
- *
- * Never throws: a write or rename failure is reported via the return value
- * so the caller can fold it into `warnings[]` rather than crash. On failure,
- * always attempts to unlink the temp file — leaving a plaintext copy of the
- * whole file sitting in the project directory is exactly what a later
- * `git add -A` sweeps up, and it must never happen silently (round 3, item 2).
- */
-function writeFileAtomic(path: string, content: string, mode: number): AtomicWriteResult {
-  const tmpPath = `${path}.${randomBytes(6).toString('hex')}.tmp`;
-  try {
-    writeFileSync(tmpPath, content, { mode });
-    renameSync(tmpPath, path);
-    return { ok: true };
-  } catch (err) {
-    const error = err instanceof Error ? err.message : String(err);
-    try {
-      if (existsSync(tmpPath)) unlinkSync(tmpPath);
-      return { ok: false, error };
-    } catch {
-      return { ok: false, error, leftoverPath: tmpPath };
-    }
-  }
-}
 
 export interface ImportCommitOptions {
   entries: ParsedDotEnvEntry[];
