@@ -43724,19 +43724,46 @@ function removeManagedValue(content, name, markers) {
 var FILE_MODE3 = 384;
 var ENV_BLOCK_MARKERS = { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER };
 var GITIGNORE_ENV_PATTERNS = /* @__PURE__ */ new Set([".env", ".env*", "*.env", "**/.env", ".env**"]);
-function checkEnvGitignore(projectPath) {
+function gitignoreGlobToRegExp(glob) {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const ch = glob[i];
+    if (ch === "*" && glob[i + 1] === "*") {
+      const slash = glob[i + 2] === "/";
+      re += slash ? "(?:.*/)?" : ".*";
+      i += slash ? 2 : 1;
+    } else if (ch === "*") {
+      re += "[^/]*";
+    } else if (ch === "?") {
+      re += "[^/]";
+    } else {
+      re += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return new RegExp(`^${re}$`);
+}
+function gitignorePatternCovers(pattern, relPath) {
+  const glob = pattern.replace(/^\//, "").replace(/\/$/, "");
+  const re = gitignoreGlobToRegExp(glob);
+  const segments = relPath.split("/");
+  if (glob.includes("/") || pattern.startsWith("/")) return segments.some((_, i) => re.test(segments.slice(0, i + 1).join("/")));
+  return segments.some((segment) => re.test(segment));
+}
+function checkEnvGitignore(projectPath, targetPath = ".env") {
   const gitignorePath = join3(projectPath, ".gitignore");
+  const custom2 = targetPath !== ".env";
+  const label = custom2 ? targetPath.split(/[\\/]/).join("/") : ".env";
   if (!existsSync7(gitignorePath)) {
-    return [".env is not gitignored: no .gitignore file found in this project"];
+    return [`${label} is not gitignored: no .gitignore file found in this project`];
   }
   const lines = readFileSync4(gitignorePath, "utf8").split(/\r?\n/);
   const covered = lines.some((raw) => {
     const line = raw.trim();
-    if (!line || line.startsWith("#")) return false;
-    const normalized = line.replace(/^\//, "").replace(/\/$/, "");
-    return GITIGNORE_ENV_PATTERNS.has(normalized);
+    if (!line || line.startsWith("#") || line.startsWith("!")) return false;
+    if (custom2) return gitignorePatternCovers(line, label);
+    return GITIGNORE_ENV_PATTERNS.has(line.replace(/^\//, "").replace(/\/$/, ""));
   });
-  return covered ? [] : [".env is not gitignored: add .env to .gitignore before committing"];
+  return covered ? [] : [`${label} is not gitignored: add ${label} to .gitignore before committing`];
 }
 function requireProjectPath(ctx) {
   if (!ctx.projectPath) {
@@ -44710,15 +44737,31 @@ function loadConfig() {
   return config2;
 }
 function parseRender(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return void 0;
+  if (raw === void 0) return { ok: true, value: {} };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, configError: "render must be an object" };
+  }
   const record2 = raw;
   const out = {};
-  if (typeof record2.enabled === "boolean") out.enabled = record2.enabled;
-  if (typeof record2.path === "string") out.path = record2.path;
-  if (Array.isArray(record2.names) && record2.names.every((n) => typeof n === "string")) {
+  if ("enabled" in record2) {
+    if (typeof record2.enabled !== "boolean") {
+      return { ok: false, configError: "render.enabled must be a boolean" };
+    }
+    out.enabled = record2.enabled;
+  }
+  if ("path" in record2) {
+    if (typeof record2.path !== "string") {
+      return { ok: false, configError: "render.path must be a string" };
+    }
+    out.path = record2.path;
+  }
+  if ("names" in record2) {
+    if (!Array.isArray(record2.names) || !record2.names.every((n) => typeof n === "string")) {
+      return { ok: false, configError: "render.names must be an array of strings" };
+    }
     out.names = [...record2.names];
   }
-  return out;
+  return { ok: true, value: out };
 }
 function loadProjectManifest(projectPath) {
   const raw = readJsonFile(join4(projectPath, ".enigma.json"), void 0, "E_CONFIG_CORRUPT");
@@ -44730,8 +44773,14 @@ function loadProjectManifest(projectPath) {
       if (typeof description === "string") manifest.secrets[name] = description;
     }
   }
-  const render = parseRender(raw.render);
-  if (render) manifest.render = render;
+  if ("render" in raw) {
+    const parsed = parseRender(raw.render);
+    if (parsed.ok) {
+      if (Object.keys(parsed.value).length > 0) manifest.render = parsed.value;
+    } else {
+      manifest.renderError = parsed.configError;
+    }
+  }
   return manifest;
 }
 

@@ -131,15 +131,31 @@ function loadConfig() {
   return config;
 }
 function parseRender(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return void 0;
+  if (raw === void 0) return { ok: true, value: {} };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, configError: "render must be an object" };
+  }
   const record = raw;
   const out = {};
-  if (typeof record.enabled === "boolean") out.enabled = record.enabled;
-  if (typeof record.path === "string") out.path = record.path;
-  if (Array.isArray(record.names) && record.names.every((n) => typeof n === "string")) {
+  if ("enabled" in record) {
+    if (typeof record.enabled !== "boolean") {
+      return { ok: false, configError: "render.enabled must be a boolean" };
+    }
+    out.enabled = record.enabled;
+  }
+  if ("path" in record) {
+    if (typeof record.path !== "string") {
+      return { ok: false, configError: "render.path must be a string" };
+    }
+    out.path = record.path;
+  }
+  if ("names" in record) {
+    if (!Array.isArray(record.names) || !record.names.every((n) => typeof n === "string")) {
+      return { ok: false, configError: "render.names must be an array of strings" };
+    }
     out.names = [...record.names];
   }
-  return out;
+  return { ok: true, value: out };
 }
 function loadProjectManifest(projectPath) {
   const raw = readJsonFile(join2(projectPath, ".enigma.json"), void 0, "E_CONFIG_CORRUPT");
@@ -151,8 +167,14 @@ function loadProjectManifest(projectPath) {
       if (typeof description === "string") manifest.secrets[name] = description;
     }
   }
-  const render = parseRender(raw.render);
-  if (render) manifest.render = render;
+  if ("render" in raw) {
+    const parsed = parseRender(raw.render);
+    if (parsed.ok) {
+      if (Object.keys(parsed.value).length > 0) manifest.render = parsed.value;
+    } else {
+      manifest.renderError = parsed.configError;
+    }
+  }
   return manifest;
 }
 

@@ -285,15 +285,31 @@ function loadConfig() {
   return config;
 }
 function parseRender(raw) {
-  if (!raw || typeof raw !== "object" || Array.isArray(raw)) return void 0;
+  if (raw === void 0) return { ok: true, value: {} };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, configError: "render must be an object" };
+  }
   const record = raw;
   const out = {};
-  if (typeof record.enabled === "boolean") out.enabled = record.enabled;
-  if (typeof record.path === "string") out.path = record.path;
-  if (Array.isArray(record.names) && record.names.every((n) => typeof n === "string")) {
+  if ("enabled" in record) {
+    if (typeof record.enabled !== "boolean") {
+      return { ok: false, configError: "render.enabled must be a boolean" };
+    }
+    out.enabled = record.enabled;
+  }
+  if ("path" in record) {
+    if (typeof record.path !== "string") {
+      return { ok: false, configError: "render.path must be a string" };
+    }
+    out.path = record.path;
+  }
+  if ("names" in record) {
+    if (!Array.isArray(record.names) || !record.names.every((n) => typeof n === "string")) {
+      return { ok: false, configError: "render.names must be an array of strings" };
+    }
     out.names = [...record.names];
   }
-  return out;
+  return { ok: true, value: out };
 }
 function loadProjectManifest(projectPath) {
   const raw = readJsonFile(join2(projectPath, ".enigma.json"), void 0, "E_CONFIG_CORRUPT");
@@ -305,8 +321,14 @@ function loadProjectManifest(projectPath) {
       if (typeof description === "string") manifest.secrets[name] = description;
     }
   }
-  const render = parseRender(raw.render);
-  if (render) manifest.render = render;
+  if ("render" in raw) {
+    const parsed = parseRender(raw.render);
+    if (parsed.ok) {
+      if (Object.keys(parsed.value).length > 0) manifest.render = parsed.value;
+    } else {
+      manifest.renderError = parsed.configError;
+    }
+  }
   return manifest;
 }
 
@@ -1208,19 +1230,46 @@ function writeManagedBlock(content, bodyLines, markers) {
 var FILE_MODE3 = 384;
 var ENV_BLOCK_MARKERS = { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER };
 var GITIGNORE_ENV_PATTERNS = /* @__PURE__ */ new Set([".env", ".env*", "*.env", "**/.env", ".env**"]);
-function checkEnvGitignore(projectPath) {
+function gitignoreGlobToRegExp(glob) {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const ch = glob[i];
+    if (ch === "*" && glob[i + 1] === "*") {
+      const slash = glob[i + 2] === "/";
+      re += slash ? "(?:.*/)?" : ".*";
+      i += slash ? 2 : 1;
+    } else if (ch === "*") {
+      re += "[^/]*";
+    } else if (ch === "?") {
+      re += "[^/]";
+    } else {
+      re += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return new RegExp(`^${re}$`);
+}
+function gitignorePatternCovers(pattern, relPath) {
+  const glob = pattern.replace(/^\//, "").replace(/\/$/, "");
+  const re = gitignoreGlobToRegExp(glob);
+  const segments = relPath.split("/");
+  if (glob.includes("/") || pattern.startsWith("/")) return segments.some((_, i) => re.test(segments.slice(0, i + 1).join("/")));
+  return segments.some((segment) => re.test(segment));
+}
+function checkEnvGitignore(projectPath, targetPath = ".env") {
   const gitignorePath = join4(projectPath, ".gitignore");
+  const custom = targetPath !== ".env";
+  const label = custom ? targetPath.split(/[\\/]/).join("/") : ".env";
   if (!existsSync7(gitignorePath)) {
-    return [".env is not gitignored: no .gitignore file found in this project"];
+    return [`${label} is not gitignored: no .gitignore file found in this project`];
   }
   const lines = readFileSync4(gitignorePath, "utf8").split(/\r?\n/);
   const covered = lines.some((raw) => {
     const line = raw.trim();
-    if (!line || line.startsWith("#")) return false;
-    const normalized = line.replace(/^\//, "").replace(/\/$/, "");
-    return GITIGNORE_ENV_PATTERNS.has(normalized);
+    if (!line || line.startsWith("#") || line.startsWith("!")) return false;
+    if (custom) return gitignorePatternCovers(line, label);
+    return GITIGNORE_ENV_PATTERNS.has(line.replace(/^\//, "").replace(/\/$/, ""));
   });
-  return covered ? [] : [".env is not gitignored: add .env to .gitignore before committing"];
+  return covered ? [] : [`${label} is not gitignored: add ${label} to .gitignore before committing`];
 }
 function requireProjectPath(ctx) {
   if (!ctx.projectPath) {
@@ -6285,9 +6334,12 @@ async function cmdRemove(argv) {
   return 0;
 }
 
+// src/cli/commands/render.ts
+import { relative as relative3 } from "node:path";
+
 // src/render/render.ts
-import { chmodSync as chmodSync3, existsSync as existsSync14, readFileSync as readFileSync9, realpathSync as realpathSync6, statSync as statSync4 } from "node:fs";
-import { dirname as dirname8, isAbsolute as isAbsolute4, join as join8, relative as relative2, resolve as resolve6, sep as sep2 } from "node:path";
+import { chmodSync as chmodSync3, existsSync as existsSync14, lstatSync as lstatSync2, readFileSync as readFileSync9, realpathSync as realpathSync6, statSync as statSync4 } from "node:fs";
+import { dirname as dirname8, isAbsolute as isAbsolute4, relative as relative2, resolve as resolve6, sep as sep2 } from "node:path";
 
 // src/render/ledger.ts
 var RENDER_LEDGER_VERSION = 1;
@@ -6409,40 +6461,49 @@ function removeTargetsMatching(input) {
 
 // src/render/render.ts
 var RENDER_BLOCK_MARKERS = { begin: RENDER_BEGIN_MARKER, end: RENDER_END_MARKER };
+var ENV_BLOCK_MARKERS2 = { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER };
 var FILE_MODE5 = 384;
 var DEFAULT_RENDER_PATH = ".env";
 var PATH_TRAVERSAL_SEGMENT_RE = /(^|[/\\])\.\.([/\\]|$)/;
 var PROMPT_PROFILE_BY_DEPOSITORY = new Map(
   DEPOSITORY_MODULES.map((m) => [m.id, m.promptProfile])
 );
-function promptProfileFor2(depository) {
-  return PROMPT_PROFILE_BY_DEPOSITORY.get(depository);
-}
 function nameFromLine(line) {
   const eq = line.indexOf("=");
-  if (eq <= 0) return void 0;
-  return line.slice(0, eq);
+  return eq > 0 ? line.slice(0, eq) : void 0;
+}
+function blockLinesByName(content, markers) {
+  const out = /* @__PURE__ */ new Map();
+  for (const line of readManagedBlockLines(content, markers)) {
+    const name = nameFromLine(line);
+    if (name !== void 0) out.set(name, line);
+  }
+  return out;
+}
+function writeRefusal(message) {
+  return new EnigmaError({ code: "E_WRITE_FAILED", message });
+}
+function assertNotSymlink(file) {
+  let isLink;
+  try {
+    isLink = lstatSync2(file).isSymbolicLink();
+  } catch (err) {
+    if (err.code === "ENOENT") return;
+    throw writeRefusal(`cannot inspect render.path target: ${err.code ?? "unknown error"}`);
+  }
+  if (isLink) throw writeRefusal("render.path target is a symlink; refusing to read through or replace it");
 }
 function resolveRenderTarget(worktree, renderPath) {
   if (isAbsolute4(renderPath)) {
-    throw new EnigmaError({
-      code: "E_WRITE_FAILED",
-      message: `render.path must be relative to the worktree; absolute paths are refused`
-    });
+    throw writeRefusal("render.path must be relative to the worktree; absolute paths are refused");
   }
   if (PATH_TRAVERSAL_SEGMENT_RE.test(renderPath)) {
-    throw new EnigmaError({
-      code: "E_WRITE_FAILED",
-      message: `render.path must not contain a parent-directory traversal segment`
-    });
+    throw writeRefusal("render.path must not contain a parent-directory traversal segment");
   }
   const file = resolve6(worktree, renderPath);
   const parentDir = dirname8(file);
   if (!existsSync14(parentDir)) {
-    throw new EnigmaError({
-      code: "E_WRITE_FAILED",
-      message: `render.path target parent directory does not exist; Enigma never creates directories in the user's worktree`
-    });
+    throw writeRefusal("render.path target parent directory does not exist; Enigma never creates directories in the user's worktree");
   }
   let realWorktree;
   let realParent;
@@ -6450,54 +6511,34 @@ function resolveRenderTarget(worktree, renderPath) {
     realWorktree = realpathSync6(worktree);
     realParent = realpathSync6(parentDir);
   } catch (err) {
-    throw new EnigmaError({
-      code: "E_WRITE_FAILED",
-      message: `cannot resolve render.path: ${err instanceof Error ? err.constructor.name : String(err)}`
-    });
+    throw writeRefusal(`cannot resolve render.path: ${err.code ?? "unknown error"}`);
   }
   const rel = relative2(realWorktree, realParent);
   if (rel.startsWith(`..${sep2}`) || rel === ".." || isAbsolute4(rel)) {
-    throw new EnigmaError({
-      code: "E_WRITE_FAILED",
-      message: `render.path resolves outside the worktree via a symlinked parent directory`
-    });
+    throw writeRefusal("render.path resolves outside the worktree via a symlinked parent directory");
   }
-  return { file, exists: existsSync14(file) };
+  assertNotSymlink(file);
+  return file;
 }
 function buildRenderPlan(opts) {
   const { projectId: projectId2, worktree, index, manifest, explicitName } = opts;
   const renderOverride = manifest.render;
   const enabled = renderOverride?.enabled !== false;
-  const renderPath = renderOverride?.path ?? DEFAULT_RENDER_PATH;
-  const narrowing = renderOverride?.names !== void 0 ? new Set(renderOverride.names) : void 0;
-  const existingContent = existsSync14(join8(worktree, renderPath)) ? readFileSync9(join8(worktree, renderPath), "utf8") : "";
-  const existingLines = readManagedBlockLines(existingContent, RENDER_BLOCK_MARKERS);
-  const existingByName = /* @__PURE__ */ new Map();
-  for (const line of existingLines) {
-    const name = nameFromLine(line);
-    if (name !== void 0) existingByName.set(name, line);
-  }
-  const fileResolution = resolveRenderTarget(worktree, renderPath);
-  const warnings = [];
-  if (!enabled) {
-    return {
-      enabled: false,
-      worktree,
-      file: fileResolution.file,
-      fileIsNew: !fileResolution.exists,
-      finalNames: [],
-      toWrite: [],
-      toKeep: [],
-      toRemove: [...existingByName.keys()],
-      perName: [],
-      warnings,
-      explicit: Boolean(explicitName)
-    };
-  }
+  const file = resolveRenderTarget(worktree, renderOverride?.path ?? DEFAULT_RENDER_PATH);
+  const plan = {
+    enabled,
+    worktree,
+    file,
+    explicit: explicitName !== void 0,
+    warnings: [],
+    toResolve: [],
+    promptingStore: [],
+    narrowedOut: []
+  };
+  if (!enabled) return plan;
+  const projectEntries = index.entries.filter((e) => e.scope === "project" && e.projectId === projectId2);
   if (explicitName !== void 0) {
-    const entry = index.entries.find(
-      (e) => e.name === explicitName && e.scope === "project" && e.projectId === projectId2
-    );
+    const entry = projectEntries.find((e) => e.name === explicitName);
     if (!entry) {
       throw new EnigmaError({
         code: "E_NOT_FOUND",
@@ -6505,80 +6546,48 @@ function buildRenderPlan(opts) {
         secretName: explicitName
       });
     }
-    const toWrite2 = [{ name: entry.name, depository: entry.depository }];
-    const toKeep2 = [];
-    const finalNames2 = new Set(existingByName.keys());
-    finalNames2.add(entry.name);
-    for (const otherName of existingByName.keys()) {
-      if (otherName === entry.name) continue;
-      const line = existingByName.get(otherName);
-      toKeep2.push({ name: otherName, line });
-    }
-    return {
-      enabled: true,
-      worktree,
-      file: fileResolution.file,
-      fileIsNew: !fileResolution.exists,
-      finalNames: [...finalNames2].sort(),
-      toWrite: toWrite2,
-      toKeep: toKeep2,
-      toRemove: [],
-      perName: [{ kind: "render", name: entry.name, depository: entry.depository }],
-      warnings,
-      explicit: true
-    };
+    plan.toResolve.push({ name: entry.name, depository: entry.depository });
+    return plan;
   }
-  const toWrite = [];
-  const toKeep = [];
-  const finalNames = /* @__PURE__ */ new Set();
-  const perName = [];
-  const eligibleForAuto = /* @__PURE__ */ new Set();
-  for (const entry of index.entries) {
-    if (entry.scope !== "project") {
-      if (entry.scope === "global") perName.push({ kind: "skipped-global", name: entry.name });
-      continue;
-    }
-    if (entry.projectId !== projectId2) continue;
+  const narrowing = renderOverride?.names !== void 0 ? new Set(renderOverride.names) : void 0;
+  for (const entry of projectEntries) {
     if (narrowing && !narrowing.has(entry.name)) {
-      perName.push({ kind: "skipped-manifest-narrowing", name: entry.name });
+      plan.narrowedOut.push(entry.name);
       continue;
     }
-    const profile = promptProfileFor2(entry.depository);
+    const profile = PROMPT_PROFILE_BY_DEPOSITORY.get(entry.depository);
     if (profile === void 0) continue;
-    if (profile !== "none") {
-      if (existingByName.has(entry.name)) {
-        const line = existingByName.get(entry.name);
-        toKeep.push({ name: entry.name, line });
-        finalNames.add(entry.name);
-        perName.push({ kind: "keep-prompting", name: entry.name, depository: entry.depository, line });
-      } else {
-        perName.push({ kind: "skipped-prompting-auto", name: entry.name, depository: entry.depository });
-      }
-      continue;
-    }
-    eligibleForAuto.add(entry.name);
-    toWrite.push({ name: entry.name, depository: entry.depository });
-    finalNames.add(entry.name);
-    perName.push({ kind: "render", name: entry.name, depository: entry.depository });
+    const ref = { name: entry.name, depository: entry.depository };
+    if (profile === "none") plan.toResolve.push(ref);
+    else plan.promptingStore.push(ref);
   }
-  const toRemove = [];
-  for (const prevName of existingByName.keys()) {
-    if (finalNames.has(prevName)) continue;
-    toRemove.push(prevName);
-  }
-  return {
-    enabled: true,
-    worktree,
-    file: fileResolution.file,
-    fileIsNew: !fileResolution.exists,
-    finalNames: [...finalNames].sort(),
-    toWrite,
-    toKeep,
-    toRemove,
-    perName,
-    warnings,
-    explicit: false
-  };
+  return plan;
+}
+var STATIC_REASONS = {
+  E_NOT_FOUND: "failed to resolve: not found",
+  E_DEPOSITORY_UNAVAILABLE: "failed to resolve: depository unavailable",
+  E_READ_FAILED: "failed to resolve: read failed",
+  E_VALUE_TOO_LARGE: "failed to resolve: value too large for this depository",
+  E_REF_INVALID: "failed to resolve: ref invalid",
+  E_VAULT_MISSING: "failed to resolve: vault missing",
+  E_VAULT_CORRUPT: "failed to resolve: vault corrupt",
+  E_WRITE_FAILED: "failed to rewrite the target file"
+};
+var UNKNOWN_ERROR_CODE = "E_UNKNOWN";
+function staticReasonFor(code) {
+  if (code === UNKNOWN_ERROR_CODE) return "failed to resolve: unknown error";
+  return STATIC_REASONS[code] ?? `failed to resolve (${code})`;
+}
+function staticWriteError(message) {
+  const code = message?.match(/^(E[A-Z0-9]+):/)?.[1];
+  return code ? `failed to rewrite the target file (${code})` : "failed to rewrite the target file";
+}
+function stripRenderBlock(content) {
+  const eol = detectEol(content);
+  const lines = content.split(eol);
+  const block = findBlock(lines, RENDER_BLOCK_MARKERS);
+  if (!block) return content;
+  return [...lines.slice(0, block.beginIdx), ...lines.slice(block.endIdx + 1)].join(eol);
 }
 async function executeRender(plan, opts) {
   const outcome = {
@@ -6586,167 +6595,171 @@ async function executeRender(plan, opts) {
     kept: [],
     removed: [],
     failed: [],
+    alreadyInEnvBlock: [],
+    skipped: [],
     warnings: [...plan.warnings],
-    disabled: false
+    disabled: false,
+    file: plan.file
   };
   if (!plan.enabled) {
     outcome.disabled = true;
     return outcome;
   }
+  const resolved = /* @__PURE__ */ new Map();
+  for (const item of plan.toResolve) {
+    try {
+      resolved.set(item.name, { ok: true, value: await opts.resolveValue(item.name, item.depository) });
+    } catch (err) {
+      resolved.set(item.name, { ok: false, code: err instanceof EnigmaError ? err.code : UNKNOWN_ERROR_CODE });
+    }
+  }
+  const depositoryOf = new Map(plan.toResolve.map((t) => [t.name, t.depository]));
   const lock = acquireFileLock(renderLockPath(plan.file));
   try {
-    const currentContent = existsSync14(plan.file) ? readFileSync9(plan.file, "utf8") : "";
-    const freshLines = /* @__PURE__ */ new Map();
-    for (const item of plan.toWrite) {
-      try {
-        const value = await opts.resolveValue(item.name, item.depository);
-        const encoded = encodeValue(value);
-        freshLines.set(item.name, `${item.name}=${encoded}`);
-        outcome.rendered.push(item.name);
-      } catch (err) {
-        const errorCode = err instanceof EnigmaError ? err.code : "E_UNKNOWN";
-        const message = err instanceof EnigmaError ? err.message : err instanceof Error ? err.constructor.name : "UnknownError";
-        const existing = readManagedBlockLines(currentContent, RENDER_BLOCK_MARKERS).find((l) => nameFromLine(l) === item.name);
-        if (existing !== void 0) {
-          outcome.kept.push(item.name);
-          freshLines.set(item.name, existing);
-          outcome.failed.push({ name: item.name, errorCode, message });
-          appendAuditEvent({
-            op: "render",
-            name: item.name,
-            depository: item.depository,
-            actor: opts.actor,
-            ok: false,
-            error: auditErrorText(err),
-            ...auditScopeFields({ scope: "project", projectId: opts.projectId, projectPath: plan.worktree })
-          });
-          continue;
-        }
-        outcome.failed.push({ name: item.name, errorCode, message });
-        appendAuditEvent({
-          op: "render",
-          name: item.name,
-          depository: item.depository,
-          actor: opts.actor,
-          ok: false,
-          error: auditErrorText(err),
-          ...auditScopeFields({ scope: "project", projectId: opts.projectId, projectPath: plan.worktree })
-        });
-        continue;
+    assertNotSymlink(plan.file);
+    const current = existsSync14(plan.file) ? readFileSync9(plan.file, "utf8") : "";
+    const envBlockNames = new Set(blockLinesByName(current, ENV_BLOCK_MARKERS2).keys());
+    const existing = blockLinesByName(current, RENDER_BLOCK_MARKERS);
+    const hasExistingBlock = findBlock(current.split(detectEol(current)), RENDER_BLOCK_MARKERS) !== void 0;
+    const finalLines = /* @__PURE__ */ new Map();
+    const freshNames = /* @__PURE__ */ new Set();
+    const resolveFailures = [];
+    if (plan.explicit) {
+      for (const [name, line] of existing) finalLines.set(name, line);
+    } else {
+      for (const ref of plan.promptingStore) {
+        const line = existing.get(ref.name);
+        if (line !== void 0) finalLines.set(ref.name, line);
+        else outcome.skipped.push({ name: ref.name, reason: "prompting-store" });
       }
-      appendAuditEvent({
-        op: "render",
-        name: item.name,
-        depository: item.depository,
-        actor: opts.actor,
-        ok: true,
-        error: null,
-        ...auditScopeFields({ scope: "project", projectId: opts.projectId, projectPath: plan.worktree })
-      });
     }
-    const bodyLines = [];
-    const usedNames = /* @__PURE__ */ new Set();
-    for (const name of plan.finalNames) {
-      const fresh = freshLines.get(name);
-      const keepLine = plan.toKeep.find((k) => k.name === name)?.line;
-      const line = fresh ?? keepLine;
-      if (line !== void 0) {
-        bodyLines.push(line);
-        usedNames.add(name);
-        if (fresh !== void 0 && keepLine === void 0) {
-        } else if (keepLine !== void 0 && fresh === void 0) {
-          outcome.kept.push(name);
+    for (const item of plan.toResolve) {
+      const result = resolved.get(item.name);
+      if (envBlockNames.has(item.name)) continue;
+      if (result.ok) {
+        finalLines.set(item.name, `${item.name}=${encodeValue(result.value)}`);
+        freshNames.add(item.name);
+      } else {
+        resolveFailures.push({ name: item.name, code: result.code });
+        const previous = existing.get(item.name);
+        if (previous !== void 0) finalLines.set(item.name, previous);
+      }
+    }
+    for (const name of envBlockNames) {
+      if (finalLines.delete(name) || plan.toResolve.some((t) => t.name === name)) {
+        outcome.alreadyInEnvBlock.push(name);
+      }
+    }
+    for (const name of plan.narrowedOut) {
+      if (!existing.has(name)) outcome.skipped.push({ name, reason: "narrowed-out" });
+    }
+    const bodyNames = [...finalLines.keys()].sort((a, b) => a.localeCompare(b));
+    let next;
+    if (bodyNames.length > 0) next = writeManagedBlock(current, bodyNames.map((n) => finalLines.get(n)), RENDER_BLOCK_MARKERS);
+    else if (hasExistingBlock) next = stripRenderBlock(current);
+    let writeOk = true;
+    if (next !== void 0) {
+      const result = writeFileAtomic(plan.file, next, FILE_MODE5);
+      writeOk = result.ok;
+      if (!result.ok) {
+        outcome.writeError = staticWriteError(result.error);
+        if (result.leftoverPath) {
+          outcome.warnings.push(
+            `A temporary file with the rewritten content could not be removed automatically: delete ${result.leftoverPath} yourself as soon as possible.`
+          );
+        }
+      } else {
+        try {
+          if ((statSync4(plan.file).mode & 511) !== FILE_MODE5) chmodSync3(plan.file, FILE_MODE5);
+        } catch {
         }
       }
     }
-    for (const prevName of plan.toRemove) outcome.removed.push(prevName);
-    const nextContent = writeManagedBlock(currentContent, bodyLines, RENDER_BLOCK_MARKERS);
-    const writeResult = writeFileAtomic(plan.file, nextContent, FILE_MODE5);
-    if (!writeResult.ok) {
-      const detail = writeResult.error ?? "unknown failure";
-      outcome.writeError = detail;
-      if (writeResult.leftoverPath) {
-        outcome.warnings.push(
-          `A temporary file containing the rewritten content was left behind at ${writeResult.leftoverPath} and could not be removed automatically \u2014 delete it manually as soon as possible.`
-        );
+    const scope = auditScopeFields({ scope: "project", projectId: opts.projectId, projectPath: plan.worktree });
+    const audit = (name, ok, error) => appendAuditEvent({ op: "render", name, depository: depositoryOf.get(name), actor: opts.actor, ok, error, ...scope });
+    if (!writeOk) {
+      const resolveCodes = new Map(resolveFailures.map((f) => [f.name, f.code]));
+      for (const item of plan.toResolve) {
+        if (envBlockNames.has(item.name)) continue;
+        const code = resolveCodes.get(item.name) ?? "E_WRITE_FAILED";
+        const reason = staticReasonFor(code);
+        audit(item.name, false, reason);
+        outcome.failed.push({ name: item.name, errorCode: code, reason, keptPreviousLine: false });
       }
-      outcome.warnings.push(`Failed to rewrite ${plan.file} (${detail}).`);
-    } else {
-      try {
-        const st = statSync4(plan.file);
-        if ((st.mode & 511) !== FILE_MODE5) chmodSync3(plan.file, FILE_MODE5);
-      } catch {
-      }
+      return outcome;
     }
-    if (plan.finalNames.length === 0) {
-      replaceTarget({ projectId: opts.projectId, worktree: plan.worktree, file: plan.file, names: [] });
-    } else {
-      replaceTarget({ projectId: opts.projectId, worktree: plan.worktree, file: plan.file, names: plan.finalNames });
+    replaceTarget({ projectId: opts.projectId, worktree: plan.worktree, file: plan.file, names: bodyNames });
+    for (const name of freshNames) {
+      audit(name, true, null);
+      outcome.rendered.push(name);
     }
+    for (const f of resolveFailures) {
+      const reason = staticReasonFor(f.code);
+      audit(f.name, false, reason);
+      outcome.failed.push({ name: f.name, errorCode: f.code, reason, keptPreviousLine: finalLines.has(f.name) });
+    }
+    const failedNames = new Set(resolveFailures.map((f) => f.name));
+    for (const name of bodyNames) {
+      if (existing.has(name) && !freshNames.has(name) && !failedNames.has(name)) outcome.kept.push(name);
+    }
+    for (const name of existing.keys()) {
+      if (!finalLines.has(name)) outcome.removed.push(name);
+    }
+    outcome.rendered.sort();
+    outcome.removed.sort();
+    outcome.alreadyInEnvBlock.sort();
+    return outcome;
   } finally {
     lock.release();
   }
-  return outcome;
 }
 
 // src/cli/commands/render.ts
 var USAGE7 = "enigma render [NAME] [--json]";
-function reportToJson(outcome, plan, perName) {
-  const skipped = [];
-  for (const item of perName) {
-    switch (item.kind) {
-      case "skipped-prompting-auto":
-        skipped.push({ name: item.name, reason: "prompting-store secret; use `enigma render NAME` to render it explicitly" });
-        break;
-      case "skipped-manifest-narrowing":
-        skipped.push({ name: item.name, reason: "excluded by .enigma.json render.names" });
-        break;
-    }
-  }
-  const file = plan.file;
-  const out = {
+var SKIP_REASONS = {
+  "prompting-store": "prompting store, not previously rendered; use `enigma render NAME` to render it explicitly",
+  "narrowed-out": "excluded by .enigma.json render.names"
+};
+function reportToJson(outcome) {
+  const report2 = {
     rendered: outcome.rendered,
     kept: outcome.kept,
     removed: outcome.removed,
     failed: outcome.failed,
-    skipped,
+    alreadyInEnvBlock: outcome.alreadyInEnvBlock,
+    skipped: outcome.skipped.map((s) => ({ name: s.name, reason: SKIP_REASONS[s.reason] })),
     warnings: outcome.warnings,
     disabled: outcome.disabled,
-    file
+    file: outcome.file
   };
-  if (outcome.writeError !== void 0) out.writeError = outcome.writeError;
-  return out;
+  if (outcome.writeError !== void 0) report2.writeError = outcome.writeError;
+  return report2;
 }
-function reportText(outcome, plan, perName) {
+function failedLine(f) {
+  return `Failed: ${f.name} (${f.errorCode}: ${f.reason}${f.keptPreviousLine ? "; kept previous line" : ""})`;
+}
+function reportText(outcome, explicitName) {
   const lines = [];
   if (outcome.disabled) {
     lines.push("rendering is off (render.enabled=false in .enigma.json)");
-    for (const w of outcome.warnings) lines.push(`warning: ${w}`);
-    return `${lines.join("\n")}
-`;
-  }
-  if (plan.explicit) {
-    lines.push(`Rendered to ${plan.file}.`);
+  } else if (explicitName !== void 0) {
+    if (outcome.rendered.includes(explicitName)) lines.push(`Rendered ${explicitName} to ${outcome.file}.`);
+    if (outcome.alreadyInEnvBlock.includes(explicitName)) {
+      lines.push(`${explicitName} is already in the env block of ${outcome.file}; not written to the render block.`);
+    }
+    for (const f of outcome.failed) lines.push(failedLine(f));
   } else {
     if (outcome.rendered.length > 0) lines.push(`Rendered: ${outcome.rendered.join(", ")}`);
     if (outcome.kept.length > 0) lines.push(`Kept (prompting store, not re-resolved): ${outcome.kept.join(", ")}`);
     if (outcome.removed.length > 0) lines.push(`Removed: ${outcome.removed.join(", ")}`);
-    for (const item of perName) {
-      if (item.kind === "skipped-prompting-auto") {
-        lines.push(`Skipped: ${item.name} (prompting store; not previously rendered \u2014 use \`enigma render ${item.name}\` to render it explicitly)`);
-      } else if (item.kind === "skipped-manifest-narrowing") {
-        lines.push(`Skipped: ${item.name} (excluded by .enigma.json render.names)`);
-      }
-    }
-    for (const f of outcome.failed) {
-      lines.push(`Failed: ${f.name} (${f.errorCode}: ${f.message})`);
-    }
+    if (outcome.alreadyInEnvBlock.length > 0) lines.push(`Already in the env block: ${outcome.alreadyInEnvBlock.join(", ")}`);
+    for (const s of outcome.skipped) lines.push(`Skipped: ${s.name} (${SKIP_REASONS[s.reason]})`);
+    for (const f of outcome.failed) lines.push(failedLine(f));
+    if (lines.length === 0 && outcome.writeError === void 0) lines.push("Nothing to render.");
   }
   for (const w of outcome.warnings) lines.push(`warning: ${w}`);
-  if (outcome.writeError !== void 0) {
-    lines.push(`.env was not rewritten (${outcome.writeError}).`);
-  }
-  return `${lines.filter((l) => l.length > 0).join("\n")}
+  if (outcome.writeError !== void 0) lines.push(`${outcome.file} was not rewritten (${outcome.writeError}).`);
+  return `${lines.join("\n")}
 `;
 }
 async function cmdRender(argv) {
@@ -6757,37 +6770,21 @@ async function cmdRender(argv) {
   const cwd = process.cwd();
   const worktree = findProjectPath(cwd);
   const projectId2 = projectId(cwd);
-  const index = readIndex();
   const manifest = loadProjectManifest(worktree);
-  const plan = buildRenderPlan({
-    cwd,
-    projectId: projectId2,
-    worktree,
-    index,
-    manifest,
-    explicitName
-  });
-  const gitignoreWarnings = checkEnvGitignore(worktree);
-  plan.warnings.push(...gitignoreWarnings);
+  if (manifest.renderError !== void 0) {
+    throw new EnigmaError({ code: "E_CONFIG_CORRUPT", message: `.enigma.json: ${manifest.renderError}; fix it, then run \`enigma render\` again.` });
+  }
+  const plan = buildRenderPlan({ cwd, projectId: projectId2, worktree, index: readIndex(), manifest, explicitName });
+  plan.warnings.push(...checkEnvGitignore(worktree, relative3(worktree, plan.file)));
   const outcome = await executeRender(plan, {
     actor: "cli",
     projectId: projectId2,
     worktree,
-    resolveValue: async (name, depository) => resolveSecret(name, { cwd: worktree, actor: "cli" }).then((value) => {
-      void depository;
-      return value;
-    })
+    resolveValue: (name) => resolveSecret(name, { cwd: worktree, actor: "cli" })
   });
-  const report2 = json ? reportToJson(outcome, plan, plan.perName) : null;
-  if (json) {
-    process.stdout.write(`${JSON.stringify(report2)}
-`);
-  } else {
-    process.stdout.write(reportText(outcome, plan, plan.perName));
-  }
-  if (outcome.writeError !== void 0) return 1;
-  if (outcome.failed.length > 0) return 1;
-  return 0;
+  process.stdout.write(json ? `${JSON.stringify(reportToJson(outcome))}
+` : reportText(outcome, explicitName));
+  return outcome.writeError !== void 0 || outcome.failed.length > 0 ? 1 : 0;
 }
 
 // src/cli/commands/run.ts
