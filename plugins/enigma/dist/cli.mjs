@@ -1018,10 +1018,27 @@ function findBlock(lines, markers) {
   if (endIdx === -1) return void 0;
   return { beginIdx, endIdx };
 }
-var MANAGED_BLOCK_MARKERS = [
-  { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER },
-  { begin: RENDER_BEGIN_MARKER, end: RENDER_END_MARKER }
-];
+function scanRenderMarkers(lines) {
+  const complete = [];
+  let openIdx = -1;
+  let irregular = false;
+  lines.forEach((line, i) => {
+    if (line === RENDER_BEGIN_MARKER) {
+      if (openIdx === -1) openIdx = i;
+      else irregular = true;
+    } else if (line === RENDER_END_MARKER) {
+      if (openIdx === -1) {
+        irregular = true;
+      } else {
+        complete.push({ beginIdx: openIdx, endIdx: i });
+        openIdx = -1;
+      }
+    }
+  });
+  const scan = { complete, damaged: irregular || openIdx !== -1 || complete.length > 1 };
+  if (openIdx !== -1) scan.unterminatedBeginIdx = openIdx;
+  return scan;
+}
 function isInsideAnyManagedBlock(blocks, i) {
   for (const b of blocks) {
     if (i >= b.beginIdx && i <= b.endIdx) return true;
@@ -1030,15 +1047,11 @@ function isInsideAnyManagedBlock(blocks, i) {
 }
 function managedBlockRanges(lines) {
   const ranges = [];
-  for (const markers of MANAGED_BLOCK_MARKERS) {
-    const found = findBlock(lines, markers);
-    if (found) {
-      ranges.push(found);
-    } else if (markers.begin === RENDER_BEGIN_MARKER) {
-      const beginIdx = lines.findIndex((l) => l === markers.begin);
-      if (beginIdx !== -1) ranges.push({ beginIdx, endIdx: lines.length - 1 });
-    }
-  }
+  const envBlock = findBlock(lines, { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER });
+  if (envBlock) ranges.push(envBlock);
+  const render = scanRenderMarkers(lines);
+  ranges.push(...render.complete);
+  if (render.unterminatedBeginIdx !== void 0) ranges.push({ beginIdx: render.unterminatedBeginIdx, endIdx: lines.length - 1 });
   return ranges;
 }
 var INLINE_COMMENT_REASON = 'the unquoted value contains a space then "#", which could start a comment or be part of the secret \u2014 quote the value if the # belongs to it, then rerun import';
@@ -1232,7 +1245,8 @@ function writeManagedBlock(content, bodyLines, markers) {
   if (existing) {
     const lines = content.split(eol);
     const newLines = [...lines.slice(0, existing.beginIdx + 1), ...bodyLines, ...lines.slice(existing.endIdx)];
-    return newLines.join(eol);
+    const rewritten = newLines.join(eol);
+    return existing.endIdx === lines.length - 1 ? `${rewritten}${eol}` : rewritten;
   }
   const needsNewline = content.length > 0 && !content.endsWith(eol);
   const prefix = needsNewline ? content + eol : content;
@@ -6612,10 +6626,9 @@ function stripRenderBlock(content) {
   return [...lines.slice(0, block.beginIdx), ...lines.slice(block.endIdx + 1)].join(eol);
 }
 function assertRenderBlockIntact(content, file) {
-  const lines = content.split(detectEol(content));
-  if (lines.includes(RENDER_BEGIN_MARKER) && findBlock(lines, RENDER_BLOCK_MARKERS) === void 0) {
+  if (scanRenderMarkers(content.split(detectEol(content))).damaged) {
     throw writeRefusal(
-      `${file}: the render block is damaged: "${RENDER_BEGIN_MARKER}" has no matching "${RENDER_END_MARKER}" line. Fix the file by hand, then run enigma render again.`
+      `${file}: the render block is damaged: a "${RENDER_BEGIN_MARKER}" has no matching "${RENDER_END_MARKER}" line, or a marker is stray, nested or repeated (only one render block is allowed). Fix the file by hand, then run enigma render again.`
     );
   }
 }
@@ -6649,12 +6662,13 @@ async function executeRender(plan, opts) {
     }
   }
   const depositoryOf = new Map(plan.toResolve.map((t) => [t.name, t.depository]));
-  const lock = acquireFileLock(renderLockPath(plan.file));
+  const lock = acquireFileLock(renderLockPath(peekPath));
   try {
     let target;
     let current;
     try {
       target = validateTargetFile(plan.worktree, plan.file);
+      if (target !== peekPath) throw writeRefusal("render.path now resolves to a different file than the one that was locked; run enigma render again");
       current = existsSync14(target) ? readFileSync9(target, "utf8") : "";
       assertRenderBlockIntact(current, plan.file);
     } catch (err) {
