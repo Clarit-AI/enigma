@@ -1223,7 +1223,8 @@ function writeManagedBlock(content, bodyLines, markers) {
   }
   const needsNewline = content.length > 0 && !content.endsWith(eol);
   const prefix = needsNewline ? content + eol : content;
-  return `${prefix}${markers.begin}${eol}${bodyLines.join(eol)}${eol}${markers.end}${eol}`;
+  const tail = needsNewline ? "" : eol;
+  return `${prefix}${markers.begin}${eol}${bodyLines.join(eol)}${eol}${markers.end}${tail}`;
 }
 
 // src/storage/depositories/env.ts
@@ -6339,7 +6340,7 @@ import { relative as relative3 } from "node:path";
 
 // src/render/render.ts
 import { chmodSync as chmodSync3, existsSync as existsSync14, lstatSync as lstatSync2, readFileSync as readFileSync9, realpathSync as realpathSync6, statSync as statSync4 } from "node:fs";
-import { dirname as dirname8, isAbsolute as isAbsolute4, relative as relative2, resolve as resolve6, sep as sep2 } from "node:path";
+import { basename as basename6, dirname as dirname8, isAbsolute as isAbsolute4, join as join8, relative as relative2, resolve as resolve6, sep as sep2 } from "node:path";
 
 // src/render/ledger.ts
 var RENDER_LEDGER_VERSION = 1;
@@ -6483,24 +6484,7 @@ function blockLinesByName(content, markers) {
 function writeRefusal(message) {
   return new EnigmaError({ code: "E_WRITE_FAILED", message });
 }
-function assertNotSymlink(file) {
-  let isLink;
-  try {
-    isLink = lstatSync2(file).isSymbolicLink();
-  } catch (err) {
-    if (err.code === "ENOENT") return;
-    throw writeRefusal(`cannot inspect render.path target: ${err.code ?? "unknown error"}`);
-  }
-  if (isLink) throw writeRefusal("render.path target is a symlink; refusing to read through or replace it");
-}
-function resolveRenderTarget(worktree, renderPath) {
-  if (isAbsolute4(renderPath)) {
-    throw writeRefusal("render.path must be relative to the worktree; absolute paths are refused");
-  }
-  if (PATH_TRAVERSAL_SEGMENT_RE.test(renderPath)) {
-    throw writeRefusal("render.path must not contain a parent-directory traversal segment");
-  }
-  const file = resolve6(worktree, renderPath);
+function validateTargetFile(worktree, file) {
   const parentDir = dirname8(file);
   if (!existsSync14(parentDir)) {
     throw writeRefusal("render.path target parent directory does not exist; Enigma never creates directories in the user's worktree");
@@ -6517,7 +6501,30 @@ function resolveRenderTarget(worktree, renderPath) {
   if (rel.startsWith(`..${sep2}`) || rel === ".." || isAbsolute4(rel)) {
     throw writeRefusal("render.path resolves outside the worktree via a symlinked parent directory");
   }
-  assertNotSymlink(file);
+  const target = join8(realParent, basename6(file));
+  let stat;
+  try {
+    stat = lstatSync2(target);
+  } catch (err) {
+    if (err.code === "ENOENT") return target;
+    throw writeRefusal(`cannot inspect render.path target: ${err.code ?? "unknown error"}`);
+  }
+  if (stat.isSymbolicLink()) throw writeRefusal("render.path target is a symlink; refusing to read through or replace it");
+  if (!stat.isFile()) throw writeRefusal("render.path target is not a regular file");
+  return target;
+}
+function resolveRenderTarget(worktree, renderPath) {
+  if (isAbsolute4(renderPath)) {
+    throw writeRefusal("render.path must be relative to the worktree; absolute paths are refused");
+  }
+  if (PATH_TRAVERSAL_SEGMENT_RE.test(renderPath)) {
+    throw writeRefusal("render.path must not contain a parent-directory traversal segment");
+  }
+  if (renderPath.trim() === "" || renderPath === "." || /[/\\]$/.test(renderPath)) {
+    throw writeRefusal('render.path must name a file, not be empty, "." or a directory path ending in a separator');
+  }
+  const file = resolve6(worktree, renderPath);
+  validateTargetFile(worktree, file);
   return file;
 }
 function buildRenderPlan(opts) {
@@ -6616,8 +6623,24 @@ async function executeRender(plan, opts) {
   const depositoryOf = new Map(plan.toResolve.map((t) => [t.name, t.depository]));
   const lock = acquireFileLock(renderLockPath(plan.file));
   try {
-    assertNotSymlink(plan.file);
-    const current = existsSync14(plan.file) ? readFileSync9(plan.file, "utf8") : "";
+    let target;
+    try {
+      target = validateTargetFile(plan.worktree, plan.file);
+    } catch (err) {
+      for (const item of plan.toResolve) {
+        appendAuditEvent({
+          op: "render",
+          name: item.name,
+          depository: item.depository,
+          actor: opts.actor,
+          ok: false,
+          error: staticReasonFor("E_WRITE_FAILED"),
+          ...auditScopeFields({ scope: "project", projectId: opts.projectId, projectPath: plan.worktree })
+        });
+      }
+      throw err;
+    }
+    const current = existsSync14(target) ? readFileSync9(target, "utf8") : "";
     const envBlockNames = new Set(blockLinesByName(current, ENV_BLOCK_MARKERS2).keys());
     const existing = blockLinesByName(current, RENDER_BLOCK_MARKERS);
     const hasExistingBlock = findBlock(current.split(detectEol(current)), RENDER_BLOCK_MARKERS) !== void 0;
@@ -6653,13 +6676,16 @@ async function executeRender(plan, opts) {
     for (const name of plan.narrowedOut) {
       if (!existing.has(name)) outcome.skipped.push({ name, reason: "narrowed-out" });
     }
-    const bodyNames = [...finalLines.keys()].sort((a, b) => a.localeCompare(b));
+    const bodyNames = [
+      ...[...existing.keys()].filter((n) => finalLines.has(n)),
+      ...[...finalLines.keys()].filter((n) => !existing.has(n)).sort((a, b) => a.localeCompare(b))
+    ];
     let next;
     if (bodyNames.length > 0) next = writeManagedBlock(current, bodyNames.map((n) => finalLines.get(n)), RENDER_BLOCK_MARKERS);
     else if (hasExistingBlock) next = stripRenderBlock(current);
     let writeOk = true;
     if (next !== void 0) {
-      const result = writeFileAtomic(plan.file, next, FILE_MODE5);
+      const result = writeFileAtomic(target, next, FILE_MODE5);
       writeOk = result.ok;
       if (!result.ok) {
         outcome.writeError = staticWriteError(result.error);
@@ -6670,7 +6696,7 @@ async function executeRender(plan, opts) {
         }
       } else {
         try {
-          if ((statSync4(plan.file).mode & 511) !== FILE_MODE5) chmodSync3(plan.file, FILE_MODE5);
+          if ((statSync4(target).mode & 511) !== FILE_MODE5) chmodSync3(target, FILE_MODE5);
         } catch {
         }
       }
@@ -6706,6 +6732,7 @@ async function executeRender(plan, opts) {
       if (!finalLines.has(name)) outcome.removed.push(name);
     }
     outcome.rendered.sort();
+    outcome.kept.sort();
     outcome.removed.sort();
     outcome.alreadyInEnvBlock.sort();
     return outcome;
@@ -6775,7 +6802,7 @@ async function cmdRender(argv) {
     throw new EnigmaError({ code: "E_CONFIG_CORRUPT", message: `.enigma.json: ${manifest.renderError}; fix it, then run \`enigma render\` again.` });
   }
   const plan = buildRenderPlan({ cwd, projectId: projectId2, worktree, index: readIndex(), manifest, explicitName });
-  plan.warnings.push(...checkEnvGitignore(worktree, relative3(worktree, plan.file)));
+  if (plan.enabled) plan.warnings.push(...checkEnvGitignore(worktree, relative3(worktree, plan.file)));
   const outcome = await executeRender(plan, {
     actor: "cli",
     projectId: projectId2,
