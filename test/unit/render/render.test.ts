@@ -896,6 +896,87 @@ describe('[r4] fix batch round 4', () => {
   });
 });
 
+describe('[r5] one conservative rule for render markers', () => {
+  const damagedCase = async (damaged: string): Promise<void> => {
+    writeFileSync(envPath(), damaged, { mode: 0o600 });
+    let resolves = 0;
+    await expect(run({ index: indexOf(entry('A')), resolve: async () => { resolves++; return 'v'; } })).rejects.toMatchObject({
+      code: 'E_WRITE_FAILED',
+      message: expect.stringContaining('damaged'),
+    });
+    expect(resolves).toBe(0);
+    expect(read()).toBe(damaged);
+    expect(readLedger().targets).toEqual([]);
+  };
+
+  it('(a) the nested shape BEGIN / A / BEGIN / B / END / TAIL is refused', async () => {
+    await damagedCase(`${RENDER_BEGIN_MARKER}\nA=1\n${RENDER_BEGIN_MARKER}\nB=1\n${RENDER_END_MARKER}\nTAIL=2\n`);
+  });
+
+  it('(c) render begin, env begin, render end, env end is refused; the file is unchanged and the env value is still there', async () => {
+    const damaged = `${RENDER_BEGIN_MARKER}\nR=old\n${ENV_BEGIN_MARKER}\nE=stored\n${RENDER_END_MARKER}\n${ENV_END_MARKER}\n`;
+    await damagedCase(damaged);
+    expect(read()).toContain('E=stored');
+  });
+
+  it('(d) env begin, render begin, env end, render end is refused; the file is unchanged and the env value is still there', async () => {
+    const damaged = `${ENV_BEGIN_MARKER}\nE=stored\n${RENDER_BEGIN_MARKER}\nR=old\n${ENV_END_MARKER}\n${RENDER_END_MARKER}\n`;
+    await damagedCase(damaged);
+    expect(read()).toContain('E=stored');
+  });
+
+  it('(e) a stray end marker alone is damaged for the renderer too', async () => {
+    await damagedCase(`U=1\n${RENDER_END_MARKER}\n`);
+  });
+
+  it('a stray end marker followed by a well-formed block is refused', async () => {
+    await damagedCase(`${RENDER_END_MARKER}\n${block('R=old')}`);
+  });
+
+  it('an env block wholly outside the render block is fine and stays byte-identical', async () => {
+    writeFileSync(envPath(), `${envBlock('E=stored')}${block('R=old')}`, { mode: 0o600 });
+    await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'a' }) });
+    expect(read()).toBe(`${envBlock('E=stored')}${block('A=a')}`);
+  });
+
+  describe('(b) markers with trailing whitespace are recognized', () => {
+    it.each([
+      ['spaces and a tab', `${RENDER_BEGIN_MARKER}  `, `${RENDER_END_MARKER}\t`, '\n'],
+      ['CRLF file, markers with trailing spaces', `${RENDER_BEGIN_MARKER} `, `${RENDER_END_MARKER} `, '\r\n'],
+    ])('%s: the block is found (not a second block appended) and rewritten with canonical markers', async (_label, begin, end, eol) => {
+      writeFileSync(envPath(), `U=1${eol}${begin}${eol}A=old${eol}${end}${eol}TAIL=2${eol}`, { mode: 0o600 });
+      await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'a2' }) });
+      const canonical = `${RENDER_BEGIN_MARKER}${eol}A=a2${eol}${RENDER_END_MARKER}${eol}`;
+      expect(read()).toBe(`U=1${eol}${canonical}TAIL=2${eol}`);
+    });
+
+    it('a whitespace-marker block whose set becomes empty is removed', async () => {
+      writeFileSync(envPath(), `U=1\n${RENDER_BEGIN_MARKER} \nA=old\n${RENDER_END_MARKER} \nTAIL=2\n`, { mode: 0o600 });
+      await run({ index: indexOf() });
+      expect(read()).toBe('U=1\nTAIL=2\n');
+    });
+
+    it('whitespace markers with a second block are refused like any repeated block', async () => {
+      await damagedCase(`${RENDER_BEGIN_MARKER} \nA=1\n${RENDER_END_MARKER}\n${block('B=1')}`);
+    });
+  });
+
+  describe('a stripped block leaves the file ending with an EOL', () => {
+    it.each([
+      ['LF', '\n', 'U=1\nBEGIN\nA=old\nEND', 'U=1\n'],
+      ['CRLF', '\r\n', 'U=1\r\nV=2\r\nBEGIN\r\nA=old\r\nEND', 'U=1\r\nV=2\r\n'],
+      ['an emptied file stays empty', '\n', 'BEGIN\nA=old\nEND', ''],
+      ['an emptied file with a trailing newline stays empty', '\n', 'BEGIN\nA=old\nEND\n', ''],
+    ])('a hand-edited block at EOF without a newline (%s)', async (_label, eol, before, after) => {
+      const withMarkers = before.replace('BEGIN', RENDER_BEGIN_MARKER).replace('END', RENDER_END_MARKER);
+      writeFileSync(envPath(), withMarkers, { mode: 0o600 });
+      await run({ index: indexOf() });
+      expect(read()).toBe(after);
+      expect(eol).toBeDefined();
+    });
+  });
+});
+
 describe('[r1.13] cleanups', () => {
   it.each(['src/storage/depositories/env.ts', 'src/storage/dotenv-file.ts', 'src/core/config.ts'])('%s ends with a trailing newline', (file) => {
     const bytes = readFileSync(join(priorCwd, file), 'utf8');

@@ -76,48 +76,77 @@ export function findBlock(lines: string[], markers: BlockMarkers): { beginIdx: n
   return { beginIdx, endIdx };
 }
 
-/** Result of walking every render marker in a file (`scanRenderMarkers`). */
+/** Result of `scanRenderMarkers`. */
 export interface RenderMarkerScan {
-  /** Every begin..end pair, in file order (inclusive line indices). */
-  complete: Array<{ beginIdx: number; endIdx: number }>;
-  /** Line index of the first render begin marker that is never closed, if any. */
-  unterminatedBeginIdx?: number;
-  /** True unless the file has zero or exactly one well-formed render block: an unterminated begin, a stray end, a nested begin, or more than one block. */
+  /** True unless the file is well-formed (see `scanRenderMarkers`). */
   damaged: boolean;
+  /** The one render block (inclusive line indices), set iff the file is well-formed and has exactly one. */
+  block?: { beginIdx: number; endIdx: number };
+  /** Line index of the FIRST render begin marker, if the file has any. */
+  firstBeginIdx?: number;
+}
+
+const TRAILING_WHITESPACE = /[ \t\r]+$/;
+
+type MarkerKind = 'render-begin' | 'render-end' | 'env-begin' | 'env-end';
+
+/** A line is a marker if, after removing trailing whitespace (spaces, tabs, a CR), it equals one of the four marker lines. */
+function markerKind(line: string): MarkerKind | undefined {
+  switch (line.replace(TRAILING_WHITESPACE, '')) {
+    case RENDER_BEGIN_MARKER:
+      return 'render-begin';
+    case RENDER_END_MARKER:
+      return 'render-end';
+    case ENV_BEGIN_MARKER:
+      return 'env-begin';
+    case ENV_END_MARKER:
+      return 'env-end';
+    default:
+      return undefined;
+  }
 }
 
 /**
- * Walks ALL render markers (not just the first pair). The renderer refuses a
- * damaged file; import protects every complete block and everything from the
- * first unterminated begin to EOF.
+ * The single rule for render markers, shared by the renderer and import.
+ *
+ * Marker recognition: a line is a render marker if, after removing trailing
+ * whitespace (spaces, tabs, a CR), it equals `# enigma:render:begin` or
+ * `# enigma:render:end`. The env depository's markers are recognized the same
+ * way for this scan only; its own read/write code is unchanged.
+ *
+ * A file is WELL-FORMED when it has exactly zero render markers, or exactly one
+ * render begin followed later by exactly one render end, with no other render
+ * marker anywhere and no env-depository marker between that begin and end.
+ * Anything else is DAMAGED (a nested begin, a repeated block, a stray end, an
+ * unterminated begin, env markers inside the render range).
+ *
+ * The renderer refuses a damaged file. Import protects the one render block of
+ * a well-formed file; in a damaged file it protects everything from the FIRST
+ * render begin to EOF (and nothing when there is no render begin, e.g. only
+ * stray ends).
  */
 export function scanRenderMarkers(lines: string[]): RenderMarkerScan {
-  const complete: Array<{ beginIdx: number; endIdx: number }> = [];
-  let openIdx = -1;
-  let irregular = false;
+  const beginIdxs: number[] = [];
+  const endIdxs: number[] = [];
+  const envIdxs: number[] = [];
   lines.forEach((line, i) => {
-    if (line === RENDER_BEGIN_MARKER) {
-      if (openIdx === -1) openIdx = i;
-      else irregular = true; // nested begin
-    } else if (line === RENDER_END_MARKER) {
-      if (openIdx === -1) {
-        irregular = true; // stray end
-      } else {
-        complete.push({ beginIdx: openIdx, endIdx: i });
-        openIdx = -1;
-      }
-    }
+    const kind = markerKind(line);
+    if (kind === 'render-begin') beginIdxs.push(i);
+    else if (kind === 'render-end') endIdxs.push(i);
+    else if (kind === 'env-begin' || kind === 'env-end') envIdxs.push(i);
   });
-  const scan: RenderMarkerScan = { complete, damaged: irregular || openIdx !== -1 || complete.length > 1 };
-  if (openIdx !== -1) scan.unterminatedBeginIdx = openIdx;
+  const scan: RenderMarkerScan = { damaged: false };
+  if (beginIdxs.length > 0) scan.firstBeginIdx = beginIdxs[0];
+  if (beginIdxs.length === 0 && endIdxs.length === 0) return scan;
+  const wellFormed =
+    beginIdxs.length === 1 &&
+    endIdxs.length === 1 &&
+    beginIdxs[0]! < endIdxs[0]! &&
+    !envIdxs.some((i) => i > beginIdxs[0]! && i < endIdxs[0]!);
+  if (wellFormed) scan.block = { beginIdx: beginIdxs[0]!, endIdx: endIdxs[0]! };
+  else scan.damaged = true;
   return scan;
 }
-
-/** All marker pairs that mark Enigma-managed content inside a `.env` file. Used by the import path's "skip managed lines" filter. */
-export const MANAGED_BLOCK_MARKERS: readonly BlockMarkers[] = [
-  { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER },
-  { begin: RENDER_BEGIN_MARKER, end: RENDER_END_MARKER },
-];
 
 /**
  * True when line index `i` of `lines` sits inside any Enigma-managed block.
@@ -132,19 +161,19 @@ function isInsideAnyManagedBlock(blocks: ReadonlyArray<{ beginIdx: number; endId
 }
 
 /**
- * Line ranges of every managed block in `lines`. Every complete render
- * block is protected, and from the first UNTERMINATED render begin marker to
- * EOF is protected too (a damaged file), so none of those lines is ever
- * imported or stripped. The env depository's block keeps its own handling
- * (first begin/end pair; unterminated, it is simply not a block).
+ * Line ranges import must skip. The render range follows `scanRenderMarkers`:
+ * the one block of a well-formed file, or from the first render begin to EOF
+ * in a damaged one. The env depository's block keeps its own handling (first
+ * exact begin/end pair; unterminated, it is simply not a block); where it
+ * overlaps the render range the union is skipped.
  */
 function managedBlockRanges(lines: string[]): Array<{ beginIdx: number; endIdx: number }> {
   const ranges: Array<{ beginIdx: number; endIdx: number }> = [];
   const envBlock = findBlock(lines, { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER });
   if (envBlock) ranges.push(envBlock);
   const render = scanRenderMarkers(lines);
-  ranges.push(...render.complete);
-  if (render.unterminatedBeginIdx !== undefined) ranges.push({ beginIdx: render.unterminatedBeginIdx, endIdx: lines.length - 1 });
+  if (render.block) ranges.push(render.block);
+  else if (render.damaged && render.firstBeginIdx !== undefined) ranges.push({ beginIdx: render.firstBeginIdx, endIdx: lines.length - 1 });
   return ranges;
 }
 
@@ -482,24 +511,23 @@ export function readManagedBlockLines(content: string, markers: BlockMarkers): s
 }
 
 /**
- * Write a block whose body is exactly `bodyLines` (raw `NAME=value` lines,
- * already encoded). An existing block is rewritten in place, wherever it is;
- * a new one is appended at EOF, after any existing env block. Either way the
- * block ends with an EOL in the file's style, so a later `echo X >> file`
- * starts on its own line and can never glue onto the end marker: an existing
- * block that sits at EOF without a trailing newline (a hand edit, or a file
- * written by an older build) gains one when it is rewritten. A file that had
- * no trailing newline therefore gains one before the block and one after it;
- * stripping the block later leaves that one EOL behind.
+ * Write the render block with a body of exactly `bodyLines` (raw `NAME=value`
+ * lines, already encoded). `existing` is the block's range from
+ * `scanRenderMarkers` (a well-formed file's one block): it is rewritten in
+ * place, wherever it is, with canonical markers. Without it a new block is
+ * appended at EOF, after any env block. Either way the block ends with an EOL
+ * in the file's style, so a later `echo X >> file` starts on its own line and
+ * can never glue onto the end marker: an existing block at EOF without a
+ * trailing newline gains one when rewritten. A file that had no trailing
+ * newline therefore gains one before the block and one after it.
  */
-export function writeManagedBlock(content: string, bodyLines: readonly string[], markers: BlockMarkers): string {
+export function writeRenderBlock(content: string, bodyLines: readonly string[], existing?: { beginIdx: number; endIdx: number }): string {
   const eol = detectEol(content);
-  const existing = findBlock(content.length === 0 ? [] : content.split(eol), markers);
+  const markers = { begin: RENDER_BEGIN_MARKER, end: RENDER_END_MARKER };
   if (existing) {
     const lines = content.split(eol);
-    const newLines = [...lines.slice(0, existing.beginIdx + 1), ...bodyLines, ...lines.slice(existing.endIdx)];
-    const rewritten = newLines.join(eol);
-    // The end marker is the file's last line: end it with an EOL too.
+    const rewritten = [...lines.slice(0, existing.beginIdx), markers.begin, ...bodyLines, markers.end, ...lines.slice(existing.endIdx + 1)].join(eol);
+    // The end marker was the file's last line: end it with an EOL too.
     return existing.endIdx === lines.length - 1 ? `${rewritten}${eol}` : rewritten;
   }
   const needsNewline = content.length > 0 && !content.endsWith(eol);
