@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { parseDotEnv, removeDotEnvEntries } from '../../../src/storage/dotenv-file.js';
+import { ENV_BEGIN_MARKER, ENV_END_MARKER, RENDER_BEGIN_MARKER, RENDER_END_MARKER } from '../../../src/storage/dotenv-file.js';
 
 describe('parseDotEnv', () => {
   it('parses a simple NAME=value file', () => {
@@ -231,5 +232,53 @@ describe('removeDotEnvEntries', () => {
     const content = 'BROKEN="never closed\nOPENAI_API_KEY=sk-abc\nGITHUB_TOKEN=ghp-xyz\n';
     const result = removeDotEnvEntries(content, ['OPENAI_API_KEY']);
     expect(result).toBe('BROKEN="never closed\nGITHUB_TOKEN=ghp-xyz\n');
+  });
+});
+
+describe('parseDotEnv / removeDotEnvEntries — both managed blocks (env + render) are skipped, in either order (Issue #107)', () => {
+  it('parseDotEnv: a render block in either order is skipped — its lines are not imported', () => {
+    const envFirst = `RAW=plain\n${ENV_BEGIN_MARKER}\nE=env-block-name\n${ENV_END_MARKER}\n${RENDER_BEGIN_MARKER}\nR=render-block-name\n${RENDER_END_MARKER}\n`;
+    const renderFirst = `RAW=plain\n${RENDER_BEGIN_MARKER}\nR=render-block-name\n${RENDER_END_MARKER}\n${ENV_BEGIN_MARKER}\nE=env-block-name\n${ENV_END_MARKER}\n`;
+
+    for (const content of [envFirst, renderFirst]) {
+      const result = parseDotEnv(content);
+      expect(result.entries.map((e) => e.name)).toEqual(['RAW']);
+    }
+  });
+
+  it('removeDotEnvEntries: with both blocks present, a raw-line name is removed; both blocks stay byte-identical (Tech Lead rule #6)', () => {
+    const content =
+      `RAW=plain\n${ENV_BEGIN_MARKER}\nE=env-block-name\n${ENV_END_MARKER}\n${RENDER_BEGIN_MARKER}\nR=render-block-name\n${RENDER_END_MARKER}\n`;
+    const result = removeDotEnvEntries(content, ['RAW']);
+    expect(result).toBe(
+      `${ENV_BEGIN_MARKER}\nE=env-block-name\n${ENV_END_MARKER}\n${RENDER_BEGIN_MARKER}\nR=render-block-name\n${RENDER_END_MARKER}\n`,
+    );
+  });
+
+  it('removeDotEnvEntries: a name in the render block is not removed by import (it lives in a different store and is read-only there)', () => {
+    const content =
+      `RAW=plain\n${RENDER_BEGIN_MARKER}\nRENDERED=in-render-block\n${RENDER_END_MARKER}\n`;
+    const result = removeDotEnvEntries(content, ['RENDERED']);
+    // The scanner never saw RENDERED (it was in a managed block) so
+    // nothing is removed. The whole file is unchanged.
+    expect(result).toBe(content);
+  });
+
+  it('removeDotEnvEntries: render block appearing before the env block is also preserved (either order)', () => {
+    const content =
+      `RAW=plain\n${RENDER_BEGIN_MARKER}\nR=render-block-name\n${RENDER_END_MARKER}\n${ENV_BEGIN_MARKER}\nE=env-block-name\n${ENV_END_MARKER}\n`;
+    const result = removeDotEnvEntries(content, ['RAW']);
+    expect(result).toBe(
+      `${RENDER_BEGIN_MARKER}\nR=render-block-name\n${RENDER_END_MARKER}\n${ENV_BEGIN_MARKER}\nE=env-block-name\n${ENV_END_MARKER}\n`,
+    );
+  });
+
+  it('parseDotEnv: a render block does not leak a value it carries as a parseDotEnv entry', () => {
+    const SENTINEL = 'sk-sentinel-value-should-never-appear';
+    const content = `RAW=plain\n${RENDER_BEGIN_MARKER}\nRENDERED=${SENTINEL}\n${RENDER_END_MARKER}\n`;
+    const result = parseDotEnv(content);
+    expect(result.entries).toEqual([{ name: 'RAW', value: 'plain', ambiguous: false }]);
+    // Sentinel never surfaces.
+    expect(JSON.stringify(result)).not.toContain(SENTINEL);
   });
 });
