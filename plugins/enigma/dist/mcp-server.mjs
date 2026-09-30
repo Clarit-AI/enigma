@@ -43564,29 +43564,35 @@ function markerKind(line) {
       return void 0;
   }
 }
+function envBlockRanges(lines) {
+  const ranges = [];
+  const exact = findBlock(lines, { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER });
+  if (exact) ranges.push(exact);
+  let open2 = -1;
+  lines.forEach((line, i) => {
+    const kind = markerKind(line);
+    if (kind === "env-begin" && open2 === -1) open2 = i;
+    else if (kind === "env-end" && open2 !== -1) {
+      ranges.push({ beginIdx: open2, endIdx: i });
+      open2 = -1;
+    }
+  });
+  return ranges;
+}
 function scanRenderMarkers(lines) {
   const beginIdxs = [];
   const endIdxs = [];
   const envIdxs = [];
-  const envRanges = [];
-  let envOpen = -1;
   lines.forEach((line, i) => {
     const kind = markerKind(line);
     if (kind === "render-begin") beginIdxs.push(i);
     else if (kind === "render-end") endIdxs.push(i);
-    else if (kind === "env-begin" || kind === "env-end") {
-      envIdxs.push(i);
-      if (kind === "env-begin" && envOpen === -1) envOpen = i;
-      else if (kind === "env-end" && envOpen !== -1) {
-        envRanges.push({ beginIdx: envOpen, endIdx: i });
-        envOpen = -1;
-      }
-    }
+    else if (kind === "env-begin" || kind === "env-end") envIdxs.push(i);
   });
   const scan = { damaged: false };
   if (beginIdxs.length > 0) scan.firstBeginIdx = beginIdxs[0];
   if (beginIdxs.length === 0 && endIdxs.length === 0) return scan;
-  const wellFormed = beginIdxs.length === 1 && endIdxs.length === 1 && beginIdxs[0] < endIdxs[0] && !envIdxs.some((i) => i > beginIdxs[0] && i < endIdxs[0]) && !envRanges.some((r) => r.beginIdx < endIdxs[0] && r.endIdx > beginIdxs[0]);
+  const wellFormed = beginIdxs.length === 1 && endIdxs.length === 1 && beginIdxs[0] < endIdxs[0] && !envIdxs.some((i) => i > beginIdxs[0] && i < endIdxs[0]) && !envBlockRanges(lines).some((r) => r.beginIdx < endIdxs[0] && r.endIdx > beginIdxs[0]);
   if (wellFormed) scan.block = { beginIdx: beginIdxs[0], endIdx: endIdxs[0] };
   else scan.damaged = true;
   return scan;
@@ -43598,9 +43604,7 @@ function isInsideAnyManagedBlock(blocks, i) {
   return false;
 }
 function managedBlockRanges(lines) {
-  const ranges = [];
-  const envBlock = findBlock(lines, { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER });
-  if (envBlock) ranges.push(envBlock);
+  const ranges = envBlockRanges(lines);
   const render = scanRenderMarkers(lines);
   if (render.block) ranges.push(render.block);
   else if (render.damaged && render.firstBeginIdx !== void 0) ranges.push({ beginIdx: render.firstBeginIdx, endIdx: lines.length - 1 });
@@ -43736,21 +43740,28 @@ function removeDotEnvEntries(content, names, opts = {}) {
   }
   const firstRemovedIdx = Math.min(...toRemove.map((a) => a.startIdx));
   const out = [];
+  const source = [];
   for (let idx = 0; idx < lines.length; idx++) {
     const line = lines[idx];
     if (!removedLineIdx.has(idx)) {
       out.push(line);
+      source.push(idx);
       continue;
     }
     if (idx === firstRemovedIdx && opts.comment) {
       const cr = line.term === "\n" && line.raw.endsWith("\r") ? "\r" : "";
       out.push({ raw: `${opts.comment}${cr}`, term: line.term, text: opts.comment });
+      source.push(idx);
     }
   }
   const last = lines[lines.length - 1];
   if (removedLineIdx.has(lines.length - 1) && last.term === "" && out.length > 0) {
-    const tail = out[out.length - 1];
-    out[out.length - 1] = { raw: tail.raw.endsWith("\r") && tail.term === "\n" ? tail.raw.slice(0, -1) : tail.raw, term: "", text: tail.text };
+    const previousSource = source[source.length - 1];
+    const protectedLine = isInsideAnyManagedBlock(managedBlockRanges(lines.map((l) => l.text)), previousSource);
+    if (!protectedLine) {
+      const tail = out[out.length - 1];
+      out[out.length - 1] = { raw: tail.raw.endsWith("\r") && tail.term === "\n" ? tail.raw.slice(0, -1) : tail.raw, term: "", text: tail.text };
+    }
   }
   return joinPhysicalLines(out);
 }
