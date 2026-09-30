@@ -1040,6 +1040,49 @@ describe('[r6] physical lines: files with mixed line endings', () => {
   });
 });
 
+describe('[r7] env blocks: the union of exact and trimmed recognition', () => {
+  const EB = ENV_BEGIN_MARKER;
+  const EE = ENV_END_MARKER;
+
+  it('probed shape 1 (`EB\\r\\r\\n`): a name in that env block is reported as already there, not duplicated into the render block', async () => {
+    const original = `${EB}\r\r\nE=stored\n${EE}\nU=1\n`;
+    writeFileSync(envPath(), original, { mode: 0o600 });
+    const outcome = await run({ index: indexOf(entry('A'), entry('E')), resolve: fixedValues({ A: 'a', E: 'from-store' }) });
+    expect(outcome.alreadyInEnvBlock).toEqual(['E']);
+    expect(read()).toBe(`${original}${RENDER_BEGIN_MARKER}\nA=a\n${RENDER_END_MARKER}\n`);
+  });
+
+  it.each([
+    ['a begin with trailing spaces', `${EB}  \nE=stored\n${EE}\nU=1\n`],
+    ['an end with a trailing tab', `${EB}\nE=stored\n${EE}\t\nU=1\n`],
+    ['an end with an extra CR', `${EB}\nE=stored\n${EE}\r\r\nU=1\n`],
+  ])('%s: the env name is still recognized for dedupe', async (_label, original) => {
+    writeFileSync(envPath(), original, { mode: 0o600 });
+    const outcome = await run({ index: indexOf(entry('E')), resolve: fixedValues({ E: 'from-store' }) });
+    expect(outcome.alreadyInEnvBlock).toEqual(['E']);
+    expect(read()).toBe(original);
+  });
+
+  it('probed shape 2 (EB / EE with a trailing space / RB / RNAME / RE / EE): refused, the file is byte-unchanged, nothing is resolved (the render block used to be deleted)', async () => {
+    const damaged = `${EB}\n${EE} \n${RENDER_BEGIN_MARKER}\nRNAME=old\n${RENDER_END_MARKER}\n${EE}\n`;
+    writeFileSync(envPath(), damaged, { mode: 0o600 });
+    let resolves = 0;
+    await expect(run({ index: indexOf(entry('A')), resolve: async () => { resolves++; return 'v'; } })).rejects.toMatchObject({
+      code: 'E_WRITE_FAILED',
+      message: expect.stringContaining('damaged'),
+    });
+    expect(resolves).toBe(0);
+    expect(read()).toBe(damaged);
+    expect(readLedger().targets).toEqual([]);
+  });
+
+  it('a render block wholly outside every env range from either view still renders', async () => {
+    writeFileSync(envPath(), `${EB}  \nE=stored\n${EE}\n${block('R=old')}`, { mode: 0o600 });
+    await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'a' }) });
+    expect(read()).toBe(`${EB}  \nE=stored\n${EE}\n${block('A=a')}`);
+  });
+});
+
 describe('[r1.13] cleanups', () => {
   it.each(['src/storage/depositories/env.ts', 'src/storage/dotenv-file.ts', 'src/core/config.ts'])('%s ends with a trailing newline', (file) => {
     const bytes = readFileSync(join(priorCwd, file), 'utf8');

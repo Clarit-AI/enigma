@@ -42,7 +42,10 @@
  *    whitespace or other characters: not a marker). The file is well-formed
  *    with zero render markers, or exactly one begin followed later by exactly
  *    one end, no other render marker, no env-depository marker between them,
- *    and no env-depository block overlapping or containing them. Anything
+ *    and no env-depository block overlapping or containing them (env ranges
+ *    are the UNION of the exact view the env depository sees and the trimmed
+ *    view the scan sees, `envBlockRanges`; the same union feeds import
+ *    protection and this file's "already in the env block" dedupe). Anything
  *    else is DAMAGED and refused before anything is resolved or written
  *    (import protects from the first render begin to EOF). Untouched lines
  *    keep their original bytes and terminators; lines the renderer writes
@@ -96,19 +99,16 @@ import { replaceTarget } from './ledger.js';
 import {
   RENDER_BEGIN_MARKER,
   RENDER_END_MARKER,
-  ENV_BEGIN_MARKER,
-  ENV_END_MARKER,
   encodeValue,
   dominantEol,
-  findBlock,
+  envBlockRanges,
   joinPhysicalLines,
   scanRenderMarkers,
   splitPhysicalLines,
   writeRenderBlock,
 } from '../storage/dotenv-file.js';
-import type { BlockMarkers, PhysicalLine, RenderMarkerScan } from '../storage/dotenv-file.js';
+import type { PhysicalLine, RenderMarkerScan } from '../storage/dotenv-file.js';
 
-const ENV_BLOCK_MARKERS: BlockMarkers = { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER };
 const FILE_MODE = 0o600;
 const DEFAULT_RENDER_PATH = '.env';
 const PATH_TRAVERSAL_SEGMENT_RE = /(^|[/\\])\.\.([/\\]|$)/;
@@ -198,15 +198,21 @@ function nameFromLine(line: string): string | undefined {
   return eq > 0 ? line.slice(0, eq) : undefined;
 }
 
-/** Names assigned inside the env depository's block (its first exact begin/end pair, read over physical lines so mixed line endings never merge lines). */
+/**
+ * Names assigned inside ANY env-depository block range, from either view (the
+ * exact one the env depository sees and the trimmed one the marker scan sees:
+ * `envBlockRanges`), read over physical lines so mixed line endings never
+ * merge lines. A name counts as "already in the env block" if it is in any of
+ * them.
+ */
 function envBlockNamesOf(content: string): Set<string> {
   const texts = splitPhysicalLines(content).map((l) => l.text);
-  const block = findBlock(texts, ENV_BLOCK_MARKERS);
   const names = new Set<string>();
-  if (!block) return names;
-  for (const line of texts.slice(block.beginIdx + 1, block.endIdx)) {
-    const name = nameFromLine(line);
-    if (name !== undefined) names.add(name);
+  for (const range of envBlockRanges(texts)) {
+    for (const line of texts.slice(range.beginIdx + 1, range.endIdx)) {
+      const name = nameFromLine(line);
+      if (name !== undefined) names.add(name);
+    }
   }
   return names;
 }

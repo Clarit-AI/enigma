@@ -159,6 +159,30 @@ function markerKind(line: string): MarkerKind | undefined {
 }
 
 /**
+ * Every env-depository block range in `lines`, as the UNION of two views, so
+ * this module's code can never disagree with itself about where an env block
+ * is: the EXACT view (what the env depository sees: the first line equal to
+ * `# enigma:begin` and the first exact `# enigma:end` after it) and the
+ * TRIMMED view (markers recognized after trailing whitespace is removed, each
+ * begin paired with the next end). The env depository's own code is unchanged.
+ */
+export function envBlockRanges(lines: string[]): Array<{ beginIdx: number; endIdx: number }> {
+  const ranges: Array<{ beginIdx: number; endIdx: number }> = [];
+  const exact = findBlock(lines, { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER });
+  if (exact) ranges.push(exact);
+  let open = -1;
+  lines.forEach((line, i) => {
+    const kind = markerKind(line);
+    if (kind === 'env-begin' && open === -1) open = i;
+    else if (kind === 'env-end' && open !== -1) {
+      ranges.push({ beginIdx: open, endIdx: i });
+      open = -1;
+    }
+  });
+  return ranges;
+}
+
+/**
  * The single rule for render markers, shared by the renderer and import.
  *
  * Marker recognition: a line is a render marker if, after removing trailing
@@ -173,8 +197,8 @@ function markerKind(line: string): MarkerKind | undefined {
  * A file is WELL-FORMED when it has exactly zero render markers, or exactly one
  * render begin followed later by exactly one render end, with no other render
  * marker anywhere, no env-depository marker between that begin and end, and no
- * env-depository block (a begin paired with the next end) that overlaps or
- * contains the render block.
+ * env-depository block, from EITHER the exact or the trimmed view (see
+ * `envBlockRanges`), that overlaps or contains the render block.
  * Anything else is DAMAGED (a nested begin, a repeated block, a stray end, an
  * unterminated begin, env markers inside the render range, a render block
  * inside or overlapping an env block).
@@ -188,20 +212,11 @@ export function scanRenderMarkers(lines: string[]): RenderMarkerScan {
   const beginIdxs: number[] = [];
   const endIdxs: number[] = [];
   const envIdxs: number[] = [];
-  const envRanges: Array<{ beginIdx: number; endIdx: number }> = [];
-  let envOpen = -1;
   lines.forEach((line, i) => {
     const kind = markerKind(line);
     if (kind === 'render-begin') beginIdxs.push(i);
     else if (kind === 'render-end') endIdxs.push(i);
-    else if (kind === 'env-begin' || kind === 'env-end') {
-      envIdxs.push(i);
-      if (kind === 'env-begin' && envOpen === -1) envOpen = i;
-      else if (kind === 'env-end' && envOpen !== -1) {
-        envRanges.push({ beginIdx: envOpen, endIdx: i });
-        envOpen = -1;
-      }
-    }
+    else if (kind === 'env-begin' || kind === 'env-end') envIdxs.push(i);
   });
   const scan: RenderMarkerScan = { damaged: false };
   if (beginIdxs.length > 0) scan.firstBeginIdx = beginIdxs[0];
@@ -211,7 +226,7 @@ export function scanRenderMarkers(lines: string[]): RenderMarkerScan {
     endIdxs.length === 1 &&
     beginIdxs[0]! < endIdxs[0]! &&
     !envIdxs.some((i) => i > beginIdxs[0]! && i < endIdxs[0]!) &&
-    !envRanges.some((r) => r.beginIdx < endIdxs[0]! && r.endIdx > beginIdxs[0]!);
+    !envBlockRanges(lines).some((r) => r.beginIdx < endIdxs[0]! && r.endIdx > beginIdxs[0]!);
   if (wellFormed) scan.block = { beginIdx: beginIdxs[0]!, endIdx: endIdxs[0]! };
   else scan.damaged = true;
   return scan;
@@ -232,14 +247,12 @@ function isInsideAnyManagedBlock(blocks: ReadonlyArray<{ beginIdx: number; endId
 /**
  * Line ranges import must skip. The render range follows `scanRenderMarkers`:
  * the one block of a well-formed file, or from the first render begin to EOF
- * in a damaged one. The env depository's block keeps its own handling (first
- * exact begin/end pair; unterminated, it is simply not a block); where it
- * overlaps the render range the union is skipped.
+ * in a damaged one. Every env-depository range from either view
+ * (`envBlockRanges`: exact and trimmed) is skipped as well; where they
+ * overlap the render range the union is skipped.
  */
 function managedBlockRanges(lines: string[]): Array<{ beginIdx: number; endIdx: number }> {
-  const ranges: Array<{ beginIdx: number; endIdx: number }> = [];
-  const envBlock = findBlock(lines, { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER });
-  if (envBlock) ranges.push(envBlock);
+  const ranges = envBlockRanges(lines);
   const render = scanRenderMarkers(lines);
   if (render.block) ranges.push(render.block);
   else if (render.damaged && render.firstBeginIdx !== undefined) ranges.push({ beginIdx: render.firstBeginIdx, endIdx: lines.length - 1 });
@@ -476,25 +489,35 @@ export function removeDotEnvEntries(content: string, names: string[], opts: { co
   const firstRemovedIdx = Math.min(...toRemove.map((a) => a.startIdx));
 
   // Every kept line keeps its own bytes and terminator. A comment takes over
-  // the terminator of the line it replaces (CR included).
+  // the terminator of the line it replaces (CR included). `source` records the
+  // physical line each output line came from.
   const out: PhysicalLine[] = [];
+  const source: number[] = [];
   for (let idx = 0; idx < lines.length; idx++) {
     const line = lines[idx]!;
     if (!removedLineIdx.has(idx)) {
       out.push(line);
+      source.push(idx);
       continue;
     }
     if (idx === firstRemovedIdx && opts.comment) {
       const cr = line.term === '\n' && line.raw.endsWith('\r') ? '\r' : '';
       out.push({ raw: `${opts.comment}${cr}`, term: line.term, text: opts.comment });
+      source.push(idx);
     }
   }
-  // Removing a final unterminated line also drops the terminator before it,
-  // as removal has always done.
+  // Removing a final unterminated line also drops the terminator before it, as
+  // removal has always done, but never when that previous line is PROTECTED
+  // (inside an env or render block, end marker included): a protected line's
+  // bytes and terminator are never modified.
   const last = lines[lines.length - 1]!;
   if (removedLineIdx.has(lines.length - 1) && last.term === '' && out.length > 0) {
-    const tail = out[out.length - 1]!;
-    out[out.length - 1] = { raw: tail.raw.endsWith('\r') && tail.term === '\n' ? tail.raw.slice(0, -1) : tail.raw, term: '', text: tail.text };
+    const previousSource = source[source.length - 1]!;
+    const protectedLine = isInsideAnyManagedBlock(managedBlockRanges(lines.map((l) => l.text)), previousSource);
+    if (!protectedLine) {
+      const tail = out[out.length - 1]!;
+      out[out.length - 1] = { raw: tail.raw.endsWith('\r') && tail.term === '\n' ? tail.raw.slice(0, -1) : tail.raw, term: '', text: tail.text };
+    }
   }
   return joinPhysicalLines(out);
 }
