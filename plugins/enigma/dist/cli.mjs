@@ -1018,25 +1018,37 @@ function findBlock(lines, markers) {
   if (endIdx === -1) return void 0;
   return { beginIdx, endIdx };
 }
+var TRAILING_WHITESPACE = /[ \t\r]+$/;
+function markerKind(line) {
+  switch (line.replace(TRAILING_WHITESPACE, "")) {
+    case RENDER_BEGIN_MARKER:
+      return "render-begin";
+    case RENDER_END_MARKER:
+      return "render-end";
+    case ENV_BEGIN_MARKER:
+      return "env-begin";
+    case ENV_END_MARKER:
+      return "env-end";
+    default:
+      return void 0;
+  }
+}
 function scanRenderMarkers(lines) {
-  const complete = [];
-  let openIdx = -1;
-  let irregular = false;
+  const beginIdxs = [];
+  const endIdxs = [];
+  const envIdxs = [];
   lines.forEach((line, i) => {
-    if (line === RENDER_BEGIN_MARKER) {
-      if (openIdx === -1) openIdx = i;
-      else irregular = true;
-    } else if (line === RENDER_END_MARKER) {
-      if (openIdx === -1) {
-        irregular = true;
-      } else {
-        complete.push({ beginIdx: openIdx, endIdx: i });
-        openIdx = -1;
-      }
-    }
+    const kind = markerKind(line);
+    if (kind === "render-begin") beginIdxs.push(i);
+    else if (kind === "render-end") endIdxs.push(i);
+    else if (kind === "env-begin" || kind === "env-end") envIdxs.push(i);
   });
-  const scan = { complete, damaged: irregular || openIdx !== -1 || complete.length > 1 };
-  if (openIdx !== -1) scan.unterminatedBeginIdx = openIdx;
+  const scan = { damaged: false };
+  if (beginIdxs.length > 0) scan.firstBeginIdx = beginIdxs[0];
+  if (beginIdxs.length === 0 && endIdxs.length === 0) return scan;
+  const wellFormed = beginIdxs.length === 1 && endIdxs.length === 1 && beginIdxs[0] < endIdxs[0] && !envIdxs.some((i) => i > beginIdxs[0] && i < endIdxs[0]);
+  if (wellFormed) scan.block = { beginIdx: beginIdxs[0], endIdx: endIdxs[0] };
+  else scan.damaged = true;
   return scan;
 }
 function isInsideAnyManagedBlock(blocks, i) {
@@ -1050,8 +1062,8 @@ function managedBlockRanges(lines) {
   const envBlock = findBlock(lines, { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER });
   if (envBlock) ranges.push(envBlock);
   const render = scanRenderMarkers(lines);
-  ranges.push(...render.complete);
-  if (render.unterminatedBeginIdx !== void 0) ranges.push({ beginIdx: render.unterminatedBeginIdx, endIdx: lines.length - 1 });
+  if (render.block) ranges.push(render.block);
+  else if (render.damaged && render.firstBeginIdx !== void 0) ranges.push({ beginIdx: render.firstBeginIdx, endIdx: lines.length - 1 });
   return ranges;
 }
 var INLINE_COMMENT_REASON = 'the unquoted value contains a space then "#", which could start a comment or be part of the secret \u2014 quote the value if the # belongs to it, then rerun import';
@@ -1239,13 +1251,12 @@ function readManagedBlockLines(content, markers) {
   const block = findBlock(lines, markers);
   return block ? lines.slice(block.beginIdx + 1, block.endIdx) : [];
 }
-function writeManagedBlock(content, bodyLines, markers) {
+function writeRenderBlock(content, bodyLines, existing) {
   const eol = detectEol(content);
-  const existing = findBlock(content.length === 0 ? [] : content.split(eol), markers);
+  const markers = { begin: RENDER_BEGIN_MARKER, end: RENDER_END_MARKER };
   if (existing) {
     const lines = content.split(eol);
-    const newLines = [...lines.slice(0, existing.beginIdx + 1), ...bodyLines, ...lines.slice(existing.endIdx)];
-    const rewritten = newLines.join(eol);
+    const rewritten = [...lines.slice(0, existing.beginIdx), markers.begin, ...bodyLines, markers.end, ...lines.slice(existing.endIdx + 1)].join(eol);
     return existing.endIdx === lines.length - 1 ? `${rewritten}${eol}` : rewritten;
   }
   const needsNewline = content.length > 0 && !content.endsWith(eol);
@@ -6487,7 +6498,6 @@ function removeTargetsMatching(input) {
 }
 
 // src/render/render.ts
-var RENDER_BLOCK_MARKERS = { begin: RENDER_BEGIN_MARKER, end: RENDER_END_MARKER };
 var ENV_BLOCK_MARKERS2 = { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER };
 var FILE_MODE5 = 384;
 var DEFAULT_RENDER_PATH = ".env";
@@ -6618,19 +6628,21 @@ function staticWriteError(message) {
   const code = message?.match(/^(E[A-Z0-9]+):/)?.[1];
   return code ? `failed to rewrite the target file (${code})` : "failed to rewrite the target file";
 }
-function stripRenderBlock(content) {
+function stripRenderBlock(content, block) {
   const eol = detectEol(content);
   const lines = content.split(eol);
-  const block = findBlock(lines, RENDER_BLOCK_MARKERS);
-  if (!block) return content;
-  return [...lines.slice(0, block.beginIdx), ...lines.slice(block.endIdx + 1)].join(eol);
+  const out = [...lines.slice(0, block.beginIdx), ...lines.slice(block.endIdx + 1)].join(eol);
+  return block.endIdx === lines.length - 1 && out !== "" && !out.endsWith(eol) ? `${out}${eol}` : out;
 }
-function assertRenderBlockIntact(content, file) {
-  if (scanRenderMarkers(content.split(detectEol(content))).damaged) {
+function readRenderBlock(content, file) {
+  const lines = content.split(detectEol(content));
+  const scan = scanRenderMarkers(lines);
+  if (scan.damaged) {
     throw writeRefusal(
-      `${file}: the render block is damaged: a "${RENDER_BEGIN_MARKER}" has no matching "${RENDER_END_MARKER}" line, or a marker is stray, nested or repeated (only one render block is allowed). Fix the file by hand, then run enigma render again.`
+      `${file}: the render block is damaged: the file must have either no render markers or exactly one "${RENDER_BEGIN_MARKER}" followed by exactly one "${RENDER_END_MARKER}" line, with no other render marker and no env-block marker between them. Fix the file by hand, then run enigma render again.`
     );
   }
+  return { scan, lines };
 }
 async function executeRender(plan, opts) {
   const outcome = {
@@ -6650,7 +6662,7 @@ async function executeRender(plan, opts) {
   }
   const peekPath = validateTargetFile(plan.worktree, plan.file);
   const peek = existsSync14(peekPath) ? readFileSync9(peekPath, "utf8") : "";
-  assertRenderBlockIntact(peek, plan.file);
+  readRenderBlock(peek, plan.file);
   const peekEnvNames = new Set(blockLinesByName(peek, ENV_BLOCK_MARKERS2).keys());
   const resolved = /* @__PURE__ */ new Map();
   for (const item of plan.toResolve) {
@@ -6670,7 +6682,7 @@ async function executeRender(plan, opts) {
       target = validateTargetFile(plan.worktree, plan.file);
       if (target !== peekPath) throw writeRefusal("render.path now resolves to a different file than the one that was locked; run enigma render again");
       current = existsSync14(target) ? readFileSync9(target, "utf8") : "";
-      assertRenderBlockIntact(current, plan.file);
+      readRenderBlock(current, plan.file);
     } catch (err) {
       for (const item of plan.toResolve) {
         appendAuditEvent({
@@ -6687,8 +6699,15 @@ async function executeRender(plan, opts) {
     }
     outcome.file = target;
     const envBlockNames = new Set(blockLinesByName(current, ENV_BLOCK_MARKERS2).keys());
-    const existing = blockLinesByName(current, RENDER_BLOCK_MARKERS);
-    const hasExistingBlock = findBlock(current.split(detectEol(current)), RENDER_BLOCK_MARKERS) !== void 0;
+    const { scan: renderScan, lines: currentLines } = readRenderBlock(current, plan.file);
+    const existingBlock = renderScan.block;
+    const existing = /* @__PURE__ */ new Map();
+    if (existingBlock) {
+      for (const line of currentLines.slice(existingBlock.beginIdx + 1, existingBlock.endIdx)) {
+        const name = nameFromLine(line);
+        if (name !== void 0) existing.set(name, line);
+      }
+    }
     const finalLines = /* @__PURE__ */ new Map();
     const freshNames = /* @__PURE__ */ new Set();
     const resolveFailures = [];
@@ -6726,8 +6745,8 @@ async function executeRender(plan, opts) {
       ...[...finalLines.keys()].filter((n) => !existing.has(n)).sort((a, b) => a.localeCompare(b))
     ];
     let next;
-    if (bodyNames.length > 0) next = writeManagedBlock(current, bodyNames.map((n) => finalLines.get(n)), RENDER_BLOCK_MARKERS);
-    else if (hasExistingBlock) next = stripRenderBlock(current);
+    if (bodyNames.length > 0) next = writeRenderBlock(current, bodyNames.map((n) => finalLines.get(n)), existingBlock);
+    else if (existingBlock) next = stripRenderBlock(current, existingBlock);
     let writeOk = true;
     if (next !== void 0) {
       const result = writeFileAtomic(target, next, FILE_MODE5);

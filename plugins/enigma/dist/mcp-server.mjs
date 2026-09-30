@@ -43530,25 +43530,37 @@ function findBlock(lines, markers) {
   if (endIdx === -1) return void 0;
   return { beginIdx, endIdx };
 }
+var TRAILING_WHITESPACE = /[ \t\r]+$/;
+function markerKind(line) {
+  switch (line.replace(TRAILING_WHITESPACE, "")) {
+    case RENDER_BEGIN_MARKER:
+      return "render-begin";
+    case RENDER_END_MARKER:
+      return "render-end";
+    case ENV_BEGIN_MARKER:
+      return "env-begin";
+    case ENV_END_MARKER:
+      return "env-end";
+    default:
+      return void 0;
+  }
+}
 function scanRenderMarkers(lines) {
-  const complete = [];
-  let openIdx = -1;
-  let irregular = false;
+  const beginIdxs = [];
+  const endIdxs = [];
+  const envIdxs = [];
   lines.forEach((line, i) => {
-    if (line === RENDER_BEGIN_MARKER) {
-      if (openIdx === -1) openIdx = i;
-      else irregular = true;
-    } else if (line === RENDER_END_MARKER) {
-      if (openIdx === -1) {
-        irregular = true;
-      } else {
-        complete.push({ beginIdx: openIdx, endIdx: i });
-        openIdx = -1;
-      }
-    }
+    const kind = markerKind(line);
+    if (kind === "render-begin") beginIdxs.push(i);
+    else if (kind === "render-end") endIdxs.push(i);
+    else if (kind === "env-begin" || kind === "env-end") envIdxs.push(i);
   });
-  const scan = { complete, damaged: irregular || openIdx !== -1 || complete.length > 1 };
-  if (openIdx !== -1) scan.unterminatedBeginIdx = openIdx;
+  const scan = { damaged: false };
+  if (beginIdxs.length > 0) scan.firstBeginIdx = beginIdxs[0];
+  if (beginIdxs.length === 0 && endIdxs.length === 0) return scan;
+  const wellFormed = beginIdxs.length === 1 && endIdxs.length === 1 && beginIdxs[0] < endIdxs[0] && !envIdxs.some((i) => i > beginIdxs[0] && i < endIdxs[0]);
+  if (wellFormed) scan.block = { beginIdx: beginIdxs[0], endIdx: endIdxs[0] };
+  else scan.damaged = true;
   return scan;
 }
 function isInsideAnyManagedBlock(blocks, i) {
@@ -43562,8 +43574,8 @@ function managedBlockRanges(lines) {
   const envBlock = findBlock(lines, { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER });
   if (envBlock) ranges.push(envBlock);
   const render = scanRenderMarkers(lines);
-  ranges.push(...render.complete);
-  if (render.unterminatedBeginIdx !== void 0) ranges.push({ beginIdx: render.unterminatedBeginIdx, endIdx: lines.length - 1 });
+  if (render.block) ranges.push(render.block);
+  else if (render.damaged && render.firstBeginIdx !== void 0) ranges.push({ beginIdx: render.firstBeginIdx, endIdx: lines.length - 1 });
   return ranges;
 }
 var INLINE_COMMENT_REASON = 'the unquoted value contains a space then "#", which could start a comment or be part of the secret \u2014 quote the value if the # belongs to it, then rerun import';
