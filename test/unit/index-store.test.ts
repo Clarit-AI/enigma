@@ -265,6 +265,11 @@ describe('index-store mutateIndex lock (Issue #66)', () => {
       expect(err).toBeInstanceOf(EnigmaError);
       expect((err as EnigmaError).code).toBe('E_LOCK_TIMEOUT');
       expect((err as EnigmaError).message).toContain(lockPath);
+      // Index-lock message preserves the pre-#106 baseline wording
+      // ("another process holds the index lock.") — `acquireIndexLock()`
+      // labels the lock so the timeout message is unchanged for callers
+      // that depend on it (Issue #106 review, codex blocking).
+      expect((err as EnigmaError).message).toContain('another process holds the index lock.');
     }
 
     // Never evicted: same inode, file untouched by the failed waiter.

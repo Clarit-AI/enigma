@@ -15,6 +15,10 @@ export default defineConfig({
     // check that still runs even when vitest itself was resolved via a bare
     // `npx vitest` falling back to a cached/global install. See
     // scripts/vitest-toolchain-guard.mjs.
-    globalSetup: ['./scripts/vitest-toolchain-guard.mjs'],
+    // Issue #106 (reviewer r2 A2): the toolchain guard runs FIRST so a
+    // broken toolchain fails fast without spending a bundle cycle;
+    // the ledger-worker build runs second and writes the bundle to a
+    // per-run tmpdir path exposed via ENIGMA_LEDGER_WORKER_PATH.
+    globalSetup: ['./scripts/vitest-toolchain-guard.mjs', './scripts/build-ledger-fixture.mjs'],
   },
 });

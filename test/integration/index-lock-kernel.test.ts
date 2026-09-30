@@ -12,14 +12,14 @@
 // recoverable (kernel death release); a leftover legacy body is
 // irrelevant. fd-cleanup/delta-failure lives in index-store.test.ts (it is
 // per-process introspection of the acquire path).
-import { spawn } from 'node:child_process';
+import { spawn, type ChildProcess } from 'node:child_process';
 import { mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { __setLockTimingForTesting, LOCK_MAX_ATTEMPTS, LOCK_RETRY_INTERVAL_MS, mutateIndex, readIndex, upsertIndexEntry } from '../../src/core/index-store.js';
-import { indexLockPath } from '../../src/core/paths.js';
+import { indexLockPath, renderLockPath } from '../../src/core/paths.js';
 
 const WORKER = join(dirname(fileURLToPath(import.meta.url)), '..', 'fixtures', 'index-lock-worker.mjs');
 const ADDON = join(dirname(fileURLToPath(import.meta.url)), '..', '..', 'plugins', 'enigma', 'native', `${process.platform}-${process.arch}`, 'index-lock.node');
@@ -189,5 +189,178 @@ describe('index lock — real processes against the committed flock addon (Issue
     }
     mutateIndex((cur) => upsertIndexEntry(cur, entry('FREE')));
     expect(readIndex().entries.map((e) => e.name)).toEqual(['FREE']);
+  });
+});
+
+/* ------------------------------------------------------------------ *
+ *  Generic acquireFileLock — Issue #106                               *
+ * ------------------------------------------------------------------ *
+ *
+ * These integration tests prove the same kernel-held exclusion contract
+ * holds for arbitrary anchor paths — what `acquireFileLock(lockPath)`
+ * delivers to the rest of the codebase (e.g. the render-target locks at
+ * `<configDir>/locks/<sha256>.lock`). The kernel `flock(2)` on a
+ * description per anchor is the arbiter; cross-anchor exclusion does not
+ * exist (it must not exist), and the same-anchor exclusion we already
+ * prove for the index lock above applies to every lock path equally.
+ */
+describe('acquireFileLock — real processes against the committed flock addon (Issue #106)', () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), 'enigma-filelock-rp-'));
+    originalHome = process.env.ENIGMA_HOME;
+    process.env.ENIGMA_HOME = tmpHome;
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.ENIGMA_HOME;
+    else process.env.ENIGMA_HOME = originalHome;
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it('two processes locking two DIFFERENT anchors proceed without waiting (AC #2, cross-anchor non-contention)', async () => {
+    const anchorA = join(tmpHome, 'a.lock');
+    const anchorB = join(tmpHome, 'b.lock');
+    mkdirSync(dirname(anchorA), { recursive: true, mode: 0o700 });
+
+    // Both children do a real `flock` acquire + 50ms hold + release +
+    // re-acquire cycle (20 iters). If cross-anchor contention existed,
+    // the total elapsed would be ~20 * 50ms * 2 ≈ 2 seconds instead of
+    // ~1 second. We assert an order-of-magnitude tighter bound than the
+    // production retry budget.
+    const counterA = join(tmpHome, 'a.counter');
+    const counterB = join(tmpHome, 'b.counter');
+    writeFileSync(counterA, '0');
+    writeFileSync(counterB, '0');
+
+    const t0 = Date.now();
+    const results = await Promise.all([
+      runWorker(['counter', ADDON, anchorA, counterA, '20', '50']),
+      runWorker(['counter', ADDON, anchorB, counterB, '20', '50']),
+    ]);
+    const elapsed = Date.now() - t0;
+    for (const r of results) expect(r.code).toBe(0);
+    expect(readFileSync(counterA, 'utf8')).toBe('20');
+    expect(readFileSync(counterB, 'utf8')).toBe('20');
+    // Production retry budget is ~500ms; cross-anchor parallel must
+    // complete well inside one retry window on top of the work itself.
+    expect(elapsed).toBeLessThan(LOCK_MAX_ATTEMPTS * LOCK_RETRY_INTERVAL_MS + 1500);
+  });
+
+  it('two worktrees with the same relative `.env` basename get distinct anchors (clarification comment)', () => {
+    const wt1 = join(tmpHome, 'wt1');
+    const wt2 = join(tmpHome, 'wt2');
+    mkdirSync(wt1, { recursive: true, mode: 0o755 });
+    mkdirSync(wt2, { recursive: true, mode: 0o755 });
+    const env1 = join(wt1, '.env');
+    const env2 = join(wt2, '.env');
+    expect(renderLockPath(env1)).not.toBe(renderLockPath(env2));
+  });
+
+  it('two worktrees with the same `.env` basename hold DIFFERENT anchors and their critical sections overlap (clarification comment, reviewer r2 A1)', async () => {
+    const wt1 = join(tmpHome, 'wt1');
+    const wt2 = join(tmpHome, 'wt2');
+    mkdirSync(wt1, { recursive: true, mode: 0o755 });
+    mkdirSync(wt2, { recursive: true, mode: 0o755 });
+    const env1 = join(wt1, '.env');
+    const env2 = join(wt2, '.env');
+    const anchor1 = renderLockPath(env1);
+    const anchor2 = renderLockPath(env2);
+    expect(anchor1).not.toBe(anchor2);
+
+    // The render-lock anchors live under <ENIGMA_HOME>/locks/. The
+    // production acquire path auto-creates that dir; pre-create it
+    // for the children so the timed-mode acquire sees a ready anchor.
+    mkdirSync(dirname(anchor1), { recursive: true, mode: 0o700 });
+
+    // Each child prints `[startMs,endMs]` for every acquire/release
+    // cycle. We assert that AT LEAST ONE interval of child 1 overlaps
+    // an interval of child 2 — proving distinct anchors do not
+    // serialize (reviewer r2 A1). The wall-clock approach flaked on
+    // cold-CI spawn latency; the overlap check does not, because the
+    // intervals are produced inside each child's critical section
+    // and never depend on cross-process scheduling before t=0.
+    const ledgerWorker = process.env.ENIGMA_LEDGER_WORKER_PATH;
+    if (!ledgerWorker) {
+      throw new Error(
+        'ENIGMA_LEDGER_WORKER_PATH not set; scripts/build-ledger-fixture.mjs should set it via vitest globalSetup',
+      );
+    }
+    const nativeDir = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'plugins', 'enigma', 'native');
+
+    // Start barrier (ready/go handshake): each child prints `ready` and
+    // blocks on stdin; once BOTH are ready the parent releases them
+    // together, so a slow spawn cannot make them miss each other.
+    // If either child exits before `ready`, release the other at once so it
+    // cannot sit blocked on stdin until the test timeout (Kilo r5).
+    const children: ChildProcess[] = [];
+    let readyCount = 0;
+    let released = false;
+    const releaseAll = (): void => {
+      if (released) return;
+      released = true;
+      for (const c of children) c.stdin!.end('go\n');
+    };
+    const onReady = (): void => {
+      readyCount += 1;
+      if (readyCount === 2) releaseAll();
+    };
+    const runTimed = (anchor: string): Promise<{ code: number | null; stdout: string }> =>
+      new Promise((resolvePromise) => {
+        const child = spawn(
+          process.execPath,
+          [ledgerWorker, 'timed', anchor, '10', '50', 'gate'],
+          {
+            stdio: ['pipe', 'pipe', 'inherit'],
+            env: { ...process.env, ENIGMA_NATIVE_DIR: nativeDir },
+          },
+        );
+        children.push(child);
+        // A child that already exited makes `end()` raise EPIPE; ignore it.
+        child.stdin!.on('error', () => {});
+        let stdout = '';
+        let sawReady = false;
+        child.stdout!.on('data', (chunk: Buffer) => {
+          stdout += chunk.toString();
+          if (!sawReady && stdout.includes('ready\n')) {
+            sawReady = true;
+            onReady();
+          }
+        });
+        child.on('exit', (code) => {
+          if (!sawReady) releaseAll();
+          resolvePromise({ code, stdout });
+        });
+      });
+
+    const [r1, r2] = await Promise.all([runTimed(anchor1), runTimed(anchor2)]);
+    expect(r1.code).toBe(0);
+    expect(r2.code).toBe(0);
+
+    const intervalsOf = (stdout: string): Array<[number, number]> =>
+      stdout
+        .split('\n')
+        .filter((line) => line.startsWith('['))
+        .map((line) => {
+          const m = /^\[(\d+),(\d+)\]$/.exec(line);
+          if (!m) throw new Error(`bad timed interval: ${line}`);
+          return [Number(m[1]), Number(m[2])];
+        });
+
+    const intervals1 = intervalsOf(r1.stdout);
+    const intervals2 = intervalsOf(r2.stdout);
+    expect(intervals1.length).toBe(10);
+    expect(intervals2.length).toBe(10);
+
+    // The proof: at least one critical section of child 1 overlaps a
+    // critical section of child 2. If distinct anchors serialized,
+    // every interval would be strictly before or after every other
+    // — no overlap, this assertion would fail.
+    const anyOverlap = intervals1.some(([s1, e1]) =>
+      intervals2.some(([s2, e2]) => s1 < e2 && s2 < e1),
+    );
+    expect(anyOverlap).toBe(true);
   });
 });
