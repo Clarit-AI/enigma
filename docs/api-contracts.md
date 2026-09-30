@@ -50,10 +50,21 @@ enigma move NAME --to ID [--scope …]
 enigma run [--only A,B] [--scope …] -- <command> [args...]
 enigma get NAME [--scope …]        # humans/scripts; stderr warning; blocked for the agent by the read-guard
 enigma import [PATH] [--depository ID] [--rotate] [--json]
+enigma render [NAME] [--json]      # write the worktree's .env render block (Issue #107)
 enigma migrate-scope [--from PATH] [--apply] [--prune-unrecoverable]
 enigma doctor [--json]   # includes a read-only `PATH shim:` line (ADR-006)
 enigma install [--uninstall]       # register marketplace + enable plugin
 ```
+
+`enigma render` (Issue #107): writes the worktree's project secrets into a managed `# enigma:render:begin` / `# enigma:render:end` block in the configured target file (default `.env`, override via `.enigma.json` `render.path`). Two forms:
+
+- **Plain `enigma render`** (auto-set): every project-scope entry whose depository's prompt profile is `none` (`encrypted`, `env`) is resolved and rendered. Names listed in `.enigma.json` `render.names` narrow the set; names outside it are skipped (not removed unless they were previously rendered). Prompting-store entries (Keychain, 1Password, Secret Service) are NEVER auto-rendered — they are listed by name on stdout as "skipped" with the instruction `enigma render NAME renders it explicitly`. Global-scope secrets are not rendered and not listed on stdout. Each name that was previously rendered and is still eligible has its block line re-resolved; lines for prompting-store entries already in the block are KEPT verbatim and not re-resolved (no prompt); names that have been removed from the index, demoted to global, or excluded by `render.names` are DROPPED from the block on the next render. The target file write runs under the per-target lock from Issue #106 and the per-target ledger target (`(projectId, worktree, file, names)`) is updated to exactly the names that ended up in the block.
+
+- **Explicit `enigma render NAME`**: MERGES — adds or updates only NAME's line in the block; every other line in the block stays byte-identical. NAME must be a project-scoped secret for this repo (`else` ⇒ `E_NOT_FOUND`). The depository's normal prompt semantics apply: a keychain/1password/secret-service NAME will trigger that store's prompt as the renderer resolves it.
+
+Output (text form): a single line per category — `Rendered: <names>`, `Kept (prompting store, not re-resolved): <names>`, `Removed: <names>`, `Failed: NAME (CODE: message)` for each per-name resolve failure, and `Skipped: NAME (prompting store; not previously rendered — use \`enigma render NAME\` to render it explicitly)` / `Skipped: NAME (excluded by .enigma.json render.names)`. Global secrets are never listed. `render.enabled: false` short-circuits with `rendering is off (render.enabled=false in .enigma.json)` and exits 0. `--json` emits a single JSON object on stdout (`{ rendered, kept, removed, failed, skipped, warnings, disabled, file }`, plus `writeError` when present). The target file is appended at EOF, after any existing `# enigma:begin` / `# enigma:end` block from the `env` depository, keeping the file's EOL style and trailing newline. Lines outside the render block (including the `env` depository block) are byte-identical across a render — both blocks can coexist in either order. The same gitignore warning the `env` depository surfaces (`checkEnvGitignore`, names-only) is emitted on every render.
+
+Exit codes: `0` on full success, `1` when any per-name resolve failed (other names may still have rendered) OR when the atomic write failed, `2` for usage errors. A `render.path` value that is absolute, contains a `..` segment, escapes via a symlinked directory, or whose parent dir does not exist is refused with `E_WRITE_FAILED` (the file is left untouched). A project secret in a prompting store rendered with plain `enigma render` is listed by name on stdout with the `Skipped:` reason — no prompt is fired.
 
 `enigma request` and `enigma reveal` are **not available at the CLI, by design**: `src/cli/index.ts` routes both names to a stub (`src/cli/commands/not-implemented.ts`) that prints `enigma <command> is not available at the CLI. Use \`enigma_<command>\` (MCP tool) or \`/enigma:<command>\` (slash command) instead.` and exits 2. That flow exists today only as the `enigma_request`/`enigma_reveal` MCP tools (§1) and the `/enigma:*` slash commands (Issue #14) — the stub's own header comment confirms this is a deliberate scope boundary, not a gap waiting to be filled, so this document does not carry them as CLI commands until a future decision reverses that.
 
@@ -72,9 +83,11 @@ Boolean flags accept an explicit `--flag=true|false|yes|no|0|1` form too (case-i
 
 `~/.config/enigma/audit.log` (0600, JSONL):
 ```json
-{ "ts": "ISO", "op": "set|rotated|read|reveal|remove|move|import|migrate|leak", "name": "…", "scope": "…", "depository": "…", "actor": "agent|user|cli|hook", "ok": true, "error": null, "method"?: "clipboard"|"page", "projectId"?: "9f3a…", "projectPath"?: "/abs/path" }
+{ "ts": "ISO", "op": "set|rotated|read|reveal|remove|move|import|migrate|leak|render", "name": "…", "scope": "…", "depository": "…", "actor": "agent|user|cli|hook", "ok": true, "error": null, "method"?: "clipboard"|"page", "projectId"?: "9f3a…", "projectPath"?: "/abs/path" }
 ```
 `method` (Issue #26) is present only on a `reveal` line, naming the disclosure surface — never a value, ref, or anything derived from the secret. It's optional so every audit line written before this field existed stays valid; a reader encountering a `reveal` line without it should treat the method as "not recorded", never assume a specific one. The union only ever names a surface a reveal path actually produces — `enigma_reveal`'s own method is `page | clipboard` — so a new member is added only alongside the reveal path that emits it, never speculatively.
+
+`op: "render"` (Issue #107) is written by `enigma render`, one line per rendered name with the worktree path attributed via `projectId` / `projectPath`. `ok: false` lines name the per-name failure code and a static, value-free message. `render` lines are never the disclosure of a value — the renderer resolves a value only to encode it into the target file, and the audit line names the work, not the value.
 
 `projectId`/`projectPath` (Issue #80) are present iff `scope` is `"project"`, attributing the line to a project — the log is one per-user file shared by every repo. `projectId` is the repo-identity id the index uses (`projectId(cwd)`, Issue #67 — not a lexical path hash); `projectPath` is the worktree path recorded in clear, exactly as `index.json` already records it (D1.1), so it discloses nothing new. Both are optional so lines written before this field existed stay valid; a reader treats an absent `projectId` as "not recorded", never as a specific project. Writers are type-enforced: `appendAuditEvent` takes a discriminated scope slice where `scope: 'project'` requires `projectId`, so a new call site that forgets it is a compile error.
 
@@ -86,15 +99,34 @@ Corrupt/unparsable on-disk JSON never surfaces a raw `SyntaxError` (Issue #18): 
 
 `~/.config/enigma/config.json`: `{ "defaultDepository"?: ID, "remote"?: "cloudflared"|"tailscale", "tripwire"?: { "depositories": ID[] }, "ui"?: "web"|"native" }`.
 
-Project `.enigma.json` (committed): `{ "defaultDepository"?: ID, "secrets": { "NAME": "description" } }`.
+Project `.enigma.json` (committed): `{ "defaultDepository"?: ID, "secrets": { "NAME": "description" }, "render"?: { "enabled"?: boolean, "path"?: string, "names"?: string[] } }`.
 
-Project `.env` managed block:
+`render` (Issue #107) is the renderer's project-scoped override. All sub-keys are optional; missing sub-keys take the renderer defaults (enabled, target `.env`, no narrowing). `enabled: false` short-circuits `enigma render` with a `rendering is off` line and no file write. `names` narrows the auto-set to the listed entries only; names outside it are skipped (and removed from the block on the next render if they were previously rendered). `path` overrides the target file relative to the worktree root; absolute paths, lexical escapes (`..`), parent-dir symlink escapes, and missing parent dirs are all refused with `E_WRITE_FAILED`. Unknown sub-keys inside `render` are silently ignored at parse time so a future sub-key never silently activates.
+
+Project `.env` managed block (env depository):
 ```
 # enigma:begin
 NAME=value
 # enigma:end
 ```
 Each `NAME` line is one dotenv-compatible entry, `ref` is the bare `NAME` (no scope prefix — the file is already scoped by `projectPath`). A value is written bare when it contains none of whitespace, `#`, `"`, `'`, `\`, or `$`; otherwise it is written double-quoted with `\`→`\\`, `"`→`\"`, CR→`\r`, and LF→`\n` (so a multi-line value, e.g. a PEM key, is stored as a single quoted line and a value that happens to contain the literal text `# enigma:end` can never be mistaken for the block terminator). Reading the block applies the exact inverse. This matches Node's built-in `util.parseEnv` for the common case (values whose only escape is an embedded newline); values containing a literal backslash or double quote round-trip correctly only through Enigma's own reader.
+
+Project `.env` render block (Issue #107):
+```
+# enigma:render:begin
+NAME1=value1
+NAME2=value2
+# enigma:render:end
+```
+The render block uses the same encoding, EOL-detection, and per-line quoting rules as the env-depository block above, with markers distinct from `# enigma:begin` / `# enigma:end` so both blocks coexist in one file in either order. Each render writes the block appended at EOF (after the env block if present), keeping the file's EOL style and trailing newline. The renderer never reads values back out of this block; on a re-render, names whose lines were previously written but whose entries have been removed from the index, demoted to global, or excluded by `render.names` are dropped, names whose depository is now a prompting store are kept verbatim (no re-resolve, no prompt), and the rest are re-resolved and overwritten. `enigma import` skips both blocks — neither block's lines are ever imported, neither block's bytes are ever stripped.
+
+`~/.config/enigma/render-ledger.json` (0600, Issue #106 / #107):
+```json
+{ "version": 1, "targets": [ { "projectId": "9f3a…", "worktree": "/abs/path", "file": "/abs/path/.env", "names": ["A","B"], "renderedAt": "ISO" } ] }
+```
+Names only — no value, ref, audit reason, or anything derived from a secret ever appears in the bytes (ADR-001). One row per `(projectId, worktree, file)` target; `names` is the set of names last written to the block, sorted-unique. The renderer calls `replaceTarget` (not `removeNames` — which would strip from every target, and not `upsertTarget` — which merges and so can never shrink a target) so two worktrees' rows are never cross-contaminated. Missing file → empty ledger; corrupt JSON → `E_CONFIG_CORRUPT` naming the path.
+
+`~/.config/enigma/locks/<sha256>.lock` (0600, Issue #106 / #107): per-target render lock anchor, named by a sha256 hash of the target's realpath'd directory + basename so two worktrees that both have a `.env` at the same relative path get distinct anchors. The renderer calls `acquireFileLock(renderLockPath(targetFile))` for the entire read-modify-write critical section, with the kernel `flock(2)` on a create-once persistent anchor through the first-party N-API addon (`E_LOCK_TIMEOUT` on retry exhaustion, `E_LOCK_UNAVAILABLE` on unsupported platforms — fail-closed).
 
 **Depository limits**: the `keychain` depository's `set` computes, before spawning anything, the plaintext value byte length that still fits `security -i`'s 4096-byte batch-line budget once the fixed command overhead and the given `ref` are subtracted; a value over that ceiling is rejected with `E_VALUE_TOO_LARGE` (the ceiling and a recommendation to use the `encrypted` depository for large material such as PEM keys are in the message; the value itself never is). `keychain` and `secret-service` both reject a `ref` containing characters outside `[A-Za-z0-9_./-]`, or longer than 512 characters, with `E_REF_INVALID`, checked at the depository boundary before any process is spawned. `E_WRITE_FAILED` reports a failed `set`, distinct from `E_READ_FAILED` for a failed `resolve`/`delete`.
 

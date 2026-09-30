@@ -8,6 +8,7 @@ import { cmdList } from './commands/list.js';
 import { cmdMigrateScope } from './commands/migrate-scope.js';
 import { cmdMove } from './commands/move.js';
 import { cmdRemove } from './commands/remove.js';
+import { cmdRender } from './commands/render.js';
 import { cmdRun } from './commands/run.js';
 import { notImplemented } from './commands/not-implemented.js';
 import { EnigmaError } from '../core/errors.js';
@@ -23,6 +24,7 @@ Commands:
   run [--only A,B] [--scope project|global] -- <command> [args...]
   get NAME [--scope project|global]
   import [PATH] [--depository ID] [--rotate] [--json]
+  render [NAME] [--json]
   migrate-scope [--from PATH] [--apply] [--prune-unrecoverable]
   doctor [--json]
   install [--uninstall]
@@ -40,6 +42,7 @@ const COMMANDS: Record<string, (argv: string[]) => Promise<number>> = {
   get: cmdGet,
   doctor: cmdDoctor,
   import: cmdImport,
+  render: cmdRender,
   'migrate-scope': cmdMigrateScope,
   install: cmdInstall,
   request: notImplemented('request'),
