@@ -43502,6 +43502,25 @@ var NEEDS_QUOTING = /[\s#"'\\$]/;
 function detectEol(content) {
   return content.includes("\r\n") ? "\r\n" : "\n";
 }
+function splitPhysicalLines(content) {
+  const lines = [];
+  let start = 0;
+  while (start < content.length) {
+    const nl = content.indexOf("\n", start);
+    if (nl === -1) {
+      const raw2 = content.slice(start);
+      lines.push({ raw: raw2, term: "", text: raw2 });
+      break;
+    }
+    const raw = content.slice(start, nl);
+    lines.push({ raw, term: "\n", text: raw.endsWith("\r") ? raw.slice(0, -1) : raw });
+    start = nl + 1;
+  }
+  return lines;
+}
+function joinPhysicalLines(lines) {
+  return lines.map((l) => l.raw + l.term).join("");
+}
 function encodeValue(value) {
   if (!NEEDS_QUOTING.test(value)) return value;
   const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r/g, "\\r").replace(/\n/g, "\\n");
@@ -43549,16 +43568,25 @@ function scanRenderMarkers(lines) {
   const beginIdxs = [];
   const endIdxs = [];
   const envIdxs = [];
+  const envRanges = [];
+  let envOpen = -1;
   lines.forEach((line, i) => {
     const kind = markerKind(line);
     if (kind === "render-begin") beginIdxs.push(i);
     else if (kind === "render-end") endIdxs.push(i);
-    else if (kind === "env-begin" || kind === "env-end") envIdxs.push(i);
+    else if (kind === "env-begin" || kind === "env-end") {
+      envIdxs.push(i);
+      if (kind === "env-begin" && envOpen === -1) envOpen = i;
+      else if (kind === "env-end" && envOpen !== -1) {
+        envRanges.push({ beginIdx: envOpen, endIdx: i });
+        envOpen = -1;
+      }
+    }
   });
   const scan = { damaged: false };
   if (beginIdxs.length > 0) scan.firstBeginIdx = beginIdxs[0];
   if (beginIdxs.length === 0 && endIdxs.length === 0) return scan;
-  const wellFormed = beginIdxs.length === 1 && endIdxs.length === 1 && beginIdxs[0] < endIdxs[0] && !envIdxs.some((i) => i > beginIdxs[0] && i < endIdxs[0]);
+  const wellFormed = beginIdxs.length === 1 && endIdxs.length === 1 && beginIdxs[0] < endIdxs[0] && !envIdxs.some((i) => i > beginIdxs[0] && i < endIdxs[0]) && !envRanges.some((r) => r.beginIdx < endIdxs[0] && r.endIdx > beginIdxs[0]);
   if (wellFormed) scan.block = { beginIdx: beginIdxs[0], endIdx: endIdxs[0] };
   else scan.damaged = true;
   return scan;
@@ -43583,7 +43611,7 @@ function isAmbiguousUnquoted(raw) {
   return / #/.test(raw);
 }
 function scanAssignments(lines) {
-  const blocks = managedBlockRanges(lines);
+  const blocks = managedBlockRanges(lines.map((l) => l.text));
   const assignments = [];
   let i = 0;
   while (i < lines.length) {
@@ -43591,7 +43619,7 @@ function scanAssignments(lines) {
       i++;
       continue;
     }
-    const line = lines[i];
+    const line = lines[i].text;
     const trimmed = line.trim();
     if (trimmed === "" || trimmed.startsWith("#")) {
       i++;
@@ -43620,7 +43648,7 @@ function scanAssignments(lines) {
         if (nextIdx >= lines.length || isInsideAnyManagedBlock(blocks, nextIdx)) break;
         endIdx = nextIdx;
         joined += `
-${lines[endIdx]}`;
+${lines[endIdx].text}`;
       }
       if (closed) {
         assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), ambiguous: false, startIdx: i, endIdx });
@@ -43664,9 +43692,7 @@ function findUnescapedQuote(text, quote) {
 }
 var ASSIGNMENT = /^(?:export\s+)?([^\s=]+)=(.*)$/;
 function parseDotEnv(content) {
-  const eol = detectEol(content);
-  const lines = content.length === 0 ? [] : content.split(eol);
-  const assignments = scanAssignments(lines);
+  const assignments = scanAssignments(splitPhysicalLines(content));
   const order = [];
   const values = /* @__PURE__ */ new Map();
   const ambiguousFlags = /* @__PURE__ */ new Map();
@@ -43699,8 +43725,7 @@ function parseDotEnv(content) {
   };
 }
 function removeDotEnvEntries(content, names, opts = {}) {
-  const eol = detectEol(content);
-  const lines = content.length === 0 ? [] : content.split(eol);
+  const lines = splitPhysicalLines(content);
   const assignments = scanAssignments(lines);
   const targets = new Set(names);
   const toRemove = assignments.filter((a) => a.valid && targets.has(a.name));
@@ -43710,15 +43735,24 @@ function removeDotEnvEntries(content, names, opts = {}) {
     for (let idx = a.startIdx; idx <= a.endIdx; idx++) removedLineIdx.add(idx);
   }
   const firstRemovedIdx = Math.min(...toRemove.map((a) => a.startIdx));
-  const newLines = [];
+  const out = [];
   for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx];
     if (!removedLineIdx.has(idx)) {
-      newLines.push(lines[idx]);
+      out.push(line);
       continue;
     }
-    if (idx === firstRemovedIdx && opts.comment) newLines.push(opts.comment);
+    if (idx === firstRemovedIdx && opts.comment) {
+      const cr = line.term === "\n" && line.raw.endsWith("\r") ? "\r" : "";
+      out.push({ raw: `${opts.comment}${cr}`, term: line.term, text: opts.comment });
+    }
   }
-  return newLines.join(eol);
+  const last = lines[lines.length - 1];
+  if (removedLineIdx.has(lines.length - 1) && last.term === "" && out.length > 0) {
+    const tail = out[out.length - 1];
+    out[out.length - 1] = { raw: tail.raw.endsWith("\r") && tail.term === "\n" ? tail.raw.slice(0, -1) : tail.raw, term: "", text: tail.text };
+  }
+  return joinPhysicalLines(out);
 }
 function upsertManagedBlock(content, name, value, markers) {
   const eol = detectEol(content);

@@ -990,6 +990,35 @@ var NEEDS_QUOTING = /[\s#"'\\$]/;
 function detectEol(content) {
   return content.includes("\r\n") ? "\r\n" : "\n";
 }
+function splitPhysicalLines(content) {
+  const lines = [];
+  let start = 0;
+  while (start < content.length) {
+    const nl = content.indexOf("\n", start);
+    if (nl === -1) {
+      const raw2 = content.slice(start);
+      lines.push({ raw: raw2, term: "", text: raw2 });
+      break;
+    }
+    const raw = content.slice(start, nl);
+    lines.push({ raw, term: "\n", text: raw.endsWith("\r") ? raw.slice(0, -1) : raw });
+    start = nl + 1;
+  }
+  return lines;
+}
+function joinPhysicalLines(lines) {
+  return lines.map((l) => l.raw + l.term).join("");
+}
+function dominantEol(lines) {
+  let crlf = 0;
+  let lf = 0;
+  for (const l of lines) {
+    if (l.term !== "\n") continue;
+    if (l.raw.endsWith("\r")) crlf++;
+    else lf++;
+  }
+  return crlf > lf ? "\r\n" : "\n";
+}
 function encodeValue(value) {
   if (!NEEDS_QUOTING.test(value)) return value;
   const escaped = value.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r/g, "\\r").replace(/\n/g, "\\n");
@@ -1037,16 +1066,25 @@ function scanRenderMarkers(lines) {
   const beginIdxs = [];
   const endIdxs = [];
   const envIdxs = [];
+  const envRanges = [];
+  let envOpen = -1;
   lines.forEach((line, i) => {
     const kind = markerKind(line);
     if (kind === "render-begin") beginIdxs.push(i);
     else if (kind === "render-end") endIdxs.push(i);
-    else if (kind === "env-begin" || kind === "env-end") envIdxs.push(i);
+    else if (kind === "env-begin" || kind === "env-end") {
+      envIdxs.push(i);
+      if (kind === "env-begin" && envOpen === -1) envOpen = i;
+      else if (kind === "env-end" && envOpen !== -1) {
+        envRanges.push({ beginIdx: envOpen, endIdx: i });
+        envOpen = -1;
+      }
+    }
   });
   const scan = { damaged: false };
   if (beginIdxs.length > 0) scan.firstBeginIdx = beginIdxs[0];
   if (beginIdxs.length === 0 && endIdxs.length === 0) return scan;
-  const wellFormed = beginIdxs.length === 1 && endIdxs.length === 1 && beginIdxs[0] < endIdxs[0] && !envIdxs.some((i) => i > beginIdxs[0] && i < endIdxs[0]);
+  const wellFormed = beginIdxs.length === 1 && endIdxs.length === 1 && beginIdxs[0] < endIdxs[0] && !envIdxs.some((i) => i > beginIdxs[0] && i < endIdxs[0]) && !envRanges.some((r) => r.beginIdx < endIdxs[0] && r.endIdx > beginIdxs[0]);
   if (wellFormed) scan.block = { beginIdx: beginIdxs[0], endIdx: endIdxs[0] };
   else scan.damaged = true;
   return scan;
@@ -1071,7 +1109,7 @@ function isAmbiguousUnquoted(raw) {
   return / #/.test(raw);
 }
 function scanAssignments(lines) {
-  const blocks = managedBlockRanges(lines);
+  const blocks = managedBlockRanges(lines.map((l) => l.text));
   const assignments = [];
   let i = 0;
   while (i < lines.length) {
@@ -1079,7 +1117,7 @@ function scanAssignments(lines) {
       i++;
       continue;
     }
-    const line = lines[i];
+    const line = lines[i].text;
     const trimmed = line.trim();
     if (trimmed === "" || trimmed.startsWith("#")) {
       i++;
@@ -1108,7 +1146,7 @@ function scanAssignments(lines) {
         if (nextIdx >= lines.length || isInsideAnyManagedBlock(blocks, nextIdx)) break;
         endIdx = nextIdx;
         joined += `
-${lines[endIdx]}`;
+${lines[endIdx].text}`;
       }
       if (closed) {
         assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), ambiguous: false, startIdx: i, endIdx });
@@ -1152,9 +1190,7 @@ function findUnescapedQuote(text, quote) {
 }
 var ASSIGNMENT = /^(?:export\s+)?([^\s=]+)=(.*)$/;
 function parseDotEnv(content) {
-  const eol = detectEol(content);
-  const lines = content.length === 0 ? [] : content.split(eol);
-  const assignments = scanAssignments(lines);
+  const assignments = scanAssignments(splitPhysicalLines(content));
   const order = [];
   const values = /* @__PURE__ */ new Map();
   const ambiguousFlags = /* @__PURE__ */ new Map();
@@ -1187,8 +1223,7 @@ function parseDotEnv(content) {
   };
 }
 function removeDotEnvEntries(content, names, opts = {}) {
-  const eol = detectEol(content);
-  const lines = content.length === 0 ? [] : content.split(eol);
+  const lines = splitPhysicalLines(content);
   const assignments = scanAssignments(lines);
   const targets = new Set(names);
   const toRemove = assignments.filter((a) => a.valid && targets.has(a.name));
@@ -1198,15 +1233,24 @@ function removeDotEnvEntries(content, names, opts = {}) {
     for (let idx = a.startIdx; idx <= a.endIdx; idx++) removedLineIdx.add(idx);
   }
   const firstRemovedIdx = Math.min(...toRemove.map((a) => a.startIdx));
-  const newLines = [];
+  const out = [];
   for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx];
     if (!removedLineIdx.has(idx)) {
-      newLines.push(lines[idx]);
+      out.push(line);
       continue;
     }
-    if (idx === firstRemovedIdx && opts.comment) newLines.push(opts.comment);
+    if (idx === firstRemovedIdx && opts.comment) {
+      const cr = line.term === "\n" && line.raw.endsWith("\r") ? "\r" : "";
+      out.push({ raw: `${opts.comment}${cr}`, term: line.term, text: opts.comment });
+    }
   }
-  return newLines.join(eol);
+  const last = lines[lines.length - 1];
+  if (removedLineIdx.has(lines.length - 1) && last.term === "" && out.length > 0) {
+    const tail = out[out.length - 1];
+    out[out.length - 1] = { raw: tail.raw.endsWith("\r") && tail.term === "\n" ? tail.raw.slice(0, -1) : tail.raw, term: "", text: tail.text };
+  }
+  return joinPhysicalLines(out);
 }
 function upsertManagedBlock(content, name, value, markers) {
   const eol = detectEol(content);
@@ -1245,23 +1289,17 @@ function removeManagedValue(content, name, markers) {
   const newLines = [...lines.slice(0, block.beginIdx + 1), ...blockLines, ...lines.slice(block.endIdx)];
   return newLines.join(eol);
 }
-function readManagedBlockLines(content, markers) {
-  const eol = detectEol(content);
-  const lines = content.length === 0 ? [] : content.split(eol);
-  const block = findBlock(lines, markers);
-  return block ? lines.slice(block.beginIdx + 1, block.endIdx) : [];
-}
 function writeRenderBlock(content, bodyLines, existing) {
-  const eol = detectEol(content);
-  const markers = { begin: RENDER_BEGIN_MARKER, end: RENDER_END_MARKER };
+  const lines = splitPhysicalLines(content);
+  const eol = dominantEol(lines);
+  const written = [RENDER_BEGIN_MARKER, ...bodyLines, RENDER_END_MARKER].map((text) => ({ raw: text + (eol === "\r\n" ? "\r" : ""), term: "\n", text }));
   if (existing) {
-    const lines = content.split(eol);
-    const rewritten = [...lines.slice(0, existing.beginIdx), markers.begin, ...bodyLines, markers.end, ...lines.slice(existing.endIdx + 1)].join(eol);
-    return existing.endIdx === lines.length - 1 ? `${rewritten}${eol}` : rewritten;
+    return joinPhysicalLines([...lines.slice(0, existing.beginIdx), ...written, ...lines.slice(existing.endIdx + 1)]);
   }
-  const needsNewline = content.length > 0 && !content.endsWith(eol);
-  const prefix = needsNewline ? content + eol : content;
-  return `${prefix}${markers.begin}${eol}${bodyLines.join(eol)}${eol}${markers.end}${eol}`;
+  const before = lines.map(
+    (l, i) => i === lines.length - 1 && l.term === "" ? { raw: l.raw + (eol === "\r\n" ? "\r" : ""), term: "\n", text: l.text } : l
+  );
+  return joinPhysicalLines([...before, ...written]);
 }
 
 // src/storage/depositories/env.ts
@@ -6509,13 +6547,16 @@ function nameFromLine(line) {
   const eq = line.indexOf("=");
   return eq > 0 ? line.slice(0, eq) : void 0;
 }
-function blockLinesByName(content, markers) {
-  const out = /* @__PURE__ */ new Map();
-  for (const line of readManagedBlockLines(content, markers)) {
+function envBlockNamesOf(content) {
+  const texts = splitPhysicalLines(content).map((l) => l.text);
+  const block = findBlock(texts, ENV_BLOCK_MARKERS2);
+  const names = /* @__PURE__ */ new Set();
+  if (!block) return names;
+  for (const line of texts.slice(block.beginIdx + 1, block.endIdx)) {
     const name = nameFromLine(line);
-    if (name !== void 0) out.set(name, line);
+    if (name !== void 0) names.add(name);
   }
-  return out;
+  return names;
 }
 function writeRefusal(message) {
   return new EnigmaError({ code: "E_WRITE_FAILED", message });
@@ -6629,14 +6670,17 @@ function staticWriteError(message) {
   return code ? `failed to rewrite the target file (${code})` : "failed to rewrite the target file";
 }
 function stripRenderBlock(content, block) {
-  const eol = detectEol(content);
-  const lines = content.split(eol);
-  const out = [...lines.slice(0, block.beginIdx), ...lines.slice(block.endIdx + 1)].join(eol);
-  return block.endIdx === lines.length - 1 && out !== "" && !out.endsWith(eol) ? `${out}${eol}` : out;
+  const lines = splitPhysicalLines(content);
+  const remaining = [...lines.slice(0, block.beginIdx), ...lines.slice(block.endIdx + 1)];
+  const last = remaining[remaining.length - 1];
+  if (block.endIdx === lines.length - 1 && last !== void 0 && last.term === "") {
+    remaining[remaining.length - 1] = { raw: last.raw + (dominantEol(lines) === "\r\n" ? "\r" : ""), term: "\n", text: last.text };
+  }
+  return joinPhysicalLines(remaining);
 }
 function readRenderBlock(content, file) {
-  const lines = content.split(detectEol(content));
-  const scan = scanRenderMarkers(lines);
+  const lines = splitPhysicalLines(content);
+  const scan = scanRenderMarkers(lines.map((l) => l.text));
   if (scan.damaged) {
     throw writeRefusal(
       `${file}: the render block is damaged: the file must have either no render markers or exactly one "${RENDER_BEGIN_MARKER}" followed by exactly one "${RENDER_END_MARKER}" line, with no other render marker and no env-block marker between them. Fix the file by hand, then run enigma render again.`
@@ -6663,7 +6707,7 @@ async function executeRender(plan, opts) {
   const peekPath = validateTargetFile(plan.worktree, plan.file);
   const peek = existsSync14(peekPath) ? readFileSync9(peekPath, "utf8") : "";
   readRenderBlock(peek, plan.file);
-  const peekEnvNames = new Set(blockLinesByName(peek, ENV_BLOCK_MARKERS2).keys());
+  const peekEnvNames = envBlockNamesOf(peek);
   const resolved = /* @__PURE__ */ new Map();
   for (const item of plan.toResolve) {
     if (peekEnvNames.has(item.name)) continue;
@@ -6698,12 +6742,12 @@ async function executeRender(plan, opts) {
       throw err;
     }
     outcome.file = target;
-    const envBlockNames = new Set(blockLinesByName(current, ENV_BLOCK_MARKERS2).keys());
+    const envBlockNames = envBlockNamesOf(current);
     const { scan: renderScan, lines: currentLines } = readRenderBlock(current, plan.file);
     const existingBlock = renderScan.block;
     const existing = /* @__PURE__ */ new Map();
     if (existingBlock) {
-      for (const line of currentLines.slice(existingBlock.beginIdx + 1, existingBlock.endIdx)) {
+      for (const { text: line } of currentLines.slice(existingBlock.beginIdx + 1, existingBlock.endIdx)) {
         const name = nameFromLine(line);
         if (name !== void 0) existing.set(name, line);
       }
