@@ -27,20 +27,58 @@ const FILE_MODE = 0o600;
 const ENV_BLOCK_MARKERS = { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER } as const;
 const GITIGNORE_ENV_PATTERNS = new Set(['.env', '.env*', '*.env', '**/.env', '.env**']);
 
-/** Returns a warning when `<projectPath>/.env` is not covered by `.gitignore` (proportionate literal-pattern check, not a full glob engine). */
-export function checkEnvGitignore(projectPath: string): string[] {
+/** One `.gitignore` glob as a RegExp: `**` any depth, `*` within a segment, `?` one character. */
+function gitignoreGlobToRegExp(glob: string): RegExp {
+  let re = '';
+  for (let i = 0; i < glob.length; i++) {
+    const ch = glob[i]!;
+    if (ch === '*' && glob[i + 1] === '*') {
+      const slash = glob[i + 2] === '/';
+      re += slash ? '(?:.*/)?' : '.*';
+      i += slash ? 2 : 1;
+    } else if (ch === '*') {
+      re += '[^/]*';
+    } else if (ch === '?') {
+      re += '[^/]';
+    } else {
+      re += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
+    }
+  }
+  return new RegExp(`^${re}$`);
+}
+
+/** True when a `.gitignore` pattern matches `relPath` (posix, project-relative) or a directory above it. Proportionate: no negation, no nested `.gitignore` files. */
+function gitignorePatternCovers(pattern: string, relPath: string): boolean {
+  const glob = pattern.replace(/^\//, '').replace(/\/$/, '');
+  const re = gitignoreGlobToRegExp(glob);
+  const segments = relPath.split('/');
+  // A pattern with a slash in it is anchored to the project root; one without matches any path segment.
+  if (glob.includes('/') || pattern.startsWith('/')) return segments.some((_, i) => re.test(segments.slice(0, i + 1).join('/')));
+  return segments.some((segment) => re.test(segment));
+}
+
+/**
+ * Returns a warning when `<projectPath>/<targetPath>` is not covered by
+ * `.gitignore` (proportionate check, not a full glob engine). The default
+ * `targetPath` is `.env` and keeps the original literal-pattern check and
+ * wording exactly; any other target (the renderer's `render.path`) is
+ * matched against the patterns by its path, and the warning names that path.
+ */
+export function checkEnvGitignore(projectPath: string, targetPath: string = '.env'): string[] {
   const gitignorePath = join(projectPath, '.gitignore');
+  const custom = targetPath !== '.env';
+  const label = custom ? targetPath.split(/[\\/]/).join('/') : '.env';
   if (!existsSync(gitignorePath)) {
-    return ['.env is not gitignored: no .gitignore file found in this project'];
+    return [`${label} is not gitignored: no .gitignore file found in this project`];
   }
   const lines = readFileSync(gitignorePath, 'utf8').split(/\r?\n/);
   const covered = lines.some((raw) => {
     const line = raw.trim();
-    if (!line || line.startsWith('#')) return false;
-    const normalized = line.replace(/^\//, '').replace(/\/$/, '');
-    return GITIGNORE_ENV_PATTERNS.has(normalized);
+    if (!line || line.startsWith('#') || line.startsWith('!')) return false;
+    if (custom) return gitignorePatternCovers(line, label);
+    return GITIGNORE_ENV_PATTERNS.has(line.replace(/^\//, '').replace(/\/$/, ''));
   });
-  return covered ? [] : ['.env is not gitignored: add .env to .gitignore before committing'];
+  return covered ? [] : [`${label} is not gitignored: add ${label} to .gitignore before committing`];
 }
 
 function requireProjectPath(ctx: DepositoryContext): string {

@@ -1,531 +1,577 @@
-/* Unit tests for the renderer (Issue #107).
+/* Unit tests for the renderer (Issue #107, incl. the r1 fix batch).
  *
- * The renderer is split into two parts:
- *  - `buildRenderPlan` is pure — tested by mutating the inputs and
- *    asserting the resulting RenderPlan (names-only, no values).
- *  - `executeRender` does the I/O (lock + atomic write + ledger + audit)
- *    — tested by running it with a sentinel resolveValue and asserting
- *    the sentinel lands in the file and nowhere else.
- *
- * Both paths run with ENIGMA_HOME in a hermetic temp dir; the index is
- * pre-populated by `setSecret` from encrypted/env (the depository
- * modules don't spawn, see test/setup.ts). No real binary is ever
- * invoked here.
+ * Tests tagged `[rN.k]` pin item k of the r1 fix batch: each one fails on
+ * the r0 head (89be7fa) and passes on the fix. Hermetic: ENIGMA_HOME and
+ * the worktree are temp dirs, values come from an injected resolver, and
+ * no depository store (Keychain, 1Password, ...) is ever touched.
  */
-import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
+import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { auditLogPath } from '../../../src/core/paths.js';
-import { setSecret } from '../../../src/storage/manager.js';
+import { acquireFileLock } from '../../../src/core/file-lock.js';
+import { EnigmaError } from '../../../src/core/errors.js';
+import { auditLogPath, renderLockPath } from '../../../src/core/paths.js';
 import type { IndexFile } from '../../../src/core/index-store.js';
 import type { ProjectManifest } from '../../../src/core/config.js';
 import { buildRenderPlan, executeRender } from '../../../src/render/render.js';
-import { readLedger } from '../../../src/render/ledger.js';
-import { projectId as computeProjectId } from '../../../src/core/project.js';
-import { RENDER_BEGIN_MARKER, RENDER_END_MARKER, ENV_BEGIN_MARKER, ENV_END_MARKER } from '../../../src/storage/dotenv-file.js';
+import type { RenderOutcome } from '../../../src/render/render.js';
+import { readLedger, upsertTarget } from '../../../src/render/ledger.js';
+import { checkEnvGitignore } from '../../../src/storage/depositories/env.js';
+import { ENV_BEGIN_MARKER, ENV_END_MARKER, RENDER_BEGIN_MARKER, RENDER_END_MARKER } from '../../../src/storage/dotenv-file.js';
+import type { DepositoryId } from '../../../src/storage/interfaces.js';
 
 const SENTINEL = 'sk-sentinel-value-should-never-appear-7c3a';
+const PID = 'pid-render-test';
 
-function readAudit(): Array<Record<string, unknown>> {
+let home: string;
+let project: string;
+let priorHome: string | undefined;
+let priorCwd: string;
+
+beforeEach(() => {
+  home = mkdtempSync(join(tmpdir(), 'enigma-home-'));
+  project = realpathSync(mkdtempSync(join(tmpdir(), 'enigma-project-')));
+  mkdirSync(join(project, '.git'));
+  priorHome = process.env.ENIGMA_HOME;
+  process.env.ENIGMA_HOME = home;
+  priorCwd = process.cwd();
+  process.chdir(project);
+});
+
+afterEach(() => {
+  process.chdir(priorCwd);
+  if (priorHome === undefined) delete process.env.ENIGMA_HOME;
+  else process.env.ENIGMA_HOME = priorHome;
+  rmSync(home, { recursive: true, force: true });
+  rmSync(project, { recursive: true, force: true });
+});
+
+const envPath = (): string => join(project, '.env');
+const read = (path = envPath()): string => readFileSync(path, 'utf8');
+const block = (...lines: string[]): string => `${RENDER_BEGIN_MARKER}\n${lines.map((l) => `${l}\n`).join('')}${RENDER_END_MARKER}\n`;
+const envBlock = (...lines: string[]): string => `${ENV_BEGIN_MARKER}\n${lines.map((l) => `${l}\n`).join('')}${ENV_END_MARKER}\n`;
+
+function entry(name: string, depository: DepositoryId = 'encrypted', over: Record<string, unknown> = {}): IndexFile['entries'][number] {
+  return {
+    name,
+    scope: 'project',
+    projectId: PID,
+    projectPath: project,
+    depository,
+    ref: `${PID}/${name}`,
+    createdAt: '2026-01-01T00:00:00Z',
+    updatedAt: '2026-01-01T00:00:00Z',
+    ...over,
+  } as IndexFile['entries'][number];
+}
+
+const indexOf = (...entries: IndexFile['entries']): IndexFile => ({ version: 1, entries });
+const manifestOf = (over: Partial<ProjectManifest> = {}): ProjectManifest => ({ secrets: {}, ...over });
+
+type Resolver = (name: string, depository: DepositoryId) => Promise<string>;
+const fixedValues =
+  (values: Record<string, string>): Resolver =>
+  async (name) => {
+    const value = values[name];
+    if (value === undefined) throw new EnigmaError({ code: 'E_NOT_FOUND', message: `no value for ${name}` });
+    return value;
+  };
+
+async function run(opts: {
+  index: IndexFile;
+  resolve?: Resolver;
+  manifest?: ProjectManifest;
+  explicitName?: string;
+}): Promise<RenderOutcome> {
+  const plan = buildRenderPlan({
+    cwd: project,
+    projectId: PID,
+    worktree: project,
+    index: opts.index,
+    manifest: opts.manifest ?? manifestOf(),
+    explicitName: opts.explicitName,
+  });
+  return executeRender(plan, {
+    actor: 'cli',
+    projectId: PID,
+    worktree: project,
+    resolveValue: opts.resolve ?? (async () => 'v'),
+  });
+}
+
+function audits(): Array<Record<string, unknown>> {
   return existsSync(auditLogPath())
-    ? readFileSync(auditLogPath(), 'utf8').trim().split('\n').filter(Boolean).map((l) => JSON.parse(l))
+    ? read(auditLogPath()).trim().split('\n').filter(Boolean).map((l) => JSON.parse(l) as Record<string, unknown>).filter((a) => a.op === 'render')
     : [];
 }
 
-function makeIndex(entries: IndexFile['entries']): IndexFile {
-  return { version: 1, entries };
-}
-
-function makeManifest(overrides: Partial<ProjectManifest> = {}): ProjectManifest {
-  return { secrets: {}, ...overrides };
-}
-
-describe('renderer — buildRenderPlan (names-only)', () => {
-  let tmpHome: string;
-  let tmpProject: string;
-  let originalHome: string | undefined;
-  let originalCwd: string;
-  let projectId: string;
-
-  beforeEach(() => {
-    tmpHome = mkdtempSync(join(tmpdir(), 'enigma-home-'));
-    tmpProject = realpathSync(mkdtempSync(join(tmpdir(), 'enigma-project-')));
-    mkdirSync(join(tmpProject, '.git'));
-    originalHome = process.env.ENIGMA_HOME;
-    process.env.ENIGMA_HOME = tmpHome;
-    originalCwd = process.cwd();
-    process.chdir(tmpProject);
-    projectId = computeProjectId(tmpProject);
+describe('buildRenderPlan', () => {
+  it('[r1.2] the plan is names-only: no kept line or value can be in it, even when the file holds them', () => {
+    writeFileSync(envPath(), block(`KC_KEY=${SENTINEL}`, `OTHER=${SENTINEL}`), { mode: 0o600 });
+    const index = indexOf(entry('KC_KEY', 'keychain'), entry('OTHER'), entry('NEW'));
+    for (const explicitName of [undefined, 'NEW']) {
+      const plan = buildRenderPlan({ cwd: project, projectId: PID, worktree: project, index, manifest: manifestOf(), explicitName });
+      expect(JSON.stringify(plan)).not.toContain(SENTINEL);
+    }
   });
 
-  afterEach(() => {
-    process.chdir(originalCwd);
-    if (originalHome === undefined) delete process.env.ENIGMA_HOME;
-    else process.env.ENIGMA_HOME = originalHome;
-    rmSync(tmpHome, { recursive: true, force: true });
-    rmSync(tmpProject, { recursive: true, force: true });
-  });
-
-  it('a project entry with an encrypted depository is added to toWrite; global entries are listed as skipped-global', () => {
-    const index = makeIndex([
-      { name: 'OPENAI_API_KEY', scope: 'project', projectId, projectPath: tmpProject, depository: 'encrypted', ref: `${projectId}/OPENAI_API_KEY`, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
-      { name: 'GLOBAL_KEY', scope: 'global', depository: 'encrypted', ref: 'global/GLOBAL_KEY', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
-    ]);
-
-    const plan = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest() });
-
-    expect(plan.enabled).toBe(true);
-    expect(plan.toWrite.map((t) => t.name)).toEqual(['OPENAI_API_KEY']);
-    expect(plan.perName.find((p) => p.kind === 'skipped-global' && p.name === 'GLOBAL_KEY')).toBeDefined();
-    expect(plan.finalNames).toEqual(['OPENAI_API_KEY']);
-    // Names-only: plan carries no `value` field anywhere.
-    expect(JSON.stringify(plan)).not.toContain(SENTINEL);
-  });
-
-  it('a project entry with a prompting depository is NOT in toWrite; not in the block → skipped-prompting-auto', () => {
-    const index = makeIndex([
-      { name: 'KC_KEY', scope: 'project', projectId, projectPath: tmpProject, depository: 'keychain', ref: `${projectId}/KC_KEY`, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
-    ]);
-
-    const plan = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest() });
-
-    expect(plan.toWrite).toEqual([]);
-    expect(plan.perName).toContainEqual({ kind: 'skipped-prompting-auto', name: 'KC_KEY', depository: 'keychain' });
-  });
-
-  it('a prompting-store project entry that is ALREADY in the existing block is kept verbatim — line bytes copied, never parsed', () => {
-    writeFileSync(join(tmpProject, '.env'), `# some user line\n${RENDER_BEGIN_MARKER}\nKC_KEY=${SENTINEL}-legacy\n${RENDER_END_MARKER}\n`, { mode: 0o600 });
-    const index = makeIndex([
-      { name: 'KC_KEY', scope: 'project', projectId, projectPath: tmpProject, depository: 'keychain', ref: `${projectId}/KC_KEY`, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
-    ]);
-
-    const plan = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest() });
-
-    expect(plan.toWrite).toEqual([]);
-    expect(plan.toKeep).toEqual([{ name: 'KC_KEY', line: `KC_KEY=${SENTINEL}-legacy` }]);
-    expect(plan.finalNames).toEqual(['KC_KEY']);
-    expect(plan.perName).toContainEqual({ kind: 'keep-prompting', name: 'KC_KEY', depository: 'keychain', line: `KC_KEY=${SENTINEL}-legacy` });
-    // The plan DOES contain the kept line (by design — that's the kept payload). What's important is no OTHER value lands in the plan.
-    expect(plan.perName.find((p) => p.kind === 'keep-prompting' && p.name === 'KC_KEY')).toBeDefined();
-  });
-
-  it('render.names narrows the auto-set; non-listed names are skipped-manifest-narrowing', () => {
-    const index = makeIndex([
-      { name: 'A', scope: 'project', projectId, projectPath: tmpProject, depository: 'encrypted', ref: `${projectId}/A`, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
-      { name: 'B', scope: 'project', projectId, projectPath: tmpProject, depository: 'encrypted', ref: `${projectId}/B`, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
-    ]);
-
+  it('classifies project entries: profile none → toResolve, prompting store → promptingStore, narrowed → narrowedOut; global entries are ignored', () => {
+    const index = indexOf(
+      entry('ENC'),
+      entry('ENVDEPO', 'env'),
+      entry('KC', 'keychain'),
+      entry('NARROW'),
+      entry('GLOBAL_ONE', 'encrypted', { scope: 'global', projectId: undefined, projectPath: undefined, ref: 'global/GLOBAL_ONE' }),
+      entry('OTHER_PROJECT', 'encrypted', { projectId: 'someone-else' }),
+    );
     const plan = buildRenderPlan({
-      cwd: tmpProject,
-      projectId,
-      worktree: tmpProject,
-      index,
-      manifest: makeManifest({ render: { names: ['A'] } }),
+      cwd: project, projectId: PID, worktree: project, index,
+      manifest: manifestOf({ render: { names: ['ENC', 'ENVDEPO', 'KC'] } }),
     });
-
-    expect(plan.toWrite.map((t) => t.name)).toEqual(['A']);
-    expect(plan.perName).toContainEqual({ kind: 'skipped-manifest-narrowing', name: 'B' });
+    expect(plan.toResolve.map((t) => t.name)).toEqual(['ENC', 'ENVDEPO']);
+    expect(plan.promptingStore.map((t) => t.name)).toEqual(['KC']);
+    expect(plan.narrowedOut).toEqual(['NARROW']);
+    expect(plan.file).toBe(envPath());
   });
 
-  it('render.enabled: false short-circuits: toWrite empty, toRemove includes previously rendered names', () => {
-    writeFileSync(join(tmpProject, '.env'), `${RENDER_BEGIN_MARKER}\nOLD=old-value\n${RENDER_END_MARKER}\n`, { mode: 0o600 });
-    const index = makeIndex([
-      { name: 'A', scope: 'project', projectId, projectPath: tmpProject, depository: 'encrypted', ref: `${projectId}/A`, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
-    ]);
-
-    const plan = buildRenderPlan({
-      cwd: tmpProject,
-      projectId,
-      worktree: tmpProject,
-      index,
-      manifest: makeManifest({ render: { enabled: false } }),
-    });
-
+  it('render.enabled=false yields a disabled plan with nothing to do', () => {
+    const plan = buildRenderPlan({ cwd: project, projectId: PID, worktree: project, index: indexOf(entry('A')), manifest: manifestOf({ render: { enabled: false } }) });
     expect(plan.enabled).toBe(false);
-    expect(plan.toWrite).toEqual([]);
-    expect(plan.toRemove).toEqual(['OLD']);
+    expect(plan.toResolve).toEqual([]);
   });
 
-  it('a name previously rendered that has been removed from the index is in toRemove (Tech Lead rule #4 second clause)', () => {
-    writeFileSync(join(tmpProject, '.env'), `${RENDER_BEGIN_MARKER}\nREMOVED=old\nGONE=stale\n${RENDER_END_MARKER}\n`, { mode: 0o600 });
-    const index = makeIndex([]);
-
-    const plan = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest() });
-
-    expect(plan.toRemove.sort()).toEqual(['GONE', 'REMOVED']);
-    expect(plan.finalNames).toEqual([]);
-  });
-
-  it('explicitName: errors with E_NOT_FOUND if the name is not a project-scoped secret for this repo', () => {
-    const index = makeIndex([
-      { name: 'OTHER', scope: 'project', projectId: 'pid-other', projectPath: tmpProject, depository: 'encrypted', ref: 'pid-other/OTHER', createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
-    ]);
-
-    expect(() =>
-      buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest(), explicitName: 'OTHER' }),
-    ).toThrow(expect.objectContaining({ code: 'E_NOT_FOUND' }));
-  });
-
-  it('explicitName: merges — toKeep has every other existing name, toWrite has only the explicit name', () => {
-    writeFileSync(join(tmpProject, '.env'), `${RENDER_BEGIN_MARKER}\nA=1\nB=2\n${RENDER_END_MARKER}\n`, { mode: 0o600 });
-    const index = makeIndex([
-      { name: 'A', scope: 'project', projectId, projectPath: tmpProject, depository: 'encrypted', ref: `${projectId}/A`, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
-      { name: 'C', scope: 'project', projectId, projectPath: tmpProject, depository: 'encrypted', ref: `${projectId}/C`, createdAt: '2026-01-01T00:00:00Z', updatedAt: '2026-01-01T00:00:00Z' },
-    ]);
-
-    const plan = buildRenderPlan({
-      cwd: tmpProject,
-      projectId,
-      worktree: tmpProject,
-      index,
-      manifest: makeManifest(),
-      explicitName: 'C',
-    });
-
+  it('explicit NAME: E_NOT_FOUND for a name that is not a project secret of this repo; otherwise toResolve is only NAME', () => {
+    const index = indexOf(entry('OTHER', 'encrypted', { projectId: 'someone-else' }), entry('A'), entry('B'));
+    expect(() => buildRenderPlan({ cwd: project, projectId: PID, worktree: project, index, manifest: manifestOf(), explicitName: 'OTHER' })).toThrow(
+      expect.objectContaining({ code: 'E_NOT_FOUND' }),
+    );
+    const plan = buildRenderPlan({ cwd: project, projectId: PID, worktree: project, index, manifest: manifestOf(), explicitName: 'B' });
     expect(plan.explicit).toBe(true);
-    expect(plan.toWrite).toEqual([{ name: 'C', depository: 'encrypted' }]);
-    // B was in the previous block but NOT in the index — explicit mode
-    // preserves it byte-identical (it's not dropped because of explicitName
-    // semantics — we're MERGING, not replacing).
-    expect(plan.toKeep.map((k) => k.name).sort()).toEqual(['A', 'B']);
-    expect(plan.toKeep.find((k) => k.name === 'A')?.line).toBe('A=1');
-    expect(plan.toKeep.find((k) => k.name === 'B')?.line).toBe('B=2');
-    expect(plan.finalNames.sort()).toEqual(['A', 'B', 'C']);
-    expect(plan.toRemove).toEqual([]);
+    expect(plan.toResolve).toEqual([{ name: 'B', depository: 'encrypted' }]);
   });
 
-  describe('render.path validation (Tech Lead rule #7)', () => {
-    it('rejects an absolute path', () => {
-      expect(() =>
-        buildRenderPlan({
-          cwd: tmpProject,
-          projectId,
-          worktree: tmpProject,
-          index: makeIndex([]),
-          manifest: makeManifest({ render: { path: '/etc/passwd' } }),
-        }),
-      ).toThrow(expect.objectContaining({ code: 'E_WRITE_FAILED' }));
+  describe('render.path validation (before any read)', () => {
+    const planFor = (path: string) => () =>
+      buildRenderPlan({ cwd: project, projectId: PID, worktree: project, index: indexOf(), manifest: manifestOf({ render: { path } }) });
+
+    it('refuses an absolute path', () => {
+      expect(planFor('/etc/passwd')).toThrow(expect.objectContaining({ code: 'E_WRITE_FAILED' }));
     });
 
-    it('rejects a lexical escape (..)', () => {
-      expect(() =>
-        buildRenderPlan({
-          cwd: tmpProject,
-          projectId,
-          worktree: tmpProject,
-          index: makeIndex([]),
-          manifest: makeManifest({ render: { path: '../escape.env' } }),
-        }),
-      ).toThrow(expect.objectContaining({ code: 'E_WRITE_FAILED' }));
+    it('refuses a `..` segment', () => {
+      expect(planFor('../escape.env')).toThrow(expect.objectContaining({ code: 'E_WRITE_FAILED' }));
     });
 
-    it('rejects a missing parent directory', () => {
-      expect(() =>
-        buildRenderPlan({
-          cwd: tmpProject,
-          projectId,
-          worktree: tmpProject,
-          index: makeIndex([]),
-          manifest: makeManifest({ render: { path: 'no-such-subdir/.env' } }),
-        }),
-      ).toThrow(expect.objectContaining({ code: 'E_WRITE_FAILED' }));
+    it('refuses a missing parent directory and does not create it', () => {
+      expect(planFor('no-such-dir/.env')).toThrow(expect.objectContaining({ code: 'E_WRITE_FAILED' }));
+      expect(existsSync(join(project, 'no-such-dir'))).toBe(false);
     });
 
-    it('rejects a symlink-escape parent directory', () => {
-      // Put a symlink under the worktree that resolves to OUTSIDE.
-      const linkDir = join(tmpProject, 'link-escape');
-      mkdirSync(linkDir, { recursive: true });
-      // Place a hidden escape: tmpProject has a symlink, its realpath leaves the worktree.
-      const outside = join(tmpHome, 'outside-target');
-      mkdirSync(outside, { recursive: true });
-      // Now create a symlink INSIDE worktree that resolves to that outside dir.
-      // Use rm + symlink to overwrite the empty linkDir with a real symlink.
-      rmSync(linkDir, { recursive: true, force: true });
-      symlinkSync(outside, linkDir);
-      expect(() =>
-        buildRenderPlan({
-          cwd: tmpProject,
-          projectId,
-          worktree: tmpProject,
-          index: makeIndex([]),
-          manifest: makeManifest({ render: { path: 'link-escape/file.env' } }),
-        }),
-      ).toThrow(expect.objectContaining({ code: 'E_WRITE_FAILED' }));
+    it('refuses a parent directory that is a symlink out of the worktree', () => {
+      const outside = join(home, 'outside');
+      mkdirSync(outside);
+      symlinkSync(outside, join(project, 'escape'));
+      expect(planFor('escape/file.env')).toThrow(expect.objectContaining({ code: 'E_WRITE_FAILED' }));
+    });
+
+    it('[r1.4] refuses a target file that is a symlink, without reading through it or replacing it', async () => {
+      const real = join(project, 'real.env');
+      writeFileSync(real, 'REAL=1\n', { mode: 0o600 });
+      symlinkSync(real, envPath());
+      await expect(run({ index: indexOf(entry('A')) })).rejects.toMatchObject({ code: 'E_WRITE_FAILED' });
+      expect(lstatSync(envPath()).isSymbolicLink()).toBe(true);
+      expect(read(real)).toBe('REAL=1\n');
+    });
+
+    it('[r1.4] a dangling symlink target is refused too', async () => {
+      symlinkSync(join(project, 'nowhere.env'), envPath());
+      await expect(run({ index: indexOf(entry('A')) })).rejects.toMatchObject({ code: 'E_WRITE_FAILED' });
+      expect(lstatSync(envPath()).isSymbolicLink()).toBe(true);
+      expect(existsSync(join(project, 'nowhere.env'))).toBe(false);
+    });
+
+    it('[r1.4] a target swapped for a symlink between planning and executing is refused under the lock', async () => {
+      const plan = buildRenderPlan({ cwd: project, projectId: PID, worktree: project, index: indexOf(entry('A')), manifest: manifestOf() });
+      const real = join(project, 'real.env');
+      writeFileSync(real, 'REAL=1\n', { mode: 0o600 });
+      symlinkSync(real, envPath());
+      await expect(executeRender(plan, { actor: 'cli', projectId: PID, worktree: project, resolveValue: async () => 'v' })).rejects.toMatchObject({
+        code: 'E_WRITE_FAILED',
+      });
+      expect(read(real)).toBe('REAL=1\n');
     });
   });
 });
 
-describe('renderer — executeRender (I/O, lock, ledger, audit)', () => {
-  let tmpHome: string;
-  let tmpProject: string;
-  let originalHome: string | undefined;
-  let originalCwd: string;
-  let projectId: string;
-
-  beforeEach(async () => {
-    tmpHome = mkdtempSync(join(tmpdir(), 'enigma-home-'));
-    tmpProject = realpathSync(mkdtempSync(join(tmpdir(), 'enigma-project-')));
-    mkdirSync(join(tmpProject, '.git'));
-    originalHome = process.env.ENIGMA_HOME;
-    process.env.ENIGMA_HOME = tmpHome;
-    originalCwd = process.cwd();
-    process.chdir(tmpProject);
-    projectId = computeProjectId(tmpProject);
+describe('executeRender', () => {
+  it('writes the block for the auto set at mode 0600 and records the names in the ledger', async () => {
+    const outcome = await run({ index: indexOf(entry('A'), entry('B')), resolve: fixedValues({ A: 'a-val', B: 'b val' }) });
+    expect(outcome.rendered).toEqual(['A', 'B']);
+    expect(read()).toBe(block('A=a-val', 'B="b val"'));
+    expect(statSync(envPath()).mode & 0o777).toBe(0o600);
+    expect(readLedger().targets).toEqual([expect.objectContaining({ projectId: PID, worktree: project, file: envPath(), names: ['A', 'B'] })]);
   });
 
-  afterEach(() => {
-    process.chdir(originalCwd);
-    if (originalHome === undefined) delete process.env.ENIGMA_HOME;
-    else process.env.ENIGMA_HOME = originalHome;
-    rmSync(tmpHome, { recursive: true, force: true });
-    rmSync(tmpProject, { recursive: true, force: true });
+  it('a second identical render leaves identical bytes', async () => {
+    const index = indexOf(entry('A'), entry('B'));
+    const resolve = fixedValues({ A: 'a', B: 'b' });
+    await run({ index, resolve });
+    const first = read();
+    await run({ index, resolve });
+    expect(read()).toBe(first);
   });
 
-  it('writes a render block with NAME=value for each auto-set name, file mode 0600', async () => {
-    await setSecret({ name: 'OPENAI_API_KEY', value: SENTINEL, scope: 'project', depository: 'encrypted', cwd: tmpProject, actor: 'cli' });
-    await setSecret({ name: 'OTHER', value: 'other-value', scope: 'project', depository: 'encrypted', cwd: tmpProject, actor: 'cli' });
-
-    const { readIndex } = await import('../../../src/core/index-store.js');
-    const index = readIndex();
-    const plan = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest() });
-
-    const outcome = await executeRender(plan, { actor: 'cli', projectId, worktree: tmpProject, resolveValue: async (name) => (name === 'OPENAI_API_KEY' ? SENTINEL : 'other-value') });
-
-    expect(outcome.rendered.sort()).toEqual(['OPENAI_API_KEY', 'OTHER']);
-    const envPath = join(tmpProject, '.env');
-    const content = readFileSync(envPath, 'utf8');
-    expect(content).toContain(RENDER_BEGIN_MARKER);
-    expect(content).toContain(RENDER_END_MARKER);
-    expect(content).toContain(`OPENAI_API_KEY=${SENTINEL}`);
-    expect(content).toContain('OTHER=other-value');
-    expect((statSync(envPath).mode & 0o777)).toBe(0o600);
+  it('tightens a target whose mode had drifted to 0644', async () => {
+    writeFileSync(envPath(), 'USER_LINE=1\n', { mode: 0o644 });
+    chmodSync(envPath(), 0o644);
+    await run({ index: indexOf(entry('A')) });
+    expect(statSync(envPath()).mode & 0o777).toBe(0o600);
   });
 
-  it('preserves the env depository\'s own block byte-for-byte outside the render block (Tech Lead rule #6)', async () => {
-    writeFileSync(
-      join(tmpProject, '.env'),
-      `USER_LINE=1\n${ENV_BEGIN_MARKER}\nA=envblock-a\n${ENV_END_MARKER}\n${RENDER_BEGIN_MARKER}\nA=renderblock-a\n${RENDER_END_MARKER}\n`,
-      { mode: 0o600 },
-    );
-    // Pre-populate the index with the SAME name that is in the previous
-    // render block so it is KEPT (Tech Lead rule #4). The new secret B is
-    // the auto-set addition.
-    const { mutateIndex, upsertIndexEntry, readIndex } = await import('../../../src/core/index-store.js');
-    mutateIndex((current) => upsertIndexEntry(current, {
-      name: 'A',
-      scope: 'project',
-      projectId,
-      projectPath: tmpProject,
-      depository: 'encrypted',
-      ref: `${projectId}/A`,
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
-    }));
-    await setSecret({ name: 'B', value: 'val-b', scope: 'project', depository: 'encrypted', cwd: tmpProject, actor: 'cli' });
-
-    const index = readIndex();
-    const plan = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest() });
-
-    await executeRender(plan, { actor: 'cli', projectId, worktree: tmpProject, resolveValue: async (name) => (name === 'B' ? 'val-b' : 'val-a') });
-
-    const content = readFileSync(join(tmpProject, '.env'), 'utf8');
-    // Env depository block preserved byte-identical.
-    expect(content).toContain(`${ENV_BEGIN_MARKER}\nA=envblock-a\n${ENV_END_MARKER}`);
-    // User line preserved.
-    expect(content.startsWith('USER_LINE=1\n')).toBe(true);
-    // Render block now contains A=val-a (re-resolved) AND B=val-b (new),
-    // in sorted order.
-    expect(content).toContain(`${RENDER_BEGIN_MARKER}\nA=val-a\nB=val-b\n${RENDER_END_MARKER}`);
+  it('keeps CRLF line endings and every byte outside the block', async () => {
+    writeFileSync(envPath(), 'USER_LINE=1\r\nOTHER=2', { mode: 0o600 });
+    await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'a' }) });
+    expect(read()).toBe(`USER_LINE=1\r\nOTHER=2\r\n${RENDER_BEGIN_MARKER}\r\nA=a\r\n${RENDER_END_MARKER}\r\n`);
   });
 
-  it('a second render with the same names is idempotent — same bytes in the file', async () => {
-    await setSecret({ name: 'A', value: 'value-a', scope: 'project', depository: 'encrypted', cwd: tmpProject, actor: 'cli' });
-    await setSecret({ name: 'B', value: 'value-b', scope: 'project', depository: 'encrypted', cwd: tmpProject, actor: 'cli' });
-
-    const { readIndex } = await import('../../../src/core/index-store.js');
-    const index = readIndex();
-    const plan1 = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest() });
-    await executeRender(plan1, { actor: 'cli', projectId, worktree: tmpProject, resolveValue: async (n) => (n === 'A' ? 'value-a' : 'value-b') });
-
-    const firstBytes = readFileSync(join(tmpProject, '.env'), 'utf8');
-    const plan2 = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest() });
-    await executeRender(plan2, { actor: 'cli', projectId, worktree: tmpProject, resolveValue: async (n) => (n === 'A' ? 'value-a' : 'value-b') });
-    const secondBytes = readFileSync(join(tmpProject, '.env'), 'utf8');
-
-    expect(secondBytes).toBe(firstBytes);
+  it('render.enabled=false does nothing', async () => {
+    const outcome = await run({ index: indexOf(entry('A')), manifest: manifestOf({ render: { enabled: false } }) });
+    expect(outcome.disabled).toBe(true);
+    expect(existsSync(envPath())).toBe(false);
+    expect(audits()).toEqual([]);
   });
 
-  it('a name previously rendered with a prompting depository is kept verbatim when its entry still exists in the project scope', async () => {
-    writeFileSync(join(tmpProject, '.env'), `${RENDER_BEGIN_MARKER}\nKC_KEY=${SENTINEL}-preexisting\n${RENDER_END_MARKER}\n`, { mode: 0o600 });
-    const { upsertIndexEntry, mutateIndex, readIndex } = await import('../../../src/core/index-store.js');
-    mutateIndex((current) => upsertIndexEntry(current, {
-      name: 'KC_KEY',
-      scope: 'project',
-      projectId,
-      projectPath: tmpProject,
-      depository: 'keychain',
-      ref: `${projectId}/KC_KEY`,
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
-    }));
-
-    const index = readIndex();
-    const plan = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest() });
-
-    let resolveCalled = false;
-    await executeRender(plan, { actor: 'cli', projectId, worktree: tmpProject, resolveValue: async () => { resolveCalled = true; return 'SHOULD-NOT-RESOLVE'; } });
-
-    expect(resolveCalled).toBe(false);
-    const content = readFileSync(join(tmpProject, '.env'), 'utf8');
-    expect(content).toContain(`KC_KEY=${SENTINEL}-preexisting`);
-  });
-
-  it('a name previously rendered but no longer in the index is dropped from the block (Tech Lead rule #4 second clause)', async () => {
-    writeFileSync(join(tmpProject, '.env'), `${RENDER_BEGIN_MARKER}\nREMOVED=old\n${RENDER_END_MARKER}\n`, { mode: 0o600 });
-    const index = makeIndex([]);
-    const plan = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest() });
-
-    const outcome = await executeRender(plan, { actor: 'cli', projectId, worktree: tmpProject, resolveValue: async () => { throw new Error('not called'); } });
-
-    expect(outcome.removed).toEqual(['REMOVED']);
-    const content = readFileSync(join(tmpProject, '.env'), 'utf8');
-    expect(content).not.toContain('REMOVED');
-    expect(content).toContain(RENDER_BEGIN_MARKER);
-    expect(content).toContain(RENDER_END_MARKER);
-  });
-
-  it('a per-name resolve failure with NO existing line is reported by name; other names still render', async () => {
-    // Set a secret the resolver will reject AND one it accepts.
-    await setSecret({ name: 'GOOD', value: 'good-value', scope: 'project', depository: 'encrypted', cwd: tmpProject, actor: 'cli' });
-    // Add a second entry the resolver will fail on.
-    const { upsertIndexEntry, mutateIndex, readIndex } = await import('../../../src/core/index-store.js');
-    mutateIndex((current) => upsertIndexEntry(current, {
-      name: 'BAD',
-      scope: 'project',
-      projectId,
-      projectPath: tmpProject,
-      depository: 'encrypted',
-      ref: `${projectId}/BAD`,
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
-    }));
-    const index = readIndex();
-    const plan = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest() });
-
-    const outcome = await executeRender(plan, {
-      actor: 'cli',
-      projectId,
-      worktree: tmpProject,
-      resolveValue: async (name) => {
-        if (name === 'GOOD') return 'good-value';
-        throw new Error(`simulated missing value for ${name}`);
-      },
+  describe('[r1.1] AC #3: env-block names are not duplicated into the render block', () => {
+    it('a name in this file\'s env block is left out of the render block and reported by name; the env block is byte-identical', async () => {
+      const original = `USER_LINE=1\n${envBlock('A=envblock-a')}`;
+      writeFileSync(envPath(), original, { mode: 0o600 });
+      const outcome = await run({ index: indexOf(entry('A', 'env'), entry('B')), resolve: fixedValues({ A: 'fresh-a', B: 'fresh-b' }) });
+      expect(read()).toBe(`${original}${block('B=fresh-b')}`);
+      expect(outcome.alreadyInEnvBlock).toEqual(['A']);
+      expect(outcome.rendered).toEqual(['B']);
+      expect(readLedger().targets[0]?.names).toEqual(['B']);
+      expect(audits().map((a) => a.name)).toEqual(['B']);
     });
 
-    expect(outcome.rendered).toEqual(['GOOD']);
-    expect(outcome.failed).toHaveLength(1);
-    expect(outcome.failed[0]?.name).toBe('BAD');
-    expect(outcome.failed[0]?.errorCode).toBe('E_UNKNOWN');
-
-    const content = readFileSync(join(tmpProject, '.env'), 'utf8');
-    expect(content).toContain('GOOD=good-value');
-    expect(content).not.toContain('BAD=');
-  });
-
-  it('a per-name resolve failure WITH an existing line keeps that line verbatim (Tech Lead rule #5)', async () => {
-    writeFileSync(join(tmpProject, '.env'), `${RENDER_BEGIN_MARKER}\nKEY=${SENTINEL}-prior\n${RENDER_END_MARKER}\n`, { mode: 0o600 });
-    const { mutateIndex, upsertIndexEntry, readIndex } = await import('../../../src/core/index-store.js');
-    mutateIndex((current) => upsertIndexEntry(current, {
-      name: 'KEY',
-      scope: 'project',
-      projectId,
-      projectPath: tmpProject,
-      depository: 'encrypted',
-      ref: `${projectId}/KEY`,
-      createdAt: '2026-01-01T00:00:00Z',
-      updatedAt: '2026-01-01T00:00:00Z',
-    }));
-
-    const index = readIndex();
-    const plan = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest() });
-
-    const outcome = await executeRender(plan, {
-      actor: 'cli',
-      projectId,
-      worktree: tmpProject,
-      resolveValue: async () => { throw new Error('simulated resolve failure'); },
+    it('AC #1 still holds: an env-depository secret IS rendered into a target that does not carry it in its env block', async () => {
+      const outcome = await run({ index: indexOf(entry('A', 'env')), resolve: fixedValues({ A: 'from-store' }) });
+      expect(read()).toBe(block('A=from-store'));
+      expect(outcome.alreadyInEnvBlock).toEqual([]);
+      expect(outcome.rendered).toEqual(['A']);
     });
 
-    expect(outcome.failed).toHaveLength(1);
-    expect(outcome.failed[0]?.name).toBe('KEY');
-    expect(outcome.failed[0]?.errorCode).toBe('E_UNKNOWN');
-    expect(outcome.kept).toEqual(['KEY']);
-    const content = readFileSync(join(tmpProject, '.env'), 'utf8');
-    expect(content).toContain(`KEY=${SENTINEL}-prior`);
+    it('a stale render line for a name that is now in the env block is dropped', async () => {
+      writeFileSync(envPath(), `${envBlock('A=envblock-a')}${block('A=stale', 'B=old-b')}`, { mode: 0o600 });
+      const outcome = await run({ index: indexOf(entry('A'), entry('B')), resolve: fixedValues({ A: 'x', B: 'new-b' }) });
+      expect(read()).toBe(`${envBlock('A=envblock-a')}${block('B=new-b')}`);
+      expect(outcome.removed).toEqual(['A']);
+      expect(outcome.alreadyInEnvBlock).toEqual(['A']);
+    });
+
+    it('an explicit render of an env-block name writes nothing for it and says why', async () => {
+      const original = envBlock('A=envblock-a');
+      writeFileSync(envPath(), original, { mode: 0o600 });
+      const outcome = await run({ index: indexOf(entry('A')), explicitName: 'A', resolve: fixedValues({ A: 'x' }) });
+      expect(read()).toBe(original);
+      expect(outcome.alreadyInEnvBlock).toEqual(['A']);
+      expect(outcome.rendered).toEqual([]);
+      expect(outcome.failed).toEqual([]);
+    });
   });
 
-  it('one audit `render` line per rendered name; the sentinel value never appears in stdout, stderr, audit, or ledger', async () => {
-    await setSecret({ name: 'A', value: SENTINEL, scope: 'project', depository: 'encrypted', cwd: tmpProject, actor: 'cli' });
-    const { readIndex } = await import('../../../src/core/index-store.js');
-    const index = readIndex();
-    const plan = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest() });
+  describe('[r1.2] lines already in the block are copied as bytes from the locked read', () => {
+    it('a previously rendered prompting-store line is kept verbatim with no resolve', async () => {
+      const original = block(`KC_KEY=${SENTINEL}-old`);
+      writeFileSync(envPath(), original, { mode: 0o600 });
+      let resolves = 0;
+      const outcome = await run({
+        index: indexOf(entry('KC_KEY', 'keychain')),
+        resolve: async () => { resolves++; return 'nope'; },
+      });
+      expect(resolves).toBe(0);
+      expect(outcome.kept).toEqual(['KC_KEY']);
+      expect(read()).toBe(original);
+      expect(readLedger().targets[0]?.names).toEqual(['KC_KEY']);
+    });
 
-    await executeRender(plan, { actor: 'cli', projectId, worktree: tmpProject, resolveValue: async () => SENTINEL });
+    it('a prompting-store secret never rendered is skipped, and with nothing else to write the file is not created', async () => {
+      const outcome = await run({ index: indexOf(entry('KC_KEY', 'keychain')) });
+      expect(outcome.skipped).toEqual([{ name: 'KC_KEY', reason: 'prompting-store' }]);
+      expect(existsSync(envPath())).toBe(false);
+    });
 
-    const audits = readAudit().filter((a) => a.op === 'render');
-    expect(audits).toHaveLength(1);
-    expect(audits[0]?.name).toBe('A');
-    expect(audits[0]?.ok).toBe(true);
+    it('an explicit render merges: only NAME changes, every other line is byte-identical', async () => {
+      writeFileSync(envPath(), `USER=1\n${block('A=stale-a', 'B=stale-b')}`, { mode: 0o600 });
+      const outcome = await run({ index: indexOf(entry('A'), entry('C')), explicitName: 'C', resolve: fixedValues({ C: 'c-val' }) });
+      expect(read()).toBe(`USER=1\n${block('A=stale-a', 'B=stale-b', 'C=c-val')}`);
+      expect(outcome.rendered).toEqual(['C']);
+      expect(outcome.kept).toEqual(['A', 'B']);
+      expect(readLedger().targets[0]?.names).toEqual(['A', 'B', 'C']);
+    });
 
-    expect(readFileSync(join(tmpProject, '.env'), 'utf8')).toContain(SENTINEL);
-    const auditContent = readFileSync(auditLogPath(), 'utf8');
-    expect(auditContent).not.toContain(SENTINEL);
-
-    const ledger = readLedger();
-    expect(JSON.stringify(ledger)).not.toContain(SENTINEL);
-    expect(ledger.targets[0]?.names).toEqual(['A']);
+    it('an explicit render can render a prompting-store secret', async () => {
+      const outcome = await run({ index: indexOf(entry('KC_KEY', 'keychain')), explicitName: 'KC_KEY', resolve: fixedValues({ KC_KEY: 'kc-val' }) });
+      expect(outcome.rendered).toEqual(['KC_KEY']);
+      expect(read()).toBe(block('KC_KEY=kc-val'));
+    });
   });
 
-  it('updates the ledger: the (projectId, worktree, file, names) row reflects exactly the names in the block', async () => {
-    await setSecret({ name: 'A', value: 'a', scope: 'project', depository: 'encrypted', cwd: tmpProject, actor: 'cli' });
-    await setSecret({ name: 'B', value: 'b', scope: 'project', depository: 'encrypted', cwd: tmpProject, actor: 'cli' });
-    const { readIndex } = await import('../../../src/core/index-store.js');
-    const index = readIndex();
-    const plan = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest() });
-    await executeRender(plan, { actor: 'cli', projectId, worktree: tmpProject, resolveValue: async () => 'v' });
+  describe('[r1.3] validate, resolve, then lock; everything file-derived comes from the locked read', () => {
+    it('the lock is not held while values are being resolved', async () => {
+      let lockFreeDuringResolve = false;
+      await run({
+        index: indexOf(entry('A')),
+        resolve: async () => {
+          const probe = acquireFileLock(renderLockPath(envPath()));
+          probe.release();
+          lockFreeDuringResolve = true;
+          return 'v';
+        },
+      });
+      expect(lockFreeDuringResolve).toBe(true);
+      expect(read()).toBe(block('A=v'));
+    });
 
-    const ledger = readLedger();
-    expect(ledger.targets).toHaveLength(1);
-    expect(ledger.targets[0]?.projectId).toBe(projectId);
-    expect(ledger.targets[0]?.worktree).toBe(tmpProject);
-    expect(ledger.targets[0]?.file).toBe(join(tmpProject, '.env'));
-    expect(ledger.targets[0]?.names).toEqual(['A', 'B']);
+    it('the lock is released afterwards, also after a failed write', async () => {
+      const blocked = join(project, 'blocked');
+      mkdirSync(blocked, { mode: 0o700 });
+      chmodSync(blocked, 0o500);
+      try {
+        await run({ index: indexOf(entry('A')), manifest: manifestOf({ render: { path: 'blocked/.env' } }) });
+        acquireFileLock(renderLockPath(join(blocked, '.env'))).release();
+      } finally {
+        chmodSync(blocked, 0o700);
+      }
+    });
+
+    it('env-block, previous-line and removal decisions use the file as it is when the lock is taken, not as it was at planning time', async () => {
+      const plan = buildRenderPlan({ cwd: project, projectId: PID, worktree: project, index: indexOf(entry('A'), entry('B')), manifest: manifestOf() });
+      // Another writer (e.g. `enigma set --depository env`) changes the file between planning and executing.
+      writeFileSync(envPath(), `${envBlock('A=envblock-a')}${block('STALE=1')}`, { mode: 0o600 });
+      const outcome = await executeRender(plan, { actor: 'cli', projectId: PID, worktree: project, resolveValue: fixedValues({ A: 'a', B: 'b' }) });
+      expect(read()).toBe(`${envBlock('A=envblock-a')}${block('B=b')}`);
+      expect(outcome.alreadyInEnvBlock).toEqual(['A']);
+      expect(outcome.removed).toEqual(['STALE']);
+    });
+
+    it('a previously rendered name whose entry is gone is dropped from the block and the ledger', async () => {
+      writeFileSync(envPath(), `USER=1\n${block('GONE=old', 'A=old-a')}`, { mode: 0o600 });
+      const outcome = await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'new-a' }) });
+      expect(outcome.removed).toEqual(['GONE']);
+      expect(read()).toBe(`USER=1\n${block('A=new-a')}`);
+      expect(readLedger().targets[0]?.names).toEqual(['A']);
+    });
   });
 
-  it('a render of zero names drops the ledger target', async () => {
-    const { upsertTarget } = await import('../../../src/render/ledger.js');
-    upsertTarget({ projectId, worktree: tmpProject, file: join(tmpProject, '.env'), names: ['A'] });
-    expect(readLedger().targets).toHaveLength(1);
+  describe('[r1.5] ledger and audit tell the truth', () => {
+    it('a name that failed and had no previous line is not in the block, not in the ledger, and is audited ok:false', async () => {
+      const outcome = await run({ index: indexOf(entry('GOOD'), entry('BAD')), resolve: fixedValues({ GOOD: 'g' }) });
+      expect(readLedger().targets[0]?.names).toEqual(['GOOD']);
+      expect(read()).toBe(block('GOOD=g'));
+      expect(audits().map((a) => [a.name, a.ok])).toEqual([['GOOD', true], ['BAD', false]]);
+      expect(outcome.rendered).toEqual(['GOOD']);
+      expect(outcome.failed).toEqual([expect.objectContaining({ name: 'BAD', keptPreviousLine: false })]);
+    });
 
-    const plan = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index: makeIndex([]), manifest: makeManifest() });
-    await executeRender(plan, { actor: 'cli', projectId, worktree: tmpProject, resolveValue: async () => { throw new Error('not called'); } });
+    it('a failed name that had a previous line keeps it, is in the ledger, and is audited ok:false', async () => {
+      writeFileSync(envPath(), block('KEY=prior'), { mode: 0o600 });
+      const outcome = await run({ index: indexOf(entry('KEY')), resolve: fixedValues({}) });
+      expect(read()).toBe(block('KEY=prior'));
+      expect(readLedger().targets[0]?.names).toEqual(['KEY']);
+      expect(audits().map((a) => [a.name, a.ok])).toEqual([['KEY', false]]);
+      expect(outcome.failed).toEqual([expect.objectContaining({ name: 'KEY', keptPreviousLine: true })]);
+    });
 
-    expect(readLedger().targets).toHaveLength(0);
+    it('when every name fails and nothing was rendered before, no file and no ledger row appear', async () => {
+      await run({ index: indexOf(entry('BAD')), resolve: fixedValues({}) });
+      expect(existsSync(envPath())).toBe(false);
+      expect(readLedger().targets).toEqual([]);
+    });
+
+    describe('a failed atomic write', () => {
+      let blocked: string;
+      beforeEach(() => {
+        blocked = join(project, 'blocked');
+        mkdirSync(blocked, { mode: 0o700 });
+        chmodSync(blocked, 0o500);
+      });
+      afterEach(() => chmodSync(blocked, 0o700));
+
+      it('leaves the ledger untouched, audits every attempted name ok:false, reports nothing rendered, and sets writeError', async () => {
+        const target = join(blocked, '.env');
+        upsertTarget({ projectId: PID, worktree: project, file: target, names: ['PRE'] });
+        const before = readLedger();
+        const outcome = await run({
+          index: indexOf(entry('A'), entry('B')),
+          manifest: manifestOf({ render: { path: 'blocked/.env' } }),
+          resolve: fixedValues({ A: 'a', B: 'b' }),
+        });
+        expect(readLedger()).toEqual(before);
+        expect(audits().map((a) => [a.name, a.ok])).toEqual([['A', false], ['B', false]]);
+        expect(existsSync(target)).toBe(false);
+        expect(outcome.rendered).toEqual([]);
+        expect(outcome.removed).toEqual([]);
+        expect(outcome.failed.map((f) => [f.name, f.errorCode])).toEqual([['A', 'E_WRITE_FAILED'], ['B', 'E_WRITE_FAILED']]);
+        expect(outcome.writeError).toBe('failed to rewrite the target file (EACCES)');
+      });
+    });
   });
 
-  it('tightens an existing .env whose mode had drifted to 0644 back to 0600', async () => {
-    const envPath = join(tmpProject, '.env');
-    writeFileSync(envPath, 'USER_LINE=1\n', { mode: 0o644 });
-    expect((statSync(envPath).mode & 0o777)).toBe(0o644);
+  describe('[r1.6] failure reasons are static', () => {
+    it('an EnigmaError message carrying a value is never copied into the outcome, the audit log or the ledger', async () => {
+      const resolve: Resolver = async () => {
+        throw new EnigmaError({ code: 'E_NOT_FOUND', message: `lookup failed, secret=${SENTINEL}` });
+      };
+      const outcome = await run({ index: indexOf(entry('A')), resolve });
+      expect(outcome.failed).toEqual([{ name: 'A', errorCode: 'E_NOT_FOUND', reason: 'failed to resolve: not found', keptPreviousLine: false }]);
+      for (const bytes of [JSON.stringify(outcome), read(auditLogPath()), JSON.stringify(readLedger())]) expect(bytes).not.toContain(SENTINEL);
+    });
 
-    await setSecret({ name: 'A', value: 'a', scope: 'project', depository: 'encrypted', cwd: tmpProject, actor: 'cli' });
-    const { readIndex } = await import('../../../src/core/index-store.js');
-    const index = readIndex();
-    const plan = buildRenderPlan({ cwd: tmpProject, projectId, worktree: tmpProject, index, manifest: makeManifest() });
-    await executeRender(plan, { actor: 'cli', projectId, worktree: tmpProject, resolveValue: async () => 'a' });
+    it('a non-Enigma error gets a generic reason and its message is never used', async () => {
+      const outcome = await run({
+        index: indexOf(entry('A')),
+        resolve: async () => { throw new Error(`boom ${SENTINEL}`); },
+      });
+      expect(outcome.failed[0]).toMatchObject({ errorCode: 'E_UNKNOWN', reason: 'failed to resolve: unknown error' });
+      expect(JSON.stringify(outcome)).not.toContain(SENTINEL);
+      expect(read(auditLogPath())).not.toContain(SENTINEL);
+    });
 
-    expect((statSync(envPath).mode & 0o777)).toBe(0o600);
-    chmodSync(envPath, 0o644); // restore for the afterEach cleanup
+    it('an error code without a fixed string gets a generic reason naming the code', async () => {
+      const outcome = await run({
+        index: indexOf(entry('A')),
+        resolve: async () => { throw new EnigmaError({ code: 'E_LOCK_TIMEOUT', message: `secret ${SENTINEL}` }); },
+      });
+      expect(outcome.failed[0]?.reason).toBe('failed to resolve (E_LOCK_TIMEOUT)');
+    });
+
+    it('the value appears in the target file only, never in the audit log or the ledger', async () => {
+      await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: SENTINEL }) });
+      expect(read()).toContain(SENTINEL);
+      expect(read(auditLogPath())).not.toContain(SENTINEL);
+      expect(JSON.stringify(readLedger())).not.toContain(SENTINEL);
+    });
+  });
+
+  describe('[r1.10] empty render set', () => {
+    it('with no existing block, a missing file is not created and no ledger row appears', async () => {
+      const outcome = await run({ index: indexOf() });
+      expect(existsSync(envPath())).toBe(false);
+      expect(outcome.rendered).toEqual([]);
+      expect(readLedger().targets).toEqual([]);
+    });
+
+    it('with no existing block, an existing file is left byte-identical', async () => {
+      const original = 'USER_LINE=1\nNO_TRAILING_NEWLINE=2';
+      writeFileSync(envPath(), original, { mode: 0o600 });
+      await run({ index: indexOf() });
+      expect(read()).toBe(original);
+    });
+
+    it('an existing block that would become empty is removed, markers included, outside bytes preserved, and the ledger row is dropped', async () => {
+      writeFileSync(envPath(), `USER_LINE=1\n${envBlock('E=1')}${block('ONLY=old')}TAIL=2\n`, { mode: 0o600 });
+      upsertTarget({ projectId: PID, worktree: project, file: envPath(), names: ['ONLY'] });
+      const outcome = await run({ index: indexOf() });
+      expect(read()).toBe(`USER_LINE=1\n${envBlock('E=1')}TAIL=2\n`);
+      expect(outcome.removed).toEqual(['ONLY']);
+      expect(readLedger().targets).toEqual([]);
+    });
+
+    it('a block that was the file\'s whole content leaves an empty file', async () => {
+      writeFileSync(envPath(), block('ONLY=old'), { mode: 0o600 });
+      await run({ index: indexOf() });
+      expect(read()).toBe('');
+    });
+  });
+
+  describe('[r1.11] output labels', () => {
+    it('a failed name that kept its previous line is under failed, not kept', async () => {
+      writeFileSync(envPath(), block('KEEP=k-old', 'KEY=prior'), { mode: 0o600 });
+      const outcome = await run({ index: indexOf(entry('KEY'), entry('KEEP', 'keychain')), resolve: fixedValues({}) });
+      expect(outcome.failed.map((f) => f.name)).toEqual(['KEY']);
+      expect(outcome.kept).toEqual(['KEEP']);
+    });
+
+    it('a name narrowed out by render.names that had been rendered appears once, under removed', async () => {
+      writeFileSync(envPath(), block('A=old-a', 'B=old-b'), { mode: 0o600 });
+      const outcome = await run({ index: indexOf(entry('A'), entry('B')), manifest: manifestOf({ render: { names: ['A'] } }), resolve: fixedValues({ A: 'a' }) });
+      expect(outcome.removed).toEqual(['B']);
+      expect(outcome.skipped).toEqual([]);
+      expect(read()).toBe(block('A=a'));
+    });
+
+    it('a name narrowed out that was never rendered appears once, under skipped', async () => {
+      const outcome = await run({ index: indexOf(entry('A'), entry('B')), manifest: manifestOf({ render: { names: ['A'] } }), resolve: fixedValues({ A: 'a' }) });
+      expect(outcome.skipped).toEqual([{ name: 'B', reason: 'narrowed-out' }]);
+      expect(outcome.removed).toEqual([]);
+    });
+  });
+
+  describe('[r1.7] explicit render reports failures', () => {
+    it('a failed explicit render reports the name with a static reason, writes nothing, and leaves rendered empty', async () => {
+      const outcome = await run({ index: indexOf(entry('BAD')), explicitName: 'BAD', resolve: fixedValues({}) });
+      expect(outcome.failed).toEqual([expect.objectContaining({ name: 'BAD', reason: 'failed to resolve: not found' })]);
+      expect(outcome.rendered).toEqual([]);
+      expect(existsSync(envPath())).toBe(false);
+    });
+  });
+});
+
+describe('[r1.8] checkEnvGitignore target parameter', () => {
+  const ignoreDir = (): string => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'enigma-gitignore-')));
+    return dir;
+  };
+
+  it('the default target behaves exactly as before: `.env` covered → no warning; not covered → the `.env` warning; no file → the no-file warning', () => {
+    const dir = ignoreDir();
+    expect(checkEnvGitignore(dir)).toEqual(['.env is not gitignored: no .gitignore file found in this project']);
+    writeFileSync(join(dir, '.gitignore'), 'node_modules\n');
+    expect(checkEnvGitignore(dir)).toEqual(['.env is not gitignored: add .env to .gitignore before committing']);
+    writeFileSync(join(dir, '.gitignore'), '/.env\n');
+    expect(checkEnvGitignore(dir)).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it('a custom target is checked by its own path: covering `.env` does not cover `config/local.env`', () => {
+    const dir = ignoreDir();
+    writeFileSync(join(dir, '.gitignore'), '.env\n');
+    expect(checkEnvGitignore(dir, 'config/local.env')).toEqual(['config/local.env is not gitignored: add config/local.env to .gitignore before committing']);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it.each([
+    ['config/local.env', 'config/local.env'],
+    ['*.env', 'config/local.env'],
+    ['local.env', 'config/local.env'],
+    ['config/', 'config/local.env'],
+    ['**/local.env', 'config/local.env'],
+    ['.env.*', '.env.local'],
+    ['/.env.local', '.env.local'],
+  ])('pattern %s covers %s', (pattern, target) => {
+    const dir = ignoreDir();
+    writeFileSync(join(dir, '.gitignore'), `${pattern}\n`);
+    expect(checkEnvGitignore(dir, target)).toEqual([]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  it.each([
+    ['other/local.env', 'config/local.env'],
+    ['/local.env', 'config/local.env'],
+    ['!config/local.env', 'config/local.env'],
+    ['config/local.env/', 'config/other.env'],
+  ])('pattern %s does not cover %s', (pattern, target) => {
+    const dir = ignoreDir();
+    writeFileSync(join(dir, '.gitignore'), `${pattern}\n`);
+    expect(checkEnvGitignore(dir, target)).toHaveLength(1);
+    rmSync(dir, { recursive: true, force: true });
+  });
+});
+
+describe('[r1.13] cleanups', () => {
+  it.each(['src/storage/depositories/env.ts', 'src/storage/dotenv-file.ts'])('%s ends with a trailing newline', (file) => {
+    const bytes = readFileSync(join(priorCwd, file), 'utf8');
+    expect(bytes.endsWith('\n')).toBe(true);
   });
 });

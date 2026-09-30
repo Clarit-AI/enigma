@@ -7,57 +7,61 @@
  * for-byte, under a per-target lock from Issue #106, with the result
  * reflected in the names-only render ledger (`src/render/ledger.ts`).
  *
- * The split between `buildRenderPlan` and `executeRender` keeps the
- * rendering core names-only by construction — `RenderPlan` carries no
- * values (Tech Lead rule #2), so even if the plan is logged or persisted
- * by a future surface, no value ever lands in it. Values are resolved
- * one name at a time inside `executeRender` via the injected
- * `resolveValue` callback, immediately before they are encoded into a
- * single line of the new block. After the line is on disk, the value
- * variable goes out of scope; nothing in this module retains it.
+ * Split between `buildRenderPlan` (pure and names-only: no file I/O, no
+ * value or line content ever appears in it) and `executeRender` (the I/O
+ * path). The executor runs, in this order:
+ *
+ *   1. resolve values that need resolving (no lock held, so an
+ *      interactive prompt can never block another renderer),
+ *   2. take the per-target lock (`renderLockPath(file)`),
+ *   3. re-check the target is not a symlink, then read it ONCE,
+ *   4. derive keep / remove / env-block-dedupe from THAT content,
+ *   5. build the block, write atomically,
+ *   6. only after the write result is known: update the ledger, audit,
+ *   7. release the lock in `finally`.
+ *
+ * Rules:
+ *
+ *  - Target path: relative to the worktree, no `..`, parent must exist
+ *    and resolve inside the worktree; a target that is itself a symlink
+ *    is refused (never read through, never replaced). Validated in
+ *    `buildRenderPlan`, i.e. before any read, and re-checked under the
+ *    lock. All refusals are `E_WRITE_FAILED`.
+ *  - AC #3: a name that appears in THIS target file's env-depository
+ *    block (`# enigma:begin` / `# enigma:end`) is never written into the
+ *    render block; it is reported by name as "already in the env block".
+ *  - Plain render set: project-scope entries of this repo whose
+ *    depository prompt profile is `none` (`encrypted`, `env`), narrowed
+ *    by `render.names`. Global entries are out of scope. A project entry
+ *    in a prompting store is rendered only explicitly
+ *    (`enigma render NAME`); once its line is in the block, a plain
+ *    render keeps that line as bytes and never re-resolves it.
+ *  - Lines already in the block are copied as bytes from the file read
+ *    under the lock; the plan never holds them.
+ *  - Explicit `enigma render NAME` merges: only NAME's line is added or
+ *    updated; every other line in the block stays byte-identical.
+ *  - A failed resolve keeps the name's previous line when there is one
+ *    (reported under Failed, "kept previous line"), else the name is
+ *    simply absent. Other names still render.
+ *  - Failure reasons are STATIC: an error's `message` is never copied
+ *    into the outcome, stdout, stderr or the audit log.
+ *  - Nothing to write and no existing block: the file is not touched. An
+ *    existing block that would become empty is removed (markers
+ *    included, outside bytes preserved).
+ *  - Ledger names = exactly the names in the block that was written. On
+ *    a failed write the ledger is unchanged and every attempted name is
+ *    audited `ok: false`.
  *
  * Wiring outside `src/mcp/**` and `src/web/**` (ADR-001, leak-fence).
  * The `resolveValue` callback in production is `resolveSecret` from
- * `src/storage/manager.ts`, which is the sanctioned resolve path
- * (`enigma:leak-fence-allow` on that file). Tests inject a stub
- * `resolveValue` to assert the sentinel stays in the file only.
- *
- * Decisions of record (Issue #107 settled design + the 9 plan-binding
- * rules from the Tech Lead):
- *
- * - Render set (plain `enigma render`): project-scoped entries for this
- *   repo whose depository's prompt profile is `none` (`encrypted`,
- *   `env`). Global entries are excluded. `render.names` narrows.
- * - Explicit `enigma render NAME`: MERGES — adds/updates only NAME's
- *   line, leaves every other line byte-identical.
- * - A previously-rendered line whose entry is now in a PROMPTING
- *   depository (keychain/secret-service/1password) is KEPT verbatim and
- *   NOT re-resolved on a later plain render — the prompt is a
- *   per-intent human interaction, not a refresh on every CLI call.
- * - A previously-rendered line whose entry has been removed, demoted to
- *   global, or excluded by `render.names` / `render.enabled` is DROPPED
- *   from the block on the next plain render.
- * - A failed resolve: if the block already has a line for that name,
- *   keep that line verbatim. Report by name with a static reason. Other
- *   names still render. Exit non-zero.
- * - Block appended at EOF, after any existing env block. The file's EOL
- *   style and trailing newline are preserved.
- * - The target path is always resolved relative to the worktree root
- *   that drives `computeProjectId` (the `worktree` arg). Absolute paths
- *   are refused. Lexical escapes (`..`) are refused. A parent dir whose
- *   realpath is outside the worktree's realpath is refused (symlink
- *   escape). A missing parent dir is refused; we never create dirs in
- *   the user's worktree.
- * - Audit: one `render` line per name, names only, with the worktree
- *   path attributed via `auditScopeFields`. Per-name failures audit
- *   `ok: false` with a static, value-free reason.
+ * `src/storage/manager.ts`, the sanctioned resolve path.
  */
-import { chmodSync, existsSync, readFileSync, realpathSync, statSync } from 'node:fs';
-import { dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
-import { appendAuditEvent, auditErrorText, auditScopeFields } from '../core/audit.js';
+import { chmodSync, existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
+import { dirname, isAbsolute, relative, resolve, sep } from 'node:path';
+import { appendAuditEvent, auditScopeFields } from '../core/audit.js';
 import type { AuditActor } from '../core/audit.js';
 import { acquireFileLock } from '../core/file-lock.js';
-import { EnigmaError } from '../core/errors.js';
+import { EnigmaError, type EnigmaErrorCode } from '../core/errors.js';
 import { renderLockPath } from '../core/paths.js';
 import { writeFileAtomic } from '../core/secure-file.js';
 import type { IndexFile } from '../core/index-store.js';
@@ -65,73 +69,96 @@ import type { ProjectManifest } from '../core/config.js';
 import type { DepositoryId, PromptProfile } from '../storage/interfaces.js';
 import { DEPOSITORY_MODULES } from '../storage/detect.js';
 import { replaceTarget } from './ledger.js';
-import { RENDER_BEGIN_MARKER, RENDER_END_MARKER, encodeValue, readManagedBlockLines, writeManagedBlock } from '../storage/dotenv-file.js';
+import {
+  RENDER_BEGIN_MARKER,
+  RENDER_END_MARKER,
+  ENV_BEGIN_MARKER,
+  ENV_END_MARKER,
+  detectEol,
+  encodeValue,
+  findBlock,
+  readManagedBlockLines,
+  writeManagedBlock,
+} from '../storage/dotenv-file.js';
+import type { BlockMarkers } from '../storage/dotenv-file.js';
 
-const RENDER_BLOCK_MARKERS = { begin: RENDER_BEGIN_MARKER, end: RENDER_END_MARKER } as const;
+const RENDER_BLOCK_MARKERS: BlockMarkers = { begin: RENDER_BEGIN_MARKER, end: RENDER_END_MARKER };
+const ENV_BLOCK_MARKERS: BlockMarkers = { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER };
 const FILE_MODE = 0o600;
 const DEFAULT_RENDER_PATH = '.env';
 const PATH_TRAVERSAL_SEGMENT_RE = /(^|[/\\])\.\.([/\\]|$)/;
 
 /* ----------------------------- types ------------------------------- */
 
-/**
- * One name's status in the build-time plan. The plan carries no values:
- * a `value` field does not exist here, so even a serialised plan can
- * never reach a secret's bytes (Tech Lead rule #2). A `keptLine` is the
- * raw `NAME=encoded-value` text already in the file, copied verbatim —
- * it is opaque bytes, never parsed to a value here.
- */
-export type RenderNameStatus =
-  | { kind: 'render'; name: string; depository: DepositoryId }
-  | { kind: 'keep-prompting'; name: string; depository: DepositoryId; line: string }
-  | { kind: 'keep-failed'; name: string; depository: DepositoryId; line: string; errorCode: string; message: string }
-  | { kind: 'skipped-global'; name: string }
-  | { kind: 'skipped-manifest-narrowing'; name: string }
-  | { kind: 'skipped-prompting-auto'; name: string; depository: DepositoryId }
-  | { kind: 'skipped-not-in-index'; name: string }
-  | { kind: 'failed'; name: string; depository: DepositoryId; errorCode: string; message: string };
-
-/** A name that needs a fresh value resolved before the block is written. */
-export interface RenderToWrite {
+/** A project entry the renderer may act on: name and depository only. */
+export interface RenderEntryRef {
   name: string;
   depository: DepositoryId;
 }
 
-/** A name whose existing block line is copied verbatim (no prompt, no re-resolve). */
-export interface RenderToKeep {
-  name: string;
-  /** Raw `NAME=encoded-value` line as it appears in the existing block — bytes only. */
-  line: string;
-}
-
 /**
- * One render pass: who to render, who to keep, who to drop, and where the
- * output goes. The plan is NAMES-ONLY; a value never enters this object.
- * `previousRenderedNames` is the ledger's view of what was in the block
- * last time, used to detect "previously rendered, now dropped" cases.
+ * One render pass, NAMES ONLY. No value and no line content can be in
+ * here, so even a serialised plan can never reach a secret's bytes. Which
+ * previously-rendered lines are kept, dropped or skipped is decided in
+ * `executeRender` from the file content read under the lock.
  */
 export interface RenderPlan {
   enabled: boolean;
-  /** Absolute worktree root the target file lives under. */
   worktree: string;
-  /** Absolute path of the target file (e.g. `<worktree>/.env`). */
+  /** Validated absolute target path. */
   file: string;
-  /** True when the target file did not exist before this render — used by executeRender to set initial mode. */
-  fileIsNew: boolean;
-  /** Names in scope for this render, in the order they will appear in the block. */
-  finalNames: string[];
-  /** Names whose line must be freshly encoded (one resolveValue call each). */
-  toWrite: RenderToWrite[];
-  /** Existing lines copied verbatim. */
-  toKeep: RenderToKeep[];
-  /** Names to drop (in the previous ledger but not in `finalNames`). */
-  toRemove: string[];
-  /** Per-name outcome for stdout. The renderer iterates this directly. */
-  perName: RenderNameStatus[];
-  /** Warnings to surface (e.g. `checkEnvGitignore`). Never a value. */
-  warnings: string[];
-  /** True when the plan was built for an explicit `enigma render NAME`. */
   explicit: boolean;
+  warnings: string[];
+  /** Names to resolve to a fresh value (auto-eligible entries, or the explicit NAME). */
+  toResolve: RenderEntryRef[];
+  /** Plain mode only: prompting-store project entries. Kept if the block already has their line, else skipped. */
+  promptingStore: RenderEntryRef[];
+  /** Plain mode only: project entries excluded by `.enigma.json` `render.names`. */
+  narrowedOut: string[];
+}
+
+export interface RenderFailure {
+  name: string;
+  /** An `EnigmaErrorCode`, `E_UNKNOWN` for a non-Enigma error. */
+  errorCode: string;
+  /** Static text chosen by the renderer; never an error's message. */
+  reason: string;
+  keptPreviousLine: boolean;
+}
+
+export interface RenderSkip {
+  name: string;
+  reason: 'prompting-store' | 'narrowed-out';
+}
+
+export interface RenderOutcome {
+  /** Names whose freshly resolved line is in the block that was written. */
+  rendered: string[];
+  /** Names whose existing line was copied as bytes without a resolve (prompting store, or an explicit render's other lines). */
+  kept: string[];
+  /** Names that were in the block and are not any more. */
+  removed: string[];
+  /** Per-name failures: a resolve error, or the write failing. */
+  failed: RenderFailure[];
+  /** Names that would have been rendered but are in this file's env-depository block. */
+  alreadyInEnvBlock: string[];
+  /** Names deliberately left out of the block, with why. */
+  skipped: RenderSkip[];
+  warnings: string[];
+  /** True when `render.enabled: false` short-circuited the pass. */
+  disabled: boolean;
+  /** Set iff the atomic write failed: static text (plus the errno code when known). */
+  writeError?: string;
+  /** The resolved target file path. */
+  file: string;
+}
+
+export interface ExecuteRenderOptions {
+  actor: AuditActor;
+  projectId: string;
+  worktree: string;
+  /** Resolves one name's value. Called BEFORE the lock is taken, so a prompt never holds it. */
+  resolveValue: (name: string, depository: DepositoryId) => Promise<string>;
 }
 
 /* ----------------------------- helpers ----------------------------- */
@@ -140,82 +167,75 @@ const PROMPT_PROFILE_BY_DEPOSITORY = new Map<DepositoryId, PromptProfile>(
   DEPOSITORY_MODULES.map((m) => [m.id, m.promptProfile]),
 );
 
-function promptProfileFor(depository: DepositoryId): PromptProfile | undefined {
-  return PROMPT_PROFILE_BY_DEPOSITORY.get(depository);
-}
-
-/** Strip a `NAME=…` line to the bare name. Used to map a kept line to its index name. */
+/** Bare name of a `NAME=…` block line, or undefined when it is not an assignment. */
 function nameFromLine(line: string): string | undefined {
   const eq = line.indexOf('=');
-  if (eq <= 0) return undefined;
-  return line.slice(0, eq);
+  return eq > 0 ? line.slice(0, eq) : undefined;
+}
+
+/** Map of name → raw line for every assignment in one managed block. */
+function blockLinesByName(content: string, markers: BlockMarkers): Map<string, string> {
+  const out = new Map<string, string>();
+  for (const line of readManagedBlockLines(content, markers)) {
+    const name = nameFromLine(line);
+    if (name !== undefined) out.set(name, line);
+  }
+  return out;
+}
+
+function writeRefusal(message: string): EnigmaError {
+  return new EnigmaError({ code: 'E_WRITE_FAILED', message });
+}
+
+/** Refuse a target that is itself a symlink. `lstat`, never `stat`: never read through it, never replace it. */
+function assertNotSymlink(file: string): void {
+  let isLink: boolean;
+  try {
+    isLink = lstatSync(file).isSymbolicLink();
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    throw writeRefusal(`cannot inspect render.path target: ${(err as NodeJS.ErrnoException).code ?? 'unknown error'}`);
+  }
+  if (isLink) throw writeRefusal('render.path target is a symlink; refusing to read through or replace it');
 }
 
 /**
- * Validate `renderPath` against the worktree. Tech Lead rule #7:
- * - absolute → E_WRITE_FAILED.
- * - lexical escape (`..` segment) → E_WRITE_FAILED.
- * - parent dir missing → E_WRITE_FAILED.
- * - parent dir's realpath outside worktree realpath → E_WRITE_FAILED.
- *
- * Names-only messages, never echoing the path back through to a leaky
- * surface (the path is internal but its message is also names-only by
- * project convention).
+ * Validate `renderPath` against the worktree and return the absolute
+ * target. Runs before anything is read. Messages name the problem only.
  */
-function resolveRenderTarget(worktree: string, renderPath: string): { file: string; exists: boolean } {
+function resolveRenderTarget(worktree: string, renderPath: string): string {
   if (isAbsolute(renderPath)) {
-    throw new EnigmaError({
-      code: 'E_WRITE_FAILED',
-      message: `render.path must be relative to the worktree; absolute paths are refused`,
-    });
+    throw writeRefusal('render.path must be relative to the worktree; absolute paths are refused');
   }
   if (PATH_TRAVERSAL_SEGMENT_RE.test(renderPath)) {
-    throw new EnigmaError({
-      code: 'E_WRITE_FAILED',
-      message: `render.path must not contain a parent-directory traversal segment`,
-    });
+    throw writeRefusal('render.path must not contain a parent-directory traversal segment');
   }
   const file = resolve(worktree, renderPath);
   const parentDir = dirname(file);
   if (!existsSync(parentDir)) {
-    throw new EnigmaError({
-      code: 'E_WRITE_FAILED',
-      message: `render.path target parent directory does not exist; Enigma never creates directories in the user's worktree`,
-    });
+    throw writeRefusal("render.path target parent directory does not exist; Enigma never creates directories in the user's worktree");
   }
-  // Symlink escape: realpath of parent must be within realpath of worktree.
   let realWorktree: string;
   let realParent: string;
   try {
     realWorktree = realpathSync(worktree);
     realParent = realpathSync(parentDir);
   } catch (err) {
-    throw new EnigmaError({
-      code: 'E_WRITE_FAILED',
-      message: `cannot resolve render.path: ${err instanceof Error ? err.constructor.name : String(err)}`,
-    });
+    throw writeRefusal(`cannot resolve render.path: ${(err as NodeJS.ErrnoException).code ?? 'unknown error'}`);
   }
   const rel = relative(realWorktree, realParent);
   if (rel.startsWith(`..${sep}`) || rel === '..' || isAbsolute(rel)) {
-    throw new EnigmaError({
-      code: 'E_WRITE_FAILED',
-      message: `render.path resolves outside the worktree via a symlinked parent directory`,
-    });
+    throw writeRefusal('render.path resolves outside the worktree via a symlinked parent directory');
   }
-  return { file, exists: existsSync(file) };
+  assertNotSymlink(file);
+  return file;
 }
 
 /* ----------------------------- planning ---------------------------- */
 
 /**
- * Build a render plan (NAMES-ONLY) without touching a depository or the
- * filesystem beyond the caller's already-loaded inputs. The function is
- * pure: deterministic for a given `(index, manifest, cwd, explicitName)`
- * tuple, and it returns every per-name decision the executor will later
- * carry out. Values never enter the plan.
- *
- * Tech Lead rule #2: no `value` field on the plan. The function does
- * not read, echo, or otherwise surface any secret material.
+ * Build a render plan (NAMES ONLY) from the index and manifest. Validates
+ * `render.path` first; performs no read of the target file.
  */
 export function buildRenderPlan(opts: {
   cwd: string;
@@ -227,45 +247,25 @@ export function buildRenderPlan(opts: {
 }): RenderPlan {
   const { projectId, worktree, index, manifest, explicitName } = opts;
   const renderOverride = manifest.render;
-  const enabled = renderOverride?.enabled !== false; // default true
-  const renderPath = renderOverride?.path ?? DEFAULT_RENDER_PATH;
-  const narrowing = renderOverride?.names !== undefined ? new Set(renderOverride.names) : undefined;
+  const enabled = renderOverride?.enabled !== false;
+  const file = resolveRenderTarget(worktree, renderOverride?.path ?? DEFAULT_RENDER_PATH);
 
-  // Existing block (raw lines) — used to decide keep-vs-rewrite.
-  const existingContent = existsSync(join(worktree, renderPath)) ? readFileSync(join(worktree, renderPath), 'utf8') : '';
-  const existingLines = readManagedBlockLines(existingContent, RENDER_BLOCK_MARKERS);
-  const existingByName = new Map<string, string>();
-  for (const line of existingLines) {
-    const name = nameFromLine(line);
-    if (name !== undefined) existingByName.set(name, line);
-  }
+  const plan: RenderPlan = {
+    enabled,
+    worktree,
+    file,
+    explicit: explicitName !== undefined,
+    warnings: [],
+    toResolve: [],
+    promptingStore: [],
+    narrowedOut: [],
+  };
+  if (!enabled) return plan;
 
-  const fileResolution = resolveRenderTarget(worktree, renderPath);
+  const projectEntries = index.entries.filter((e) => e.scope === 'project' && e.projectId === projectId);
 
-  const warnings: string[] = [];
-
-  if (!enabled) {
-    return {
-      enabled: false,
-      worktree,
-      file: fileResolution.file,
-      fileIsNew: !fileResolution.exists,
-      finalNames: [],
-      toWrite: [],
-      toKeep: [],
-      toRemove: [...existingByName.keys()],
-      perName: [],
-      warnings,
-      explicit: Boolean(explicitName),
-    };
-  }
-
-  /* -- explicit `enigma render NAME` path -- */
   if (explicitName !== undefined) {
-    // Look up the name in the index, scoped to project for this repo.
-    const entry = index.entries.find(
-      (e) => e.name === explicitName && e.scope === 'project' && e.projectId === projectId,
-    );
+    const entry = projectEntries.find((e) => e.name === explicitName);
     if (!entry) {
       throw new EnigmaError({
         code: 'E_NOT_FOUND',
@@ -273,128 +273,75 @@ export function buildRenderPlan(opts: {
         secretName: explicitName,
       });
     }
-    const toWrite: RenderToWrite[] = [{ name: entry.name, depository: entry.depository }];
-    const toKeep: RenderToKeep[] = [];
-    const finalNames = new Set<string>(existingByName.keys());
-    finalNames.add(entry.name);
-    for (const otherName of existingByName.keys()) {
-      if (otherName === entry.name) continue;
-      const line = existingByName.get(otherName)!;
-      toKeep.push({ name: otherName, line });
-    }
-    return {
-      enabled: true,
-      worktree,
-      file: fileResolution.file,
-      fileIsNew: !fileResolution.exists,
-      finalNames: [...finalNames].sort(),
-      toWrite,
-      toKeep,
-      toRemove: [],
-      perName: [{ kind: 'render', name: entry.name, depository: entry.depository }],
-      warnings,
-      explicit: true,
-    };
+    plan.toResolve.push({ name: entry.name, depository: entry.depository });
+    return plan;
   }
 
-  /* -- plain `enigma render` (auto-set) path -- */
-  const toWrite: RenderToWrite[] = [];
-  const toKeep: RenderToKeep[] = [];
-  const finalNames = new Set<string>();
-  const perName: RenderNameStatus[] = [];
-  const eligibleForAuto = new Set<string>();
-
-  // Walk the index in declaration order. The render set is project-scoped
-  // entries with a `none`-prompt depository, narrowed by `render.names`.
-  for (const entry of index.entries) {
-    if (entry.scope !== 'project') {
-      if (entry.scope === 'global') perName.push({ kind: 'skipped-global', name: entry.name });
-      continue;
-    }
-    if (entry.projectId !== projectId) continue;
+  const narrowing = renderOverride?.names !== undefined ? new Set(renderOverride.names) : undefined;
+  for (const entry of projectEntries) {
     if (narrowing && !narrowing.has(entry.name)) {
-      perName.push({ kind: 'skipped-manifest-narrowing', name: entry.name });
+      plan.narrowedOut.push(entry.name);
       continue;
     }
-    const profile = promptProfileFor(entry.depository);
+    const profile = PROMPT_PROFILE_BY_DEPOSITORY.get(entry.depository);
     if (profile === undefined) continue;
-    if (profile !== 'none') {
-      // Prompting-store project entry: never re-resolved on plain render.
-      // If it was previously rendered (existing block), keep verbatim.
-      if (existingByName.has(entry.name)) {
-        const line = existingByName.get(entry.name)!;
-        toKeep.push({ name: entry.name, line });
-        finalNames.add(entry.name);
-        perName.push({ kind: 'keep-prompting', name: entry.name, depository: entry.depository, line });
-      } else {
-        perName.push({ kind: 'skipped-prompting-auto', name: entry.name, depository: entry.depository });
-      }
-      continue;
-    }
-    eligibleForAuto.add(entry.name);
-    toWrite.push({ name: entry.name, depository: entry.depository });
-    finalNames.add(entry.name);
-    perName.push({ kind: 'render', name: entry.name, depository: entry.depository });
+    const ref = { name: entry.name, depository: entry.depository };
+    if (profile === 'none') plan.toResolve.push(ref);
+    else plan.promptingStore.push(ref);
   }
+  return plan;
+}
 
-  // Drop names that were previously in the block but no longer match
-  // any current criteria (entry removed, demoted to global, narrowed out,
-  // or now in a prompting depository but not previously rendered). Tech
-  // Lead rule #4: "Otherwise drop it."
-  const toRemove: string[] = [];
-  for (const prevName of existingByName.keys()) {
-    if (finalNames.has(prevName)) continue;
-    toRemove.push(prevName);
-  }
+/* ----------------------------- static reasons ----------------------- */
 
-  return {
-    enabled: true,
-    worktree,
-    file: fileResolution.file,
-    fileIsNew: !fileResolution.exists,
-    finalNames: [...finalNames].sort(),
-    toWrite,
-    toKeep,
-    toRemove,
-    perName,
-    warnings,
-    explicit: false,
-  };
+/**
+ * Never copy an error's `message`: each known code maps to a fixed
+ * string; an unknown code gets a generic reason that names the code.
+ */
+const STATIC_REASONS: Partial<Record<EnigmaErrorCode, string>> = {
+  E_NOT_FOUND: 'failed to resolve: not found',
+  E_DEPOSITORY_UNAVAILABLE: 'failed to resolve: depository unavailable',
+  E_READ_FAILED: 'failed to resolve: read failed',
+  E_VALUE_TOO_LARGE: 'failed to resolve: value too large for this depository',
+  E_REF_INVALID: 'failed to resolve: ref invalid',
+  E_VAULT_MISSING: 'failed to resolve: vault missing',
+  E_VAULT_CORRUPT: 'failed to resolve: vault corrupt',
+  E_WRITE_FAILED: 'failed to rewrite the target file',
+};
+const UNKNOWN_ERROR_CODE = 'E_UNKNOWN';
+
+function staticReasonFor(code: string): string {
+  if (code === UNKNOWN_ERROR_CODE) return 'failed to resolve: unknown error';
+  return STATIC_REASONS[code as EnigmaErrorCode] ?? `failed to resolve (${code})`;
+}
+
+/** Static text for a failed atomic write: the errno code when the message carries one, never the message. */
+function staticWriteError(message: string | undefined): string {
+  const code = message?.match(/^(E[A-Z0-9]+):/)?.[1];
+  return code ? `failed to rewrite the target file (${code})` : 'failed to rewrite the target file';
 }
 
 /* ----------------------------- execution --------------------------- */
 
-/** Per-name outcome from the executor — same shape as the perName status, but post-execution. */
-export interface RenderOutcome {
-  rendered: string[];
-  kept: string[];
-  removed: string[];
-  failed: Array<{ name: string; errorCode: string; message: string }>;
-  warnings: string[];
-  /** True when `render.enabled: false` short-circuited the pass. */
-  disabled: boolean;
-  /** True when an atomic write failure occurred (the executor reports and exits non-zero). */
-  writeError?: string;
+/**
+ * Drop the render block (markers included), leaving every other byte in
+ * place. `writeManagedBlock` appends the block at EOF, so the usual case
+ * is the block as the file's tail.
+ */
+function stripRenderBlock(content: string): string {
+  const eol = detectEol(content);
+  const lines = content.split(eol);
+  const block = findBlock(lines, RENDER_BLOCK_MARKERS);
+  if (!block) return content;
+  return [...lines.slice(0, block.beginIdx), ...lines.slice(block.endIdx + 1)].join(eol);
 }
 
-export interface ExecuteRenderOptions {
-  actor: AuditActor;
-  projectId: string;
-  worktree: string;
-  /** Resolves a single name's value. Called once per `toWrite` entry, immediately before its line is built. */
-  resolveValue: (name: string, depository: DepositoryId) => Promise<string>;
-}
+type ResolveResult = { ok: true; value: string } | { ok: false; code: string };
 
 /**
- * Apply a render plan to disk under the per-target lock from Issue #106.
- * Resolves values one at a time (never batched — a per-name failure does
- * not abort the others, Tech Lead rule #5 / #8). Audits one `render`
- * line per name with `ok: true|false` and the static, value-free reason.
- *
- * Returns the structured outcome (used by the CLI to render
- * rendered/kept/skipped/failed sections). Never throws on per-name
- * failures; only lock / I/O / atomic-write / structural errors throw
- * (caller maps them to exit codes).
+ * Apply a render plan to disk. See the header for the order of work.
+ * Throws only for structural refusals (target became a symlink, lock
+ * failure, unreadable target); per-name and write failures are outcomes.
  */
 export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions): Promise<RenderOutcome> {
   const outcome: RenderOutcome = {
@@ -402,161 +349,153 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
     kept: [],
     removed: [],
     failed: [],
+    alreadyInEnvBlock: [],
+    skipped: [],
     warnings: [...plan.warnings],
     disabled: false,
+    file: plan.file,
   };
-
   if (!plan.enabled) {
     outcome.disabled = true;
     return outcome;
   }
 
-  // Acquire the per-target lock from Issue #106.
+  // 1. Resolve BEFORE the lock. Values live only in this local map: they
+  //    are encoded into a block line below and never returned or stored.
+  const resolved = new Map<string, ResolveResult>();
+  for (const item of plan.toResolve) {
+    try {
+      resolved.set(item.name, { ok: true, value: await opts.resolveValue(item.name, item.depository) });
+    } catch (err) {
+      resolved.set(item.name, { ok: false, code: err instanceof EnigmaError ? err.code : UNKNOWN_ERROR_CODE });
+    }
+  }
+  const depositoryOf = new Map(plan.toResolve.map((t) => [t.name, t.depository] as const));
+
+  // 2. Lock.
   const lock = acquireFileLock(renderLockPath(plan.file));
   try {
-    const currentContent = existsSync(plan.file) ? readFileSync(plan.file, 'utf8') : '';
-    // Resolve fresh values for `toWrite` entries. Failures are captured
-    // per-name, others proceed (Tech Lead rule #5).
-    const freshLines = new Map<string, string>();
-    for (const item of plan.toWrite) {
-      try {
-        const value = await opts.resolveValue(item.name, item.depository);
-        const encoded = encodeValue(value);
-        freshLines.set(item.name, `${item.name}=${encoded}`);
-        outcome.rendered.push(item.name);
-      } catch (err) {
-        const errorCode = err instanceof EnigmaError ? err.code : 'E_UNKNOWN';
-        const message = err instanceof EnigmaError ? err.message : err instanceof Error ? err.constructor.name : 'UnknownError';
-        // If the existing block already has a line for this name, keep
-        // that line verbatim — it's bytes we already wrote, never
-        // parsed here as a value (Tech Lead rule #5).
-        const existing = readManagedBlockLines(currentContent, RENDER_BLOCK_MARKERS).find((l) => nameFromLine(l) === item.name);
-        if (existing !== undefined) {
-          outcome.kept.push(item.name);
-          // We must surface this as a per-name failure too — but the
-          // line in the block stays as-is. The plan's `perName` already
-          // classified the name as 'render'; we update by tracking the
-          // existing line in the body list. Use the kept-line path.
-          freshLines.set(item.name, existing);
-          // Record as a soft failure so the CLI can exit non-zero.
-          outcome.failed.push({ name: item.name, errorCode, message });
-          // Audit `ok: false` (the failure is real and must be logged).
-          appendAuditEvent({
-            op: 'render',
-            name: item.name,
-            depository: item.depository,
-            actor: opts.actor,
-            ok: false,
-            error: auditErrorText(err),
-            ...auditScopeFields({ scope: 'project', projectId: opts.projectId, projectPath: plan.worktree }),
-          });
-          continue;
-        }
-        outcome.failed.push({ name: item.name, errorCode, message });
-        // Audit `ok: false` even though there's nothing to write —
-        // the attempt happened and was refused (Tech Lead rule #5 / #8).
-        appendAuditEvent({
-          op: 'render',
-          name: item.name,
-          depository: item.depository,
-          actor: opts.actor,
-          ok: false,
-          error: auditErrorText(err),
-          ...auditScopeFields({ scope: 'project', projectId: opts.projectId, projectPath: plan.worktree }),
-        });
-        continue;
+    // 3. Re-check the symlink refusal under the lock (the path could have
+    //    changed since validation), then read once.
+    assertNotSymlink(plan.file);
+    const current = existsSync(plan.file) ? readFileSync(plan.file, 'utf8') : '';
+
+    // 4. Everything file-derived comes from `current`.
+    const envBlockNames = new Set(blockLinesByName(current, ENV_BLOCK_MARKERS).keys());
+    const existing = blockLinesByName(current, RENDER_BLOCK_MARKERS);
+    const hasExistingBlock = findBlock(current.split(detectEol(current)), RENDER_BLOCK_MARKERS) !== undefined;
+
+    /** name → raw block line, for the block about to be written. */
+    const finalLines = new Map<string, string>();
+    /** Names with a fresh value in `finalLines`. */
+    const freshNames = new Set<string>();
+    /** Names whose resolve failed (audit + Failed section). */
+    const resolveFailures: Array<{ name: string; code: string }> = [];
+
+    if (plan.explicit) {
+      // Merge: every existing line stays as bytes; only NAME changes.
+      for (const [name, line] of existing) finalLines.set(name, line);
+    } else {
+      for (const ref of plan.promptingStore) {
+        const line = existing.get(ref.name);
+        if (line !== undefined) finalLines.set(ref.name, line);
+        else outcome.skipped.push({ name: ref.name, reason: 'prompting-store' });
       }
-      // Audit `ok: true` for the successful resolve.
-      appendAuditEvent({
-        op: 'render',
-        name: item.name,
-        depository: item.depository,
-        actor: opts.actor,
-        ok: true,
-        error: null,
-        ...auditScopeFields({ scope: 'project', projectId: opts.projectId, projectPath: plan.worktree }),
-      });
+    }
+    for (const item of plan.toResolve) {
+      const result = resolved.get(item.name)!;
+      if (envBlockNames.has(item.name)) continue; // AC #3, handled below
+      if (result.ok) {
+        finalLines.set(item.name, `${item.name}=${encodeValue(result.value)}`);
+        freshNames.add(item.name);
+      } else {
+        resolveFailures.push({ name: item.name, code: result.code });
+        // Previous line, if any, survives: in explicit mode it is already
+        // in `finalLines`; in plain mode copy it from `existing`.
+        const previous = existing.get(item.name);
+        if (previous !== undefined) finalLines.set(item.name, previous);
+      }
+    }
+    // AC #3: nothing that is in this file's env block is ever in the render block.
+    for (const name of envBlockNames) {
+      if (finalLines.delete(name) || plan.toResolve.some((t) => t.name === name)) {
+        outcome.alreadyInEnvBlock.push(name);
+      }
+    }
+    for (const name of plan.narrowedOut) {
+      if (!existing.has(name)) outcome.skipped.push({ name, reason: 'narrowed-out' });
     }
 
-    // Build the new block body in name-sorted order. For each name in
-    // `finalNames`, prefer a freshly-encoded line; otherwise fall back
-    // to a kept line (byte-identical).
-    const bodyLines: string[] = [];
-    const usedNames = new Set<string>();
-    for (const name of plan.finalNames) {
-      const fresh = freshLines.get(name);
-      const keepLine = plan.toKeep.find((k) => k.name === name)?.line;
-      const line = fresh ?? keepLine;
-      if (line !== undefined) {
-        bodyLines.push(line);
-        usedNames.add(name);
-        if (fresh !== undefined && keepLine === undefined) {
-          // newly rendered
-        } else if (keepLine !== undefined && fresh === undefined) {
-          outcome.kept.push(name);
+    // 5. Build the next content.
+    const bodyNames = [...finalLines.keys()].sort((a, b) => a.localeCompare(b));
+    let next: string | undefined;
+    if (bodyNames.length > 0) next = writeManagedBlock(current, bodyNames.map((n) => finalLines.get(n)!), RENDER_BLOCK_MARKERS);
+    else if (hasExistingBlock) next = stripRenderBlock(current);
+    // else: nothing to write and nothing to strip: the file is not touched.
+
+    let writeOk = true;
+    if (next !== undefined) {
+      const result = writeFileAtomic(plan.file, next, FILE_MODE);
+      writeOk = result.ok;
+      if (!result.ok) {
+        outcome.writeError = staticWriteError(result.error);
+        // The leftover temp file holds secret content: surface it only if cleanup itself failed.
+        if (result.leftoverPath) {
+          outcome.warnings.push(
+            `A temporary file with the rewritten content could not be removed automatically: delete ${result.leftoverPath} yourself as soon as possible.`,
+          );
+        }
+      } else {
+        try {
+          if ((statSync(plan.file).mode & 0o777) !== FILE_MODE) chmodSync(plan.file, FILE_MODE);
+        } catch {
+          // best-effort tighten
         }
       }
     }
-    // Names from toKeep that weren't in finalNames — already excluded
-    // by `finalNames`, so nothing more to do.
 
-    // Names previously rendered that aren't in finalNames anymore are
-    // recorded as removed. (Tech Lead rule #4 / #7.)
-    for (const prevName of plan.toRemove) outcome.removed.push(prevName);
+    // 6. Ledger and audit, only now that the write result is known.
+    const scope = auditScopeFields({ scope: 'project', projectId: opts.projectId, projectPath: plan.worktree });
+    const audit = (name: string, ok: boolean, error: string | null): void =>
+      appendAuditEvent({ op: 'render', name, depository: depositoryOf.get(name)!, actor: opts.actor, ok, error, ...scope });
 
-    const nextContent = writeManagedBlock(currentContent, bodyLines, RENDER_BLOCK_MARKERS);
-
-    // Atomic write — same protocol as `enigma import` (Issue #107 AC #2):
-    // temp + rename in the target's directory at 0600.
-    const writeResult = writeFileAtomic(plan.file, nextContent, FILE_MODE);
-    if (!writeResult.ok) {
-      const detail = writeResult.error ?? 'unknown failure';
-      outcome.writeError = detail;
-      // Surface as a warning rather than throwing — the caller maps to
-      // an exit code. Keep names-only by avoiding the leftover path text.
-      if (writeResult.leftoverPath) {
-        outcome.warnings.push(
-          `A temporary file containing the rewritten content was left behind at ${writeResult.leftoverPath} and could not be removed automatically — delete it manually as soon as possible.`,
-        );
+    if (!writeOk) {
+      // Ledger untouched; the file is as it was, so nothing was rendered or removed.
+      const resolveCodes = new Map(resolveFailures.map((f) => [f.name, f.code] as const));
+      for (const item of plan.toResolve) {
+        if (envBlockNames.has(item.name)) continue;
+        const code = resolveCodes.get(item.name) ?? 'E_WRITE_FAILED';
+        const reason = staticReasonFor(code);
+        audit(item.name, false, reason);
+        outcome.failed.push({ name: item.name, errorCode: code, reason, keptPreviousLine: false });
       }
-      outcome.warnings.push(`Failed to rewrite ${plan.file} (${detail}).`);
-      // Update the ledger anyway — the on-disk write failed but the
-      // block body we intended to write is fully known; the ledger
-      // records what the next render will retry.
-    } else {
-      // Make sure the file mode is 0600 even on a pre-existing file
-      // whose mode may have drifted (AC #1: ".env" must be 0600).
-      // writeFileAtomic's temp was 0600; the rename preserves it. This
-      // branch only catches the case where the file pre-existed at a
-      // looser mode and we want to tighten it now.
-      try {
-        const st = statSync(plan.file);
-        if ((st.mode & 0o777) !== FILE_MODE) chmodSync(plan.file, FILE_MODE);
-      } catch {
-        // best-effort — the value sits in the file either way
-      }
+      return outcome;
     }
 
-    // Ledger update — `replaceTarget` is the only operation the renderer
-    // may use (Tech Lead rule #1). Empty `finalNames` removes the
-    // target; otherwise the names list is set exactly.
-    if (plan.finalNames.length === 0) {
-      replaceTarget({ projectId: opts.projectId, worktree: plan.worktree, file: plan.file, names: [] });
-    } else {
-      replaceTarget({ projectId: opts.projectId, worktree: plan.worktree, file: plan.file, names: plan.finalNames });
+    replaceTarget({ projectId: opts.projectId, worktree: plan.worktree, file: plan.file, names: bodyNames });
+
+    for (const name of freshNames) {
+      audit(name, true, null);
+      outcome.rendered.push(name);
     }
+    for (const f of resolveFailures) {
+      const reason = staticReasonFor(f.code);
+      audit(f.name, false, reason);
+      outcome.failed.push({ name: f.name, errorCode: f.code, reason, keptPreviousLine: finalLines.has(f.name) });
+    }
+    const failedNames = new Set(resolveFailures.map((f) => f.name));
+    for (const name of bodyNames) {
+      if (existing.has(name) && !freshNames.has(name) && !failedNames.has(name)) outcome.kept.push(name);
+    }
+    for (const name of existing.keys()) {
+      if (!finalLines.has(name)) outcome.removed.push(name);
+    }
+    outcome.rendered.sort();
+    outcome.removed.sort();
+    outcome.alreadyInEnvBlock.sort();
+    return outcome;
   } finally {
+    // 7. Release.
     lock.release();
   }
-
-  return outcome;
 }
-
-/* ----------------------------- names-only audit guard -------------- */
-// This file imports only names (no values): the `resolveValue` callback
-// owns value-bearing code. The leak-fence scans `src/mcp/**`, `src/web/**`,
-// and `src/hooks/**` — none of those import this file. `resolveSecret` is
-// the only sanctioned value-resolving call in the codebase and lives in
-// `src/storage/manager.ts` (with its `enigma:leak-fence-allow` marker).
-// The renderer module itself never calls resolveSecret — the wiring in
-// `src/cli/commands/render.ts` injects a callback that does.
