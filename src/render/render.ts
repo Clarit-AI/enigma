@@ -467,7 +467,8 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
         const code = resolveCodes.get(item.name) ?? 'E_WRITE_FAILED';
         const reason = staticReasonFor(code);
         audit(item.name, false, reason);
-        outcome.failed.push({ name: item.name, errorCode: code, reason, keptPreviousLine: false });
+        // The file is unchanged, so an old line for this name is still in it.
+        outcome.failed.push({ name: item.name, errorCode: code, reason, keptPreviousLine: existing.has(item.name) });
       }
       return outcome;
     }

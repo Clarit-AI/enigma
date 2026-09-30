@@ -415,6 +415,20 @@ describe('executeRender', () => {
         expect(outcome.failed.map((f) => [f.name, f.errorCode])).toEqual([['A', 'E_WRITE_FAILED'], ['B', 'E_WRITE_FAILED']]);
         expect(outcome.writeError).toBe('failed to rewrite the target file (EACCES)');
       });
+
+      it('reports keptPreviousLine for a name whose old line is still in the untouched file', async () => {
+        const target = join(blocked, '.env');
+        chmodSync(blocked, 0o700);
+        writeFileSync(target, block('OLD=1'), { mode: 0o600 });
+        chmodSync(blocked, 0o500);
+        const outcome = await run({
+          index: indexOf(entry('OLD'), entry('NEW')),
+          manifest: manifestOf({ render: { path: 'blocked/.env' } }),
+          resolve: fixedValues({ OLD: 'x', NEW: 'y' }),
+        });
+        expect(outcome.failed.map((f) => [f.name, f.keptPreviousLine])).toEqual([['OLD', true], ['NEW', false]]);
+        expect(read(target)).toBe(block('OLD=1'));
+      });
     });
   });
 

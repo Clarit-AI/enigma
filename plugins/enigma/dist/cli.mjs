@@ -6684,7 +6684,7 @@ async function executeRender(plan, opts) {
         const code = resolveCodes.get(item.name) ?? "E_WRITE_FAILED";
         const reason = staticReasonFor(code);
         audit(item.name, false, reason);
-        outcome.failed.push({ name: item.name, errorCode: code, reason, keptPreviousLine: false });
+        outcome.failed.push({ name: item.name, errorCode: code, reason, keptPreviousLine: existing.has(item.name) });
       }
       return outcome;
     }
