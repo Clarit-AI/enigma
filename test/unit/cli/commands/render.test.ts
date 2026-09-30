@@ -377,4 +377,57 @@ describe('cmdRender', () => {
       expect(stdoutText()).not.toContain('gitignored');
     });
   });
+  describe('[r3] fix batch round 3', () => {
+    it('[r3.2] a damaged render block exits 1 naming the file, resolves nothing and writes nothing', async () => {
+      await set('A', 'value-a');
+      const damaged = '# enigma:render:begin\nA=old\n# enigma:render:endNEW=1\n';
+      writeFileSync(target(), damaged, { mode: 0o600 });
+      vi.mocked(resolveSecret).mockClear();
+
+      expect(await main(['render'])).toBe(1);
+      expect(stderrText()).toContain(target());
+      expect(stderrText()).toContain('damaged');
+      expect(resolveSecret).not.toHaveBeenCalled();
+      expect(readFileSync(target(), 'utf8')).toBe(damaged);
+      expect(readLedger().targets).toEqual([]);
+    });
+
+    it('[r3.4] render.enabled=false with an invalid render.path still says "rendering is off" and exits 0', async () => {
+      await set('A', 'value-a');
+      writeFileSync(join(tmpProject, '.enigma.json'), JSON.stringify({ render: { enabled: false, path: '/etc/passwd' } }));
+
+      expect(await cmdRender([])).toBe(0);
+      expect(stdoutText()).toContain('rendering is off');
+    });
+
+    it('[r3.5] an explicit render of a name in the env block does not call resolveSecret', async () => {
+      writeFileSync(target(), '# enigma:begin\nA=envblock-a\n# enigma:end\n', { mode: 0o600 });
+      await set('A', 'fresh-a');
+      vi.mocked(resolveSecret).mockClear();
+
+      expect(await cmdRender(['A'])).toBe(0);
+      expect(resolveSecret).not.toHaveBeenCalled();
+      expect(stdoutText()).toContain('already in the env block');
+    });
+
+    it('[r3.6] the reported file and the ledger use the real path behind an in-worktree symlinked parent', async () => {
+      await set('A', 'value-a');
+      mkdirSync(join(tmpProject, 'realdir'));
+      symlinkSync(join(tmpProject, 'realdir'), join(tmpProject, 'link'));
+      writeFileSync(join(tmpProject, '.enigma.json'), JSON.stringify({ render: { path: 'link/local.env' } }));
+
+      expect(await cmdRender(['--json'])).toBe(0);
+      const real = join(tmpProject, 'realdir', 'local.env');
+      expect((JSON.parse(stdoutText()) as { file: string }).file).toBe(real);
+      expect(readLedger().targets.map((t) => t.file)).toEqual([real]);
+    });
+
+    it('[r3.8] render.path "./." exits 1 with the "must name a file" message', async () => {
+      await set('A', 'value-a');
+      writeFileSync(join(tmpProject, '.enigma.json'), JSON.stringify({ render: { path: './.' } }));
+
+      expect(await main(['render'])).toBe(1);
+      expect(stderrText()).toContain('must name a file');
+    });
+  });
 });

@@ -18,7 +18,7 @@ import { buildRenderPlan, executeRender } from '../../../src/render/render.js';
 import type { RenderOutcome } from '../../../src/render/render.js';
 import { readLedger, upsertTarget } from '../../../src/render/ledger.js';
 import { checkEnvGitignore } from '../../../src/storage/depositories/env.js';
-import { ENV_BEGIN_MARKER, ENV_END_MARKER, RENDER_BEGIN_MARKER, RENDER_END_MARKER } from '../../../src/storage/dotenv-file.js';
+import { ENV_BEGIN_MARKER, ENV_END_MARKER, RENDER_BEGIN_MARKER, RENDER_END_MARKER, parseDotEnv } from '../../../src/storage/dotenv-file.js';
 import type { DepositoryId } from '../../../src/storage/interfaces.js';
 
 const SENTINEL = 'sk-sentinel-value-should-never-appear-7c3a';
@@ -249,8 +249,8 @@ describe('executeRender', () => {
   it('keeps CRLF line endings and every byte outside the block', async () => {
     writeFileSync(envPath(), 'USER_LINE=1\r\nOTHER=2', { mode: 0o600 });
     await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'a' }) });
-    // The new block inherits the file's EOF state: no trailing newline was there, none is added.
-    expect(read()).toBe(`USER_LINE=1\r\nOTHER=2\r\n${RENDER_BEGIN_MARKER}\r\nA=a\r\n${RENDER_END_MARKER}`);
+    // The block always ends with an EOL in the file's style.
+    expect(read()).toBe(`USER_LINE=1\r\nOTHER=2\r\n${RENDER_BEGIN_MARKER}\r\nA=a\r\n${RENDER_END_MARKER}\r\n`);
   });
 
   it('render.enabled=false does nothing', async () => {
@@ -671,19 +671,20 @@ describe('[r2.2] line order', () => {
 });
 
 describe('[r2.4] removing the block restores the bytes outside it', () => {
+  // A file with no trailing newline keeps the one EOL the block needed (see [r3.1]); every other shape is restored exactly.
   it.each([
-    ['no trailing newline', 'U=1'],
-    ['a trailing newline', 'U=1\n'],
-    ['CRLF, no trailing newline', 'U=1\r\nV=2'],
-    ['CRLF, trailing newline', 'U=1\r\nV=2\r\n'],
-    ['an empty file', ''],
-  ])('render then empty the set: %s', async (_label, original) => {
+    ['no trailing newline (one EOL remains)', 'U=1', 'U=1\n'],
+    ['a trailing newline', 'U=1\n', 'U=1\n'],
+    ['CRLF, no trailing newline (one CRLF remains)', 'U=1\r\nV=2', 'U=1\r\nV=2\r\n'],
+    ['CRLF, trailing newline', 'U=1\r\nV=2\r\n', 'U=1\r\nV=2\r\n'],
+    ['an empty file', '', ''],
+  ])('render then empty the set: %s', async (_label, original, afterStrip) => {
     writeFileSync(envPath(), original, { mode: 0o600 });
     await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'a' }) });
     expect(read().startsWith(original)).toBe(true);
     expect(read()).not.toBe(original);
     await run({ index: indexOf() });
-    expect(read()).toBe(original);
+    expect(read()).toBe(afterStrip);
   });
 
   it('a block in the middle of a file is removed without touching either side', async () => {
@@ -693,8 +694,127 @@ describe('[r2.4] removing the block restores the bytes outside it', () => {
   });
 });
 
+describe('[r3] fix batch round 3', () => {
+  describe('[r3.1] the block always ends with an EOL', () => {
+    it.each([
+      ['no trailing newline', 'U=1'],
+      ['a trailing newline', 'U=1\n'],
+      ['CRLF, no trailing newline', 'U=1\r\nV=2'],
+      ['an empty file', ''],
+    ])('a rendered file ends with an EOL: %s', async (_label, original) => {
+      writeFileSync(envPath(), original, { mode: 0o600 });
+      await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'a' }) });
+      expect(read()).toMatch(/\r?\n$/);
+    });
+
+    it('an `echo NEW=1 >>` after a render lands on its own line: NEW parses, the rendered name is not importable, and a re-render leaves exactly one block', async () => {
+      writeFileSync(envPath(), 'U=1', { mode: 0o600 });
+      await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'a' }) });
+      writeFileSync(envPath(), `${read()}NEW=1\n`, { mode: 0o600 });
+
+      expect(parseDotEnv(read()).entries.map((e) => e.name)).toEqual(['U', 'NEW']);
+      await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'a2' }) });
+      const content = read();
+      expect(content.split(RENDER_BEGIN_MARKER).length - 1).toBe(1);
+      expect(content.split(RENDER_END_MARKER).length - 1).toBe(1);
+      expect(content).toContain('NEW=1\n');
+      expect(content).toContain('A=a2');
+    });
+  });
+
+  describe('[r3.2] a damaged render block is refused', () => {
+    it.each([
+      ['an end marker with text glued on', `U=1\n${RENDER_BEGIN_MARKER}\nA=old\n${RENDER_END_MARKER}NEW=1\n`],
+      ['no end marker at all', `U=1\n${RENDER_BEGIN_MARKER}\nA=old\n`],
+    ])('%s: fails naming the file, resolves nothing, writes nothing, leaves the ledger alone', async (_label, damaged) => {
+      writeFileSync(envPath(), damaged, { mode: 0o600 });
+      let resolves = 0;
+      await expect(run({ index: indexOf(entry('A')), resolve: async () => { resolves++; return 'v'; } })).rejects.toMatchObject({
+        code: 'E_WRITE_FAILED',
+        message: expect.stringMatching(new RegExp(`${envPath().replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*damaged.*"# enigma:render:end"`)),
+      });
+      expect(resolves).toBe(0);
+      expect(read()).toBe(damaged);
+      expect(readLedger().targets).toEqual([]);
+    });
+
+    it('a block damaged between the unlocked read and the lock is refused too, audited ok:false', async () => {
+      writeFileSync(envPath(), block('A=old'), { mode: 0o600 });
+      const damage: Resolver = async () => {
+        writeFileSync(envPath(), `${RENDER_BEGIN_MARKER}\nA=old\n${RENDER_END_MARKER}NEW=1\n`, { mode: 0o600 });
+        return 'v';
+      };
+      await expect(run({ index: indexOf(entry('A')), resolve: damage })).rejects.toMatchObject({ code: 'E_WRITE_FAILED' });
+      expect(audits().map((a) => [a.name, a.ok])).toEqual([['A', false]]);
+      expect(read().split(RENDER_BEGIN_MARKER).length - 1).toBe(1);
+    });
+  });
+
+  describe('[r3.4] enabled is checked before the path', () => {
+    it.each(['/etc/passwd', '../escape.env', 'no-such-dir/.env', ''])('render.enabled=false with render.path %j plans as disabled and does not throw', (path) => {
+      const plan = buildRenderPlan({ cwd: project, projectId: PID, worktree: project, index: indexOf(entry('A')), manifest: manifestOf({ render: { enabled: false, path } }) });
+      expect(plan.enabled).toBe(false);
+      expect(plan.toResolve).toEqual([]);
+    });
+
+    it('executing a disabled plan with an invalid path is a no-op', async () => {
+      const outcome = await run({ index: indexOf(entry('A')), manifest: manifestOf({ render: { enabled: false, path: '/etc/passwd' } }) });
+      expect(outcome.disabled).toBe(true);
+    });
+  });
+
+  describe('[r3.5] names already in the env block are not resolved', () => {
+    it('an explicit render of an env-block name never calls the resolver', async () => {
+      writeFileSync(envPath(), envBlock('A=envblock-a'), { mode: 0o600 });
+      let resolves = 0;
+      const outcome = await run({ index: indexOf(entry('A', 'keychain')), explicitName: 'A', resolve: async () => { resolves++; return 'x'; } });
+      expect(resolves).toBe(0);
+      expect(outcome.alreadyInEnvBlock).toEqual(['A']);
+      expect(read()).toBe(envBlock('A=envblock-a'));
+    });
+
+    it('a plain render resolves only the names that are not in the env block', async () => {
+      writeFileSync(envPath(), envBlock('A=envblock-a'), { mode: 0o600 });
+      const asked: string[] = [];
+      await run({ index: indexOf(entry('A'), entry('B')), resolve: async (name) => { asked.push(name); return 'v'; } });
+      expect(asked).toEqual(['B']);
+    });
+
+    it('a name skipped because of the unlocked read but no longer in the env block on the locked read fails with a static reason instead of being guessed', async () => {
+      writeFileSync(envPath(), envBlock('A=envblock-a'), { mode: 0o600 });
+      const dropEnvBlock: Resolver = async () => {
+        writeFileSync(envPath(), 'USER=1\n', { mode: 0o600 });
+        return 'v';
+      };
+      const outcome = await run({ index: indexOf(entry('A'), entry('B')), resolve: dropEnvBlock });
+      expect(outcome.failed).toEqual([
+        { name: 'A', errorCode: 'E_TARGET_CHANGED', reason: 'not resolved: the target file changed while rendering; run enigma render again', keptPreviousLine: false },
+      ]);
+      expect(read()).toBe(`USER=1\n${block('B=v')}`);
+    });
+  });
+
+  describe('[r3.6] the ledger and the report use the canonical target path', () => {
+    it('an in-worktree symlinked parent directory: the ledger file and the reported file are the real path that was written', async () => {
+      mkdirSync(join(project, 'realdir'));
+      symlinkSync(join(project, 'realdir'), join(project, 'link'));
+      const outcome = await run({ index: indexOf(entry('A')), manifest: manifestOf({ render: { path: 'link/.env' } }), resolve: fixedValues({ A: 'a' }) });
+      const real = join(project, 'realdir', '.env');
+      expect(read(real)).toBe(block('A=a'));
+      expect(outcome.file).toBe(real);
+      expect(readLedger().targets.map((t) => t.file)).toEqual([real]);
+    });
+  });
+
+  it('[r3.8] `./.` gets the "must name a file" message, not the symlinked-parent one', () => {
+    expect(() => buildRenderPlan({ cwd: project, projectId: PID, worktree: project, index: indexOf(), manifest: manifestOf({ render: { path: './.' } }) })).toThrow(
+      expect.objectContaining({ code: 'E_WRITE_FAILED', message: expect.stringContaining('must name a file') }),
+    );
+  });
+});
+
 describe('[r1.13] cleanups', () => {
-  it.each(['src/storage/depositories/env.ts', 'src/storage/dotenv-file.ts'])('%s ends with a trailing newline', (file) => {
+  it.each(['src/storage/depositories/env.ts', 'src/storage/dotenv-file.ts', 'src/core/config.ts'])('%s ends with a trailing newline', (file) => {
     const bytes = readFileSync(join(priorCwd, file), 'utf8');
     expect(bytes.endsWith('\n')).toBe(true);
   });

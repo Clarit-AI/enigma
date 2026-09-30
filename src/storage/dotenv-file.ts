@@ -94,6 +94,27 @@ function isInsideAnyManagedBlock(blocks: ReadonlyArray<{ beginIdx: number; endId
   return false;
 }
 
+/**
+ * Line ranges of every managed block in `lines`. A terminated block is its
+ * begin..end pair. An UNTERMINATED render block (a begin marker with no end
+ * marker after it, e.g. a damaged file) is treated as running to EOF, so
+ * none of its lines is ever imported or stripped. The env depository's block
+ * keeps its own handling: unterminated, it is simply not a block.
+ */
+function managedBlockRanges(lines: string[]): Array<{ beginIdx: number; endIdx: number }> {
+  const ranges: Array<{ beginIdx: number; endIdx: number }> = [];
+  for (const markers of MANAGED_BLOCK_MARKERS) {
+    const found = findBlock(lines, markers);
+    if (found) {
+      ranges.push(found);
+    } else if (markers.begin === RENDER_BEGIN_MARKER) {
+      const beginIdx = lines.findIndex((l) => l === markers.begin);
+      if (beginIdx !== -1) ranges.push({ beginIdx, endIdx: lines.length - 1 });
+    }
+  }
+  return ranges;
+}
+
 export interface ParsedDotEnvEntry {
   name: string;
   value: string;
@@ -161,7 +182,7 @@ function isAmbiguousUnquoted(raw: string): boolean {
  * or stripped.
  */
 function scanAssignments(lines: string[]): ScannedAssignment[] {
-  const blocks = MANAGED_BLOCK_MARKERS.map((m) => findBlock(lines, m)).filter((b): b is { beginIdx: number; endIdx: number } => b !== undefined);
+  const blocks = managedBlockRanges(lines);
   const assignments: ScannedAssignment[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -430,11 +451,11 @@ export function readManagedBlockLines(content: string, markers: BlockMarkers): s
 /**
  * Write a block whose body is exactly `bodyLines` (raw `NAME=value` lines,
  * already encoded). An existing block is rewritten in place, wherever it is;
- * a new one is appended at EOF, after any existing env block. The appended
- * block inherits the file's EOF state: a file that ended with a newline gets
- * a block ending with one, a file that did not gets a block that does not
- * (only the newline that starts the block is added). Removing the block's
- * lines therefore restores exactly the bytes that were there before.
+ * a new one is appended at EOF, after any existing env block. The block
+ * always ends with an EOL in the file's style, so a later `echo X >> file`
+ * starts on its own line and can never glue onto the end marker. A file that
+ * had no trailing newline therefore gains one (before the block, and after
+ * it); stripping the block later leaves that one EOL behind.
  */
 export function writeManagedBlock(content: string, bodyLines: readonly string[], markers: BlockMarkers): string {
   const eol = detectEol(content);
@@ -446,8 +467,7 @@ export function writeManagedBlock(content: string, bodyLines: readonly string[],
   }
   const needsNewline = content.length > 0 && !content.endsWith(eol);
   const prefix = needsNewline ? content + eol : content;
-  const tail = needsNewline ? '' : eol;
-  return `${prefix}${markers.begin}${eol}${bodyLines.join(eol)}${eol}${markers.end}${tail}`;
+  return `${prefix}${markers.begin}${eol}${bodyLines.join(eol)}${eol}${markers.end}${eol}`;
 }
 
 export { FILE_MODE };

@@ -282,3 +282,30 @@ describe('parseDotEnv / removeDotEnvEntries — both managed blocks (env + rende
     expect(JSON.stringify(result)).not.toContain(SENTINEL);
   });
 });
+
+describe('[r3.3] an unterminated render block runs to EOF and is never imported or stripped', () => {
+  const damaged = `A=1\n${RENDER_BEGIN_MARKER}\nB=2\nC=3\n`;
+
+  it('parseDotEnv imports nothing from it', () => {
+    expect(parseDotEnv(damaged).entries.map((e) => e.name)).toEqual(['A']);
+  });
+
+  it('parseDotEnv also skips a render block whose end marker has text glued on', () => {
+    const glued = `A=1\n${RENDER_BEGIN_MARKER}\nB=2\n${RENDER_END_MARKER}D=4\n`;
+    expect(parseDotEnv(glued).entries.map((e) => e.name)).toEqual(['A']);
+  });
+
+  it('removeDotEnvEntries leaves every line of it in place', () => {
+    expect(removeDotEnvEntries(damaged, ['A', 'B', 'C'])).toBe(`${RENDER_BEGIN_MARKER}\nB=2\nC=3\n`);
+  });
+
+  it('a terminated render block followed by ordinary lines is unaffected (both still parsed and skipped as before)', () => {
+    const ok = `${RENDER_BEGIN_MARKER}\nB=2\n${RENDER_END_MARKER}\nD=4\n`;
+    expect(parseDotEnv(ok).entries.map((e) => e.name)).toEqual(['D']);
+  });
+
+  it('the env depository block keeps its own handling: an unterminated one is not a block, so its lines are ordinary assignments', () => {
+    const envDamaged = `${ENV_BEGIN_MARKER}\nB=2\n`;
+    expect(parseDotEnv(envDamaged).entries.map((e) => e.name)).toEqual(['B']);
+  });
+});

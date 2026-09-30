@@ -58,7 +58,7 @@
  */
 import { chmodSync, existsSync, lstatSync, readFileSync, realpathSync, statSync } from 'node:fs';
 import type { Stats } from 'node:fs';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, isAbsolute, join, normalize, relative, resolve, sep } from 'node:path';
 import { appendAuditEvent, auditScopeFields } from '../core/audit.js';
 import type { AuditActor } from '../core/audit.js';
 import { acquireFileLock } from '../core/file-lock.js';
@@ -243,7 +243,7 @@ function resolveRenderTarget(worktree: string, renderPath: string): string {
   if (PATH_TRAVERSAL_SEGMENT_RE.test(renderPath)) {
     throw writeRefusal('render.path must not contain a parent-directory traversal segment');
   }
-  if (renderPath.trim() === '' || renderPath === '.' || /[/\\]$/.test(renderPath)) {
+  if (renderPath.trim() === '' || normalize(renderPath) === '.' || /[/\\]$/.test(renderPath)) {
     throw writeRefusal('render.path must name a file, not be empty, "." or a directory path ending in a separator');
   }
   const file = resolve(worktree, renderPath);
@@ -254,8 +254,9 @@ function resolveRenderTarget(worktree: string, renderPath: string): string {
 /* ----------------------------- planning ---------------------------- */
 
 /**
- * Build a render plan (NAMES ONLY) from the index and manifest. Validates
- * `render.path` first; performs no read of the target file.
+ * Build a render plan (NAMES ONLY) from the index and manifest. When
+ * rendering is on, validates `render.path` first; performs no read of the
+ * target file.
  */
 export function buildRenderPlan(opts: {
   cwd: string;
@@ -268,7 +269,10 @@ export function buildRenderPlan(opts: {
   const { projectId, worktree, index, manifest, explicitName } = opts;
   const renderOverride = manifest.render;
   const enabled = renderOverride?.enabled !== false;
-  const file = resolveRenderTarget(worktree, renderOverride?.path ?? DEFAULT_RENDER_PATH);
+  const renderPath = renderOverride?.path ?? DEFAULT_RENDER_PATH;
+  // Path validation runs only when rendering is on: a disabled render must
+  // still say "rendering is off" whatever `render.path` holds.
+  const file = enabled ? resolveRenderTarget(worktree, renderPath) : resolve(worktree, renderPath);
 
   const plan: RenderPlan = {
     enabled,
@@ -329,9 +333,11 @@ const STATIC_REASONS: Partial<Record<EnigmaErrorCode, string>> = {
   E_WRITE_FAILED: 'failed to rewrite the target file',
 };
 const UNKNOWN_ERROR_CODE = 'E_UNKNOWN';
+const TARGET_CHANGED_CODE = 'E_TARGET_CHANGED';
 
 function staticReasonFor(code: string): string {
   if (code === UNKNOWN_ERROR_CODE) return 'failed to resolve: unknown error';
+  if (code === TARGET_CHANGED_CODE) return 'not resolved: the target file changed while rendering; run enigma render again';
   return STATIC_REASONS[code as EnigmaErrorCode] ?? `failed to resolve (${code})`;
 }
 
@@ -359,6 +365,20 @@ function stripRenderBlock(content: string): string {
 type ResolveResult = { ok: true; value: string } | { ok: false; code: string };
 
 /**
+ * Refuse a render block that has a begin marker but no end marker after it
+ * (a damaged file, e.g. text glued onto the end marker). Writing on top of
+ * it would append a second block, so nothing is resolved or written.
+ */
+function assertRenderBlockIntact(content: string, file: string): void {
+  const lines = content.split(detectEol(content));
+  if (lines.includes(RENDER_BEGIN_MARKER) && findBlock(lines, RENDER_BLOCK_MARKERS) === undefined) {
+    throw writeRefusal(
+      `${file}: the render block is damaged: "${RENDER_BEGIN_MARKER}" has no matching "${RENDER_END_MARKER}" line. Fix the file by hand, then run enigma render again.`,
+    );
+  }
+}
+
+/**
  * Apply a render plan to disk. See the header for the order of work.
  * Throws only for structural refusals (target became a symlink, lock
  * failure, unreadable target); per-name and write failures are outcomes.
@@ -380,10 +400,20 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
     return outcome;
   }
 
+  // 0. An unlocked, advisory read of the target (path already validated):
+  //    refuse a damaged render block before anything is resolved, and skip
+  //    names already in this file's env block so they never trigger a store
+  //    prompt. The real keep/dedupe decisions are re-made on the locked read.
+  const peekPath = validateTargetFile(plan.worktree, plan.file);
+  const peek = existsSync(peekPath) ? readFileSync(peekPath, 'utf8') : '';
+  assertRenderBlockIntact(peek, plan.file);
+  const peekEnvNames = new Set(blockLinesByName(peek, ENV_BLOCK_MARKERS).keys());
+
   // 1. Resolve BEFORE the lock. Values live only in this local map: they
   //    are encoded into a block line below and never returned or stored.
   const resolved = new Map<string, ResolveResult>();
   for (const item of plan.toResolve) {
+    if (peekEnvNames.has(item.name)) continue;
     try {
       resolved.set(item.name, { ok: true, value: await opts.resolveValue(item.name, item.depository) });
     } catch (err) {
@@ -401,8 +431,11 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
     //    returns is the one read and written below. A refusal writes
     //    nothing, changes no ledger row, and audits every attempted name.
     let target: string;
+    let current: string;
     try {
       target = validateTargetFile(plan.worktree, plan.file);
+      current = existsSync(target) ? readFileSync(target, 'utf8') : '';
+      assertRenderBlockIntact(current, plan.file);
     } catch (err) {
       for (const item of plan.toResolve) {
         appendAuditEvent({
@@ -417,7 +450,9 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
       }
       throw err;
     }
-    const current = existsSync(target) ? readFileSync(target, 'utf8') : '';
+    // The canonical path that is actually written: what the ledger and the
+    // report name.
+    outcome.file = target;
 
     // 4. Everything file-derived comes from `current`.
     const envBlockNames = new Set(blockLinesByName(current, ENV_BLOCK_MARKERS).keys());
@@ -442,8 +477,9 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
       }
     }
     for (const item of plan.toResolve) {
-      const result = resolved.get(item.name)!;
       if (envBlockNames.has(item.name)) continue; // AC #3, handled below
+      // Skipped before the lock as an env-block name, but not one on the locked read: the file changed in between.
+      const result = resolved.get(item.name) ?? { ok: false as const, code: TARGET_CHANGED_CODE };
       if (result.ok) {
         finalLines.set(item.name, `${item.name}=${encodeValue(result.value)}`);
         freshNames.add(item.name);
@@ -517,7 +553,7 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
       return outcome;
     }
 
-    replaceTarget({ projectId: opts.projectId, worktree: plan.worktree, file: plan.file, names: bodyNames });
+    replaceTarget({ projectId: opts.projectId, worktree: plan.worktree, file: target, names: bodyNames });
 
     for (const name of freshNames) {
       audit(name, true, null);
