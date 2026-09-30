@@ -1028,12 +1028,25 @@ function isInsideAnyManagedBlock(blocks, i) {
   }
   return false;
 }
+function managedBlockRanges(lines) {
+  const ranges = [];
+  for (const markers of MANAGED_BLOCK_MARKERS) {
+    const found = findBlock(lines, markers);
+    if (found) {
+      ranges.push(found);
+    } else if (markers.begin === RENDER_BEGIN_MARKER) {
+      const beginIdx = lines.findIndex((l) => l === markers.begin);
+      if (beginIdx !== -1) ranges.push({ beginIdx, endIdx: lines.length - 1 });
+    }
+  }
+  return ranges;
+}
 var INLINE_COMMENT_REASON = 'the unquoted value contains a space then "#", which could start a comment or be part of the secret \u2014 quote the value if the # belongs to it, then rerun import';
 function isAmbiguousUnquoted(raw) {
   return / #/.test(raw);
 }
 function scanAssignments(lines) {
-  const blocks = MANAGED_BLOCK_MARKERS.map((m) => findBlock(lines, m)).filter((b) => b !== void 0);
+  const blocks = managedBlockRanges(lines);
   const assignments = [];
   let i = 0;
   while (i < lines.length) {
@@ -1223,8 +1236,7 @@ function writeManagedBlock(content, bodyLines, markers) {
   }
   const needsNewline = content.length > 0 && !content.endsWith(eol);
   const prefix = needsNewline ? content + eol : content;
-  const tail = needsNewline ? "" : eol;
-  return `${prefix}${markers.begin}${eol}${bodyLines.join(eol)}${eol}${markers.end}${tail}`;
+  return `${prefix}${markers.begin}${eol}${bodyLines.join(eol)}${eol}${markers.end}${eol}`;
 }
 
 // src/storage/depositories/env.ts
@@ -6340,7 +6352,7 @@ import { relative as relative3 } from "node:path";
 
 // src/render/render.ts
 import { chmodSync as chmodSync3, existsSync as existsSync14, lstatSync as lstatSync2, readFileSync as readFileSync9, realpathSync as realpathSync6, statSync as statSync4 } from "node:fs";
-import { basename as basename6, dirname as dirname8, isAbsolute as isAbsolute4, join as join8, relative as relative2, resolve as resolve6, sep as sep2 } from "node:path";
+import { basename as basename6, dirname as dirname8, isAbsolute as isAbsolute4, join as join8, normalize, relative as relative2, resolve as resolve6, sep as sep2 } from "node:path";
 
 // src/render/ledger.ts
 var RENDER_LEDGER_VERSION = 1;
@@ -6520,7 +6532,7 @@ function resolveRenderTarget(worktree, renderPath) {
   if (PATH_TRAVERSAL_SEGMENT_RE.test(renderPath)) {
     throw writeRefusal("render.path must not contain a parent-directory traversal segment");
   }
-  if (renderPath.trim() === "" || renderPath === "." || /[/\\]$/.test(renderPath)) {
+  if (renderPath.trim() === "" || normalize(renderPath) === "." || /[/\\]$/.test(renderPath)) {
     throw writeRefusal('render.path must name a file, not be empty, "." or a directory path ending in a separator');
   }
   const file = resolve6(worktree, renderPath);
@@ -6531,7 +6543,8 @@ function buildRenderPlan(opts) {
   const { projectId: projectId2, worktree, index, manifest, explicitName } = opts;
   const renderOverride = manifest.render;
   const enabled = renderOverride?.enabled !== false;
-  const file = resolveRenderTarget(worktree, renderOverride?.path ?? DEFAULT_RENDER_PATH);
+  const renderPath = renderOverride?.path ?? DEFAULT_RENDER_PATH;
+  const file = enabled ? resolveRenderTarget(worktree, renderPath) : resolve6(worktree, renderPath);
   const plan = {
     enabled,
     worktree,
@@ -6581,8 +6594,10 @@ var STATIC_REASONS = {
   E_WRITE_FAILED: "failed to rewrite the target file"
 };
 var UNKNOWN_ERROR_CODE = "E_UNKNOWN";
+var TARGET_CHANGED_CODE = "E_TARGET_CHANGED";
 function staticReasonFor(code) {
   if (code === UNKNOWN_ERROR_CODE) return "failed to resolve: unknown error";
+  if (code === TARGET_CHANGED_CODE) return "not resolved: the target file changed while rendering; run enigma render again";
   return STATIC_REASONS[code] ?? `failed to resolve (${code})`;
 }
 function staticWriteError(message) {
@@ -6595,6 +6610,14 @@ function stripRenderBlock(content) {
   const block = findBlock(lines, RENDER_BLOCK_MARKERS);
   if (!block) return content;
   return [...lines.slice(0, block.beginIdx), ...lines.slice(block.endIdx + 1)].join(eol);
+}
+function assertRenderBlockIntact(content, file) {
+  const lines = content.split(detectEol(content));
+  if (lines.includes(RENDER_BEGIN_MARKER) && findBlock(lines, RENDER_BLOCK_MARKERS) === void 0) {
+    throw writeRefusal(
+      `${file}: the render block is damaged: "${RENDER_BEGIN_MARKER}" has no matching "${RENDER_END_MARKER}" line. Fix the file by hand, then run enigma render again.`
+    );
+  }
 }
 async function executeRender(plan, opts) {
   const outcome = {
@@ -6612,8 +6635,13 @@ async function executeRender(plan, opts) {
     outcome.disabled = true;
     return outcome;
   }
+  const peekPath = validateTargetFile(plan.worktree, plan.file);
+  const peek = existsSync14(peekPath) ? readFileSync9(peekPath, "utf8") : "";
+  assertRenderBlockIntact(peek, plan.file);
+  const peekEnvNames = new Set(blockLinesByName(peek, ENV_BLOCK_MARKERS2).keys());
   const resolved = /* @__PURE__ */ new Map();
   for (const item of plan.toResolve) {
+    if (peekEnvNames.has(item.name)) continue;
     try {
       resolved.set(item.name, { ok: true, value: await opts.resolveValue(item.name, item.depository) });
     } catch (err) {
@@ -6624,8 +6652,11 @@ async function executeRender(plan, opts) {
   const lock = acquireFileLock(renderLockPath(plan.file));
   try {
     let target;
+    let current;
     try {
       target = validateTargetFile(plan.worktree, plan.file);
+      current = existsSync14(target) ? readFileSync9(target, "utf8") : "";
+      assertRenderBlockIntact(current, plan.file);
     } catch (err) {
       for (const item of plan.toResolve) {
         appendAuditEvent({
@@ -6640,7 +6671,7 @@ async function executeRender(plan, opts) {
       }
       throw err;
     }
-    const current = existsSync14(target) ? readFileSync9(target, "utf8") : "";
+    outcome.file = target;
     const envBlockNames = new Set(blockLinesByName(current, ENV_BLOCK_MARKERS2).keys());
     const existing = blockLinesByName(current, RENDER_BLOCK_MARKERS);
     const hasExistingBlock = findBlock(current.split(detectEol(current)), RENDER_BLOCK_MARKERS) !== void 0;
@@ -6657,8 +6688,8 @@ async function executeRender(plan, opts) {
       }
     }
     for (const item of plan.toResolve) {
-      const result = resolved.get(item.name);
       if (envBlockNames.has(item.name)) continue;
+      const result = resolved.get(item.name) ?? { ok: false, code: TARGET_CHANGED_CODE };
       if (result.ok) {
         finalLines.set(item.name, `${item.name}=${encodeValue(result.value)}`);
         freshNames.add(item.name);
@@ -6714,7 +6745,7 @@ async function executeRender(plan, opts) {
       }
       return outcome;
     }
-    replaceTarget({ projectId: opts.projectId, worktree: plan.worktree, file: plan.file, names: bodyNames });
+    replaceTarget({ projectId: opts.projectId, worktree: plan.worktree, file: target, names: bodyNames });
     for (const name of freshNames) {
       audit(name, true, null);
       outcome.rendered.push(name);

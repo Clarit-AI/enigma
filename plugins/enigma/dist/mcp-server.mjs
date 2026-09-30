@@ -43540,12 +43540,25 @@ function isInsideAnyManagedBlock(blocks, i) {
   }
   return false;
 }
+function managedBlockRanges(lines) {
+  const ranges = [];
+  for (const markers of MANAGED_BLOCK_MARKERS) {
+    const found = findBlock(lines, markers);
+    if (found) {
+      ranges.push(found);
+    } else if (markers.begin === RENDER_BEGIN_MARKER) {
+      const beginIdx = lines.findIndex((l) => l === markers.begin);
+      if (beginIdx !== -1) ranges.push({ beginIdx, endIdx: lines.length - 1 });
+    }
+  }
+  return ranges;
+}
 var INLINE_COMMENT_REASON = 'the unquoted value contains a space then "#", which could start a comment or be part of the secret \u2014 quote the value if the # belongs to it, then rerun import';
 function isAmbiguousUnquoted(raw) {
   return / #/.test(raw);
 }
 function scanAssignments(lines) {
-  const blocks = MANAGED_BLOCK_MARKERS.map((m) => findBlock(lines, m)).filter((b) => b !== void 0);
+  const blocks = managedBlockRanges(lines);
   const assignments = [];
   let i = 0;
   while (i < lines.length) {
