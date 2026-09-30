@@ -977,6 +977,69 @@ describe('[r5] one conservative rule for render markers', () => {
   });
 });
 
+describe('[r6] physical lines: files with mixed line endings', () => {
+  const RB = RENDER_BEGIN_MARKER;
+  const RE = RENDER_END_MARKER;
+  const EB = ENV_BEGIN_MARKER;
+  const EE = ENV_END_MARKER;
+
+  it('an LF file with one CRLF line at the end: exactly one block, stale content replaced, every other byte identical', async () => {
+    writeFileSync(envPath(), `U=1\n${RB}\nA=old\n${RE}\nW=2\r\n`, { mode: 0o600 });
+    await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'new' }) });
+    expect(read()).toBe(`U=1\n${RB}\nA=new\n${RE}\nW=2\r\n`);
+  });
+
+  it('marker lines that end in CR inside an otherwise LF file: the block is found, not a second one appended', async () => {
+    writeFileSync(envPath(), `U=1\n${RB}\r\nA=old\r\n${RE}\r\nW=2\n`, { mode: 0o600 });
+    await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'new' }) });
+    const content = read();
+    expect(content.split(RB).length - 1).toBe(1);
+    // untouched lines keep their own terminators; the rewritten block uses the dominant EOL (CRLF here: 3 CRLF vs 2 LF)
+    expect(content).toBe(`U=1\n${RB}\r\nA=new\r\n${RE}\r\nW=2\n`);
+  });
+
+  it('a mixed file with an env block: every outside line keeps its terminator byte for byte after a render, the env value is untouched, and a name in the env block is not duplicated', async () => {
+    const original = `E1=x\r\n${EB}\nA=envblock-a\r\n${EE}\nU=1\r\n`;
+    writeFileSync(envPath(), original, { mode: 0o600 });
+    const outcome = await run({ index: indexOf(entry('A'), entry('B')), resolve: fixedValues({ A: 'a', B: 'b' }) });
+    expect(outcome.alreadyInEnvBlock).toEqual(['A']);
+    // 3 CRLF vs 2 LF: the appended block is CRLF
+    expect(read()).toBe(`${original}${RB}\r\nB=b\r\n${RE}\r\n`);
+  });
+
+  it('the dominant EOL is LF on a tie, and an unterminated last line is terminated in it before a block is appended', async () => {
+    writeFileSync(envPath(), 'A=1\r\nB=2\nC=3', { mode: 0o600 });
+    await run({ index: indexOf(entry('N')), resolve: fixedValues({ N: 'n' }) });
+    expect(read()).toBe(`A=1\r\nB=2\nC=3\n${RB}\nN=n\n${RE}\n`);
+  });
+
+  it('a mixed file: stripping the block leaves the other lines byte-identical', async () => {
+    writeFileSync(envPath(), `U=1\r\n${RB}\nA=old\n${RE}\nW=2\n`, { mode: 0o600 });
+    await run({ index: indexOf() });
+    expect(read()).toBe('U=1\r\nW=2\n');
+  });
+
+  it('a block inside an env block is DAMAGED: refused, the file is unchanged, the env value is intact', async () => {
+    const damaged = `${EB}\nE=stored\n${RB}\nR=old\n${RE}\n${EE}\n`;
+    writeFileSync(envPath(), damaged, { mode: 0o600 });
+    let resolves = 0;
+    await expect(run({ index: indexOf(entry('A')), resolve: async () => { resolves++; return 'v'; } })).rejects.toMatchObject({
+      code: 'E_WRITE_FAILED',
+      message: expect.stringContaining('damaged'),
+    });
+    expect(resolves).toBe(0);
+    expect(read()).toBe(damaged);
+    expect(read()).toContain('E=stored');
+    expect(readLedger().targets).toEqual([]);
+  });
+
+  it('a render block wholly outside an env block is still well-formed (before or after it)', async () => {
+    writeFileSync(envPath(), `${block('R=old')}${envBlock('E=stored')}`, { mode: 0o600 });
+    await run({ index: indexOf(entry('A')), resolve: fixedValues({ A: 'a' }) });
+    expect(read()).toBe(`${block('A=a')}${envBlock('E=stored')}`);
+  });
+});
+
 describe('[r1.13] cleanups', () => {
   it.each(['src/storage/depositories/env.ts', 'src/storage/dotenv-file.ts', 'src/core/config.ts'])('%s ends with a trailing newline', (file) => {
     const bytes = readFileSync(join(priorCwd, file), 'utf8');

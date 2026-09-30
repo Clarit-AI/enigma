@@ -34,14 +34,19 @@
  *    in a separator; the parent must exist and resolve inside the worktree;
  *    the target must not be a symlink and must be a regular file or absent.
  *    All refusals are `E_WRITE_FAILED`, names/paths only.
- *  - Render markers (one rule, `scanRenderMarkers` in dotenv-file.ts): a
- *    line is a marker if, after trailing whitespace is removed, it equals
- *    `# enigma:render:begin` / `# enigma:render:end`. The file is well-formed
+ *  - Render markers (one rule, `scanRenderMarkers` in dotenv-file.ts): the
+ *    file is read as PHYSICAL lines split at LF (one CR of a CRLF ignored,
+ *    each line keeping its own terminator, so mixed line endings never merge
+ *    lines). A line is a marker if, after TRAILING whitespace is removed, it
+ *    equals `# enigma:render:begin` / `# enigma:render:end` (leading
+ *    whitespace or other characters: not a marker). The file is well-formed
  *    with zero render markers, or exactly one begin followed later by exactly
- *    one end, no other render marker and no env-depository marker between
- *    them. Anything else is DAMAGED and refused before anything is resolved
- *    or written (import protects from the first render begin to EOF). The
- *    renderer always writes canonical markers.
+ *    one end, no other render marker, no env-depository marker between them,
+ *    and no env-depository block overlapping or containing them. Anything
+ *    else is DAMAGED and refused before anything is resolved or written
+ *    (import protects from the first render begin to EOF). Untouched lines
+ *    keep their original bytes and terminators; lines the renderer writes
+ *    (canonical markers, assignments) use the file's dominant EOL.
  *  - AC #3: a name that appears in THIS target file's env-depository
  *    block (`# enigma:begin` / `# enigma:end`) is never written into the
  *    render block; it is reported by name as "already in the env block".
@@ -93,13 +98,15 @@ import {
   RENDER_END_MARKER,
   ENV_BEGIN_MARKER,
   ENV_END_MARKER,
-  detectEol,
   encodeValue,
-  readManagedBlockLines,
+  dominantEol,
+  findBlock,
+  joinPhysicalLines,
   scanRenderMarkers,
+  splitPhysicalLines,
   writeRenderBlock,
 } from '../storage/dotenv-file.js';
-import type { BlockMarkers, RenderMarkerScan } from '../storage/dotenv-file.js';
+import type { BlockMarkers, PhysicalLine, RenderMarkerScan } from '../storage/dotenv-file.js';
 
 const ENV_BLOCK_MARKERS: BlockMarkers = { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER };
 const FILE_MODE = 0o600;
@@ -191,14 +198,17 @@ function nameFromLine(line: string): string | undefined {
   return eq > 0 ? line.slice(0, eq) : undefined;
 }
 
-/** Map of name → raw line for every assignment in one managed block. */
-function blockLinesByName(content: string, markers: BlockMarkers): Map<string, string> {
-  const out = new Map<string, string>();
-  for (const line of readManagedBlockLines(content, markers)) {
+/** Names assigned inside the env depository's block (its first exact begin/end pair, read over physical lines so mixed line endings never merge lines). */
+function envBlockNamesOf(content: string): Set<string> {
+  const texts = splitPhysicalLines(content).map((l) => l.text);
+  const block = findBlock(texts, ENV_BLOCK_MARKERS);
+  const names = new Set<string>();
+  if (!block) return names;
+  for (const line of texts.slice(block.beginIdx + 1, block.endIdx)) {
     const name = nameFromLine(line);
-    if (name !== undefined) out.set(name, line);
+    if (name !== undefined) names.add(name);
   }
-  return out;
+  return names;
 }
 
 function writeRefusal(message: string): EnigmaError {
@@ -367,18 +377,19 @@ function staticWriteError(message: string | undefined): string {
 /* ----------------------------- execution --------------------------- */
 
 /**
- * Drop the render block (markers included), leaving every other line in
- * place. If the block sat at EOF and what remains is non-empty and no longer
- * ends with an EOL, one is added in the file's style so a later
- * `echo X >> file` cannot glue onto the last line; an emptied file stays
- * empty. A file that had no trailing newline before the block was added thus
- * keeps one EOL after it is removed.
+ * Drop the render block (markers included), leaving every other line's bytes
+ * and terminator in place. If the block sat at EOF and the last line that
+ * remains has no terminator, it gets one in the file's dominant EOL so a
+ * later `echo X >> file` cannot glue onto it; an emptied file stays empty.
  */
 function stripRenderBlock(content: string, block: { beginIdx: number; endIdx: number }): string {
-  const eol = detectEol(content);
-  const lines = content.split(eol);
-  const out = [...lines.slice(0, block.beginIdx), ...lines.slice(block.endIdx + 1)].join(eol);
-  return block.endIdx === lines.length - 1 && out !== '' && !out.endsWith(eol) ? `${out}${eol}` : out;
+  const lines = splitPhysicalLines(content);
+  const remaining = [...lines.slice(0, block.beginIdx), ...lines.slice(block.endIdx + 1)];
+  const last = remaining[remaining.length - 1];
+  if (block.endIdx === lines.length - 1 && last !== undefined && last.term === '') {
+    remaining[remaining.length - 1] = { raw: last.raw + (dominantEol(lines) === '\r\n' ? '\r' : ''), term: '\n', text: last.text };
+  }
+  return joinPhysicalLines(remaining);
 }
 
 type ResolveResult = { ok: true; value: string } | { ok: false; code: string };
@@ -390,9 +401,9 @@ type ResolveResult = { ok: true; value: string } | { ok: false; code: string };
  * anything else, so nothing is resolved or written on top of a damaged file.
  * Returns the scan (its `block` is the existing render block, if any).
  */
-function readRenderBlock(content: string, file: string): { scan: RenderMarkerScan; lines: string[] } {
-  const lines = content.split(detectEol(content));
-  const scan = scanRenderMarkers(lines);
+function readRenderBlock(content: string, file: string): { scan: RenderMarkerScan; lines: PhysicalLine[] } {
+  const lines = splitPhysicalLines(content);
+  const scan = scanRenderMarkers(lines.map((l) => l.text));
   if (scan.damaged) {
     throw writeRefusal(
       `${file}: the render block is damaged: the file must have either no render markers or exactly one "${RENDER_BEGIN_MARKER}" followed by exactly one "${RENDER_END_MARKER}" line, with no other render marker and no env-block marker between them. Fix the file by hand, then run enigma render again.`,
@@ -430,7 +441,7 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
   const peekPath = validateTargetFile(plan.worktree, plan.file);
   const peek = existsSync(peekPath) ? readFileSync(peekPath, 'utf8') : '';
   readRenderBlock(peek, plan.file);
-  const peekEnvNames = new Set(blockLinesByName(peek, ENV_BLOCK_MARKERS).keys());
+  const peekEnvNames = envBlockNamesOf(peek);
 
   // 1. Resolve BEFORE the lock. Values live only in this local map: they
   //    are encoded into a block line below and never returned or stored.
@@ -483,12 +494,12 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
     outcome.file = target;
 
     // 4. Everything file-derived comes from `current`.
-    const envBlockNames = new Set(blockLinesByName(current, ENV_BLOCK_MARKERS).keys());
+    const envBlockNames = envBlockNamesOf(current);
     const { scan: renderScan, lines: currentLines } = readRenderBlock(current, plan.file);
     const existingBlock = renderScan.block;
     const existing = new Map<string, string>();
     if (existingBlock) {
-      for (const line of currentLines.slice(existingBlock.beginIdx + 1, existingBlock.endIdx)) {
+      for (const { text: line } of currentLines.slice(existingBlock.beginIdx + 1, existingBlock.endIdx)) {
         const name = nameFromLine(line);
         if (name !== undefined) existing.set(name, line);
       }

@@ -32,6 +32,58 @@ export function detectEol(content: string): '\r\n' | '\n' {
   return content.includes('\r\n') ? '\r\n' : '\n';
 }
 
+/**
+ * One PHYSICAL line: the text before a `\n`, plus that `\n` (`term`; empty for
+ * a last line with no newline). `raw + term` reproduces the original bytes
+ * exactly. `text` is `raw` without the one `\r` that belongs to a `\r\n`
+ * terminator, and is what scanning, recognition and parsing look at.
+ */
+export interface PhysicalLine {
+  raw: string;
+  term: '\n' | '';
+  text: string;
+}
+
+/**
+ * Splits at LF only, so a file with mixed line endings never merges an
+ * LF-terminated line (a marker included) into its neighbor, which splitting on
+ * one guessed EOL does. An empty string has no lines; a trailing newline does
+ * not create an extra empty line.
+ */
+export function splitPhysicalLines(content: string): PhysicalLine[] {
+  const lines: PhysicalLine[] = [];
+  let start = 0;
+  while (start < content.length) {
+    const nl = content.indexOf('\n', start);
+    if (nl === -1) {
+      const raw = content.slice(start);
+      lines.push({ raw, term: '', text: raw });
+      break;
+    }
+    const raw = content.slice(start, nl);
+    lines.push({ raw, term: '\n', text: raw.endsWith('\r') ? raw.slice(0, -1) : raw });
+    start = nl + 1;
+  }
+  return lines;
+}
+
+/** Inverse of `splitPhysicalLines`: every line's own bytes and terminator, unchanged. */
+export function joinPhysicalLines(lines: readonly PhysicalLine[]): string {
+  return lines.map((l) => l.raw + l.term).join('');
+}
+
+/** The more common of `\r\n` and `\n` among the terminated lines; `\n` on a tie or when there are none. Used only to choose the terminator of lines the renderer writes. */
+export function dominantEol(lines: readonly PhysicalLine[]): '\r\n' | '\n' {
+  let crlf = 0;
+  let lf = 0;
+  for (const l of lines) {
+    if (l.term !== '\n') continue;
+    if (l.raw.endsWith('\r')) crlf++;
+    else lf++;
+  }
+  return crlf > lf ? '\r\n' : '\n';
+}
+
 /** Dotenv-compatible encoding: bare when safe, else double-quoted with `\`, `"`, CR, and LF escaped. */
 export function encodeValue(value: string): string {
   if (!NEEDS_QUOTING.test(value)) return value;
@@ -114,11 +166,18 @@ function markerKind(line: string): MarkerKind | undefined {
  * `# enigma:render:end`. The env depository's markers are recognized the same
  * way for this scan only; its own read/write code is unchanged.
  *
+ * Only TRAILING whitespace is trimmed: leading whitespace or any other
+ * character means "not a marker". Callers pass each physical line's `text`
+ * (split at LF, one CR of a CRLF ignored; see `splitPhysicalLines`).
+ *
  * A file is WELL-FORMED when it has exactly zero render markers, or exactly one
  * render begin followed later by exactly one render end, with no other render
- * marker anywhere and no env-depository marker between that begin and end.
+ * marker anywhere, no env-depository marker between that begin and end, and no
+ * env-depository block (a begin paired with the next end) that overlaps or
+ * contains the render block.
  * Anything else is DAMAGED (a nested begin, a repeated block, a stray end, an
- * unterminated begin, env markers inside the render range).
+ * unterminated begin, env markers inside the render range, a render block
+ * inside or overlapping an env block).
  *
  * The renderer refuses a damaged file. Import protects the one render block of
  * a well-formed file; in a damaged file it protects everything from the FIRST
@@ -129,11 +188,20 @@ export function scanRenderMarkers(lines: string[]): RenderMarkerScan {
   const beginIdxs: number[] = [];
   const endIdxs: number[] = [];
   const envIdxs: number[] = [];
+  const envRanges: Array<{ beginIdx: number; endIdx: number }> = [];
+  let envOpen = -1;
   lines.forEach((line, i) => {
     const kind = markerKind(line);
     if (kind === 'render-begin') beginIdxs.push(i);
     else if (kind === 'render-end') endIdxs.push(i);
-    else if (kind === 'env-begin' || kind === 'env-end') envIdxs.push(i);
+    else if (kind === 'env-begin' || kind === 'env-end') {
+      envIdxs.push(i);
+      if (kind === 'env-begin' && envOpen === -1) envOpen = i;
+      else if (kind === 'env-end' && envOpen !== -1) {
+        envRanges.push({ beginIdx: envOpen, endIdx: i });
+        envOpen = -1;
+      }
+    }
   });
   const scan: RenderMarkerScan = { damaged: false };
   if (beginIdxs.length > 0) scan.firstBeginIdx = beginIdxs[0];
@@ -142,7 +210,8 @@ export function scanRenderMarkers(lines: string[]): RenderMarkerScan {
     beginIdxs.length === 1 &&
     endIdxs.length === 1 &&
     beginIdxs[0]! < endIdxs[0]! &&
-    !envIdxs.some((i) => i > beginIdxs[0]! && i < endIdxs[0]!);
+    !envIdxs.some((i) => i > beginIdxs[0]! && i < endIdxs[0]!) &&
+    !envRanges.some((r) => r.beginIdx < endIdxs[0]! && r.endIdx > beginIdxs[0]!);
   if (wellFormed) scan.block = { beginIdx: beginIdxs[0]!, endIdx: endIdxs[0]! };
   else scan.damaged = true;
   return scan;
@@ -243,8 +312,8 @@ function isAmbiguousUnquoted(raw: string): boolean {
  * without distinguishing them — neither block's lines are ever imported
  * or stripped.
  */
-function scanAssignments(lines: string[]): ScannedAssignment[] {
-  const blocks = managedBlockRanges(lines);
+function scanAssignments(lines: PhysicalLine[]): ScannedAssignment[] {
+  const blocks = managedBlockRanges(lines.map((l) => l.text));
   const assignments: ScannedAssignment[] = [];
   let i = 0;
   while (i < lines.length) {
@@ -252,7 +321,7 @@ function scanAssignments(lines: string[]): ScannedAssignment[] {
       i++;
       continue;
     }
-    const line = lines[i]!;
+    const line = lines[i]!.text;
     const trimmed = line.trim();
     if (trimmed === '' || trimmed.startsWith('#')) {
       i++;
@@ -285,7 +354,7 @@ function scanAssignments(lines: string[]): ScannedAssignment[] {
         const nextIdx = endIdx + 1;
         if (nextIdx >= lines.length || isInsideAnyManagedBlock(blocks, nextIdx)) break;
         endIdx = nextIdx;
-        joined += `\n${lines[endIdx]}`;
+        joined += `\n${lines[endIdx]!.text}`;
       }
       if (closed) {
         // A closed quote's boundary is explicit — never ambiguous, whatever it contains.
@@ -336,9 +405,7 @@ const ASSIGNMENT = /^(?:export\s+)?([^\s=]+)=(.*)$/;
 
 /** Parses a plain `.env` file's content into importable entries (D4.3). Never throws on malformed input — unparseable lines are simply skipped. Lines inside any Enigma-managed block are skipped at scan time, not parsed at all. */
 export function parseDotEnv(content: string): ParseDotEnvResult {
-  const eol = detectEol(content);
-  const lines = content.length === 0 ? [] : content.split(eol);
-  const assignments = scanAssignments(lines);
+  const assignments = scanAssignments(splitPhysicalLines(content));
 
   const order: string[] = [];
   const values = new Map<string, string>();
@@ -395,8 +462,7 @@ export function parseDotEnv(content: string): ParseDotEnvResult {
  * this function is never asked to remove a duplicated name via that path.
  */
 export function removeDotEnvEntries(content: string, names: string[], opts: { comment?: string } = {}): string {
-  const eol = detectEol(content);
-  const lines = content.length === 0 ? [] : content.split(eol);
+  const lines = splitPhysicalLines(content);
   const assignments = scanAssignments(lines);
 
   const targets = new Set(names);
@@ -409,16 +475,28 @@ export function removeDotEnvEntries(content: string, names: string[], opts: { co
   }
   const firstRemovedIdx = Math.min(...toRemove.map((a) => a.startIdx));
 
-  const newLines: string[] = [];
+  // Every kept line keeps its own bytes and terminator. A comment takes over
+  // the terminator of the line it replaces (CR included).
+  const out: PhysicalLine[] = [];
   for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx]!;
     if (!removedLineIdx.has(idx)) {
-      newLines.push(lines[idx]!);
+      out.push(line);
       continue;
     }
-    if (idx === firstRemovedIdx && opts.comment) newLines.push(opts.comment);
+    if (idx === firstRemovedIdx && opts.comment) {
+      const cr = line.term === '\n' && line.raw.endsWith('\r') ? '\r' : '';
+      out.push({ raw: `${opts.comment}${cr}`, term: line.term, text: opts.comment });
+    }
   }
-
-  return newLines.join(eol);
+  // Removing a final unterminated line also drops the terminator before it,
+  // as removal has always done.
+  const last = lines[lines.length - 1]!;
+  if (removedLineIdx.has(lines.length - 1) && last.term === '' && out.length > 0) {
+    const tail = out[out.length - 1]!;
+    out[out.length - 1] = { raw: tail.raw.endsWith('\r') && tail.term === '\n' ? tail.raw.slice(0, -1) : tail.raw, term: '', text: tail.text };
+  }
+  return joinPhysicalLines(out);
 }
 
 /* ------------------------------------------------------------------ *
@@ -498,41 +576,30 @@ export function removeManagedValue(content: string, name: string, markers: Block
 }
 
 /**
- * Returns every `NAME=line` (raw bytes) currently in the named block,
- * preserving the order they appeared in the file. The renderer uses this
- * to copy previously-rendered lines byte-identical when a follow-up render
- * doesn't need to re-resolve them (Issue #107).
- */
-export function readManagedBlockLines(content: string, markers: BlockMarkers): string[] {
-  const eol = detectEol(content);
-  const lines = content.length === 0 ? [] : content.split(eol);
-  const block = findBlock(lines, markers);
-  return block ? lines.slice(block.beginIdx + 1, block.endIdx) : [];
-}
-
-/**
  * Write the render block with a body of exactly `bodyLines` (raw `NAME=value`
  * lines, already encoded). `existing` is the block's range from
- * `scanRenderMarkers` (a well-formed file's one block): it is rewritten in
- * place, wherever it is, with canonical markers. Without it a new block is
- * appended at EOF, after any env block. Either way the block ends with an EOL
- * in the file's style, so a later `echo X >> file` starts on its own line and
- * can never glue onto the end marker: an existing block at EOF without a
- * trailing newline gains one when rewritten. A file that had no trailing
- * newline therefore gains one before the block and one after it.
+ * `scanRenderMarkers` over the file's physical lines (a well-formed file's one
+ * block): it is rewritten in place, wherever it is, with canonical markers.
+ * Without it a new block is appended at EOF, after any env block.
+ *
+ * Every line outside the block keeps its original bytes and terminator. The
+ * lines written here (markers and assignments) end with the file's DOMINANT
+ * EOL (`dominantEol`), and the block always ends with one, so a later
+ * `echo X >> file` starts on its own line and can never glue onto the end
+ * marker. A last line with no newline is terminated (in the dominant EOL)
+ * before a new block is appended after it.
  */
 export function writeRenderBlock(content: string, bodyLines: readonly string[], existing?: { beginIdx: number; endIdx: number }): string {
-  const eol = detectEol(content);
-  const markers = { begin: RENDER_BEGIN_MARKER, end: RENDER_END_MARKER };
+  const lines = splitPhysicalLines(content);
+  const eol = dominantEol(lines);
+  const written = [RENDER_BEGIN_MARKER, ...bodyLines, RENDER_END_MARKER].map((text): PhysicalLine => ({ raw: text + (eol === '\r\n' ? '\r' : ''), term: '\n', text }));
   if (existing) {
-    const lines = content.split(eol);
-    const rewritten = [...lines.slice(0, existing.beginIdx), markers.begin, ...bodyLines, markers.end, ...lines.slice(existing.endIdx + 1)].join(eol);
-    // The end marker was the file's last line: end it with an EOL too.
-    return existing.endIdx === lines.length - 1 ? `${rewritten}${eol}` : rewritten;
+    return joinPhysicalLines([...lines.slice(0, existing.beginIdx), ...written, ...lines.slice(existing.endIdx + 1)]);
   }
-  const needsNewline = content.length > 0 && !content.endsWith(eol);
-  const prefix = needsNewline ? content + eol : content;
-  return `${prefix}${markers.begin}${eol}${bodyLines.join(eol)}${eol}${markers.end}${eol}`;
+  const before = lines.map((l, i): PhysicalLine =>
+    i === lines.length - 1 && l.term === '' ? { raw: l.raw + (eol === '\r\n' ? '\r' : ''), term: '\n', text: l.text } : l,
+  );
+  return joinPhysicalLines([...before, ...written]);
 }
 
 export { FILE_MODE };
