@@ -120,6 +120,51 @@ describe('nativeRequest', () => {
     expect(await hasSecret('B', { scope: 'global' })).toBe(true);
   });
 
+  it('Issue #117: several names get one labelled dialog each (1 of 3, 2 of 3, 3 of 3) and each value is stored under its own name, never merged', async () => {
+    const children = [new FakeChild(), new FakeChild(), new FakeChild()];
+    let call = 0;
+    spawnMock.mockImplementation(() => {
+      const child = children[call]!;
+      emitDialogResult(child, `${SENTINEL}-value-${call}`);
+      call += 1;
+      return child;
+    });
+
+    const result = await nativeRequest({
+      names: ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_ENDPOINT'],
+      reason: 'R2 credentials for backups; R2_ENDPOINT is the account URL',
+      scope: 'global',
+      depository: 'encrypted',
+    });
+
+    expect(result.stored).toEqual(['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_ENDPOINT']);
+    const scripts = children.map((c) => c.stdin.write.mock.calls[0]?.[0] as string);
+    scripts.forEach((script, i) => {
+      expect(script).toContain(`with title "Enigma (${i + 1} of 3)"`);
+      expect(script).toContain(`(${i + 1} of 3). Enter only this one value`);
+    });
+    expect(scripts[0]).toContain('Enter value for R2_ACCESS_KEY_ID (1 of 3)');
+    expect(scripts[1]).toContain('Enter value for R2_SECRET_ACCESS_KEY (2 of 3)');
+    expect(scripts[2]).toContain('Enter value for R2_ENDPOINT (3 of 3)');
+    for (const [i, name] of ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_ENDPOINT'].entries()) {
+      expect(await resolveSecret(name, { scope: 'global', actor: 'cli' })).toBe(`${SENTINEL}-value-${i}`);
+    }
+  });
+
+  it('Issue #117: a continuation (progress offset) keeps the numbering instead of restarting at 1 of 1', async () => {
+    const child = new FakeChild();
+    spawnMock.mockImplementation(() => {
+      emitDialogResult(child, SENTINEL);
+      return child;
+    });
+
+    await nativeRequest({ names: ['C'], reason: 'r', scope: 'global', depository: 'encrypted', progress: { offset: 2, total: 3 } });
+
+    const script = child.stdin.write.mock.calls[0]?.[0] as string;
+    expect(script).toContain('Enter value for C (3 of 3)');
+    expect(script).toContain('with title "Enigma (3 of 3)"');
+  });
+
   it('throws E_REQUEST_CANCELLED when the dialog is cancelled, and stores nothing', async () => {
     const child = new FakeChild();
     spawnMock.mockImplementation(() => {

@@ -5,6 +5,7 @@ import type { Scope } from '../core/index-store.js';
 import { setSecret } from '../storage/manager.js';
 import type { DepositoryId } from '../storage/interfaces.js';
 import { buildHiddenAnswerScript } from './apple-script.js';
+import type { DialogProgress } from './apple-script.js';
 import { execWithStdin } from './exec.js';
 import { assertDarwin } from './platform.js';
 
@@ -28,6 +29,13 @@ export interface NativeRequestOptions {
   actor?: AuditActor;
   /** Explicit, one-time user confirmation to create a depository's backing collection when missing (Issue #28); forwarded to `setSecret`. Never a default. */
   createVault?: boolean;
+  /**
+   * For a retry that continues a longer request (the vault-confirmation retry
+   * passes the not-yet-stored tail of `names`): how many names were already
+   * handled and how many there are in all, so the dialogs keep saying "3 of 3"
+   * rather than restarting at "1 of 1". Defaults to `names` alone.
+   */
+  progress?: { offset: number; total: number };
 }
 
 /** Names only; a value never leaves this module except through `setSecret` (ADR-001). */
@@ -35,8 +43,8 @@ export interface NativeRequestResult {
   stored: string[];
 }
 
-async function promptHiddenAnswer(name: string, reason: string): Promise<string> {
-  const script = buildHiddenAnswerScript(name, reason);
+async function promptHiddenAnswer(name: string, reason: string, progress: DialogProgress): Promise<string> {
+  const script = buildHiddenAnswerScript(name, reason, progress);
   const { code, stdout, stderr } = await execWithStdin('osascript', ['-'], script, {
     timeoutMs: DIALOG_TIMEOUT_MS,
     maxBufferBytes: DIALOG_MAX_BUFFER_BYTES,
@@ -63,9 +71,11 @@ export async function nativeRequest(opts: NativeRequestOptions): Promise<NativeR
   const depository: DepositoryId = opts.depository ?? loadConfig().defaultDepository ?? 'encrypted';
   const actor: AuditActor = opts.actor ?? 'user';
 
+  const offset = opts.progress?.offset ?? 0;
+  const total = opts.progress?.total ?? opts.names.length;
   const stored: string[] = [];
-  for (const name of opts.names) {
-    const value = await promptHiddenAnswer(name, opts.reason);
+  for (const [i, name] of opts.names.entries()) {
+    const value = await promptHiddenAnswer(name, opts.reason, { index: offset + i + 1, total });
     await setSecret({
       name,
       value,

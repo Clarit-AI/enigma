@@ -98,6 +98,7 @@ async function runNative(args: RequestArgs, cwd: string, server: McpServer): Pro
         usage: args.usage,
         rotate: args.rotate,
         createVault,
+        progress: { offset: args.names.length - pendingNames.length, total: args.names.length },
       });
       settled.push(...result.stored.map((name): RequestNameResult => ({ name, ok: true })));
       const outcome = renderOutcome(settled, cwd);
