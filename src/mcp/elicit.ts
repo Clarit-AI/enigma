@@ -30,8 +30,22 @@ export interface ElicitUrlOptions {
  * enigma_request) separately await the request store's fulfilment waiter.
  */
 export async function elicitUrl(server: Server, opts: ElicitUrlOptions): Promise<ElicitResult> {
-  return server.elicitInput({ mode: 'url', elicitationId: opts.elicitationId, url: opts.url, message: opts.message });
+  return server.elicitInput(
+    { mode: 'url', elicitationId: opts.elicitationId, url: opts.url, message: opts.message },
+    { timeout: URL_ELICITATION_ACK_TIMEOUT_MS },
+  );
 }
+
+/**
+ * How long to wait for the client to acknowledge a URL-mode elicitation (not
+ * for the human to finish the form). It stays under the 60 s default tool-call
+ * timeout of SDK-based MCP clients, so the fallback below can still be
+ * delivered. A headless host answers at once (it declines) or never; an
+ * interactive client acknowledges once the human has seen the prompt. On
+ * expiry the caller falls back to handing the agent the local request link
+ * (Issue #118).
+ */
+export const URL_ELICITATION_ACK_TIMEOUT_MS = 30_000;
 
 /**
  * MCP spec: sent once the out-of-band flow the URL pointed at has actually
