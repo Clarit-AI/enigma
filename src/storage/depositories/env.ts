@@ -2,116 +2,83 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { EnigmaError } from '../../core/errors.js';
 import type { Depository, DepositoryContext, DepositoryModule } from '../interfaces.js';
+import {
+  extractManagedValue,
+  removeManagedValue,
+  upsertManagedBlock,
+  ENV_BEGIN_MARKER,
+  ENV_END_MARKER,
+} from '../dotenv-file.js';
 
-const BEGIN_MARKER = '# enigma:begin';
-const END_MARKER = '# enigma:end';
+/* ------------------------------------------------------------------ *
+ *  Env depository (Issue #13, D4.3)                                    *
+ * ------------------------------------------------------------------ *
+ *
+ * The env depository's `# enigma:begin` / `# enigma:end` block is
+ * written with the same shape the renderer uses for its own block — both
+ * blocks share the EOL detector, the encoder, and the begin/end block
+ * writer, now defined in `src/storage/dotenv-file.ts` so the renderer can
+ * reuse them with its own marker pair. The depository's file format and
+ * observable behaviour are unchanged; the shared helpers produce byte-
+ * identical output for the inputs this depository feeds them.
+ */
+
 const FILE_MODE = 0o600;
+const ENV_BLOCK_MARKERS = { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER } as const;
 const GITIGNORE_ENV_PATTERNS = new Set(['.env', '.env*', '*.env', '**/.env', '.env**']);
-const NEEDS_QUOTING = /[\s#"'\\$]/;
 
-function detectEol(content: string): '\r\n' | '\n' {
-  return content.includes('\r\n') ? '\r\n' : '\n';
-}
-
-/** Dotenv-compatible encoding: bare when safe, else double-quoted with `\`, `"`, CR, and LF escaped. */
-function encodeValue(value: string): string {
-  if (!NEEDS_QUOTING.test(value)) return value;
-  const escaped = value
-    .replace(/\\/g, '\\\\')
-    .replace(/"/g, '\\"')
-    .replace(/\r/g, '\\r')
-    .replace(/\n/g, '\\n');
-  return `"${escaped}"`;
-}
-
-/** Exact inverse of encodeValue: unwraps a double-quoted value and unescapes `\\`, `\"`, `\r`, `\n`. */
-function decodeValue(raw: string): string {
-  if (raw.length < 2 || !raw.startsWith('"') || !raw.endsWith('"')) return raw;
-  const inner = raw.slice(1, -1);
-  return inner.replace(/\\\\|\\"|\\r|\\n/g, (escape) => {
-    switch (escape) {
-      case '\\\\':
-        return '\\';
-      case '\\"':
-        return '"';
-      case '\\r':
-        return '\r';
-      default:
-        return '\n';
+/** One `.gitignore` glob as a RegExp: `**` any depth, `*` within a segment, `?` one character. */
+function gitignoreGlobToRegExp(glob: string): RegExp {
+  let re = '';
+  for (let i = 0; i < glob.length; i++) {
+    const ch = glob[i]!;
+    if (ch === '*' && glob[i + 1] === '*') {
+      const slash = glob[i + 2] === '/';
+      re += slash ? '(?:.*/)?' : '.*';
+      i += slash ? 2 : 1;
+    } else if (ch === '*') {
+      re += '[^/]*';
+    } else if (ch === '?') {
+      re += '[^/]';
+    } else {
+      re += ch.replace(/[.+^${}()|[\]\\]/g, '\\$&');
     }
-  });
+  }
+  return new RegExp(`^${re}$`);
 }
 
-function findBlock(lines: string[]): { beginIdx: number; endIdx: number } | undefined {
-  const beginIdx = lines.findIndex((l) => l === BEGIN_MARKER);
-  if (beginIdx === -1) return undefined;
-  const endIdx = lines.findIndex((l, i) => l === END_MARKER && i > beginIdx);
-  if (endIdx === -1) return undefined;
-  return { beginIdx, endIdx };
+/** True when a `.gitignore` pattern matches `relPath` (posix, project-relative) or a directory above it. Proportionate: no negation, no nested `.gitignore` files. */
+function gitignorePatternCovers(pattern: string, relPath: string): boolean {
+  const glob = pattern.replace(/^\//, '').replace(/\/$/, '');
+  const re = gitignoreGlobToRegExp(glob);
+  const segments = relPath.split('/');
+  // A pattern with a slash in it is anchored to the project root; one without matches any path segment.
+  if (glob.includes('/') || pattern.startsWith('/')) return segments.some((_, i) => re.test(segments.slice(0, i + 1).join('/')));
+  return segments.some((segment) => re.test(segment));
 }
 
 /**
- * Writes/updates `name` inside the managed block, preserving every other line
- * byte-for-byte and the file's own line-ending style. Appends the block at
- * EOF — behind a single newline if the file doesn't already end with one —
- * when no block exists yet.
+ * Returns a warning when `<projectPath>/<targetPath>` is not covered by
+ * `.gitignore` (proportionate check, not a full glob engine). The default
+ * `targetPath` is `.env` and keeps the original literal-pattern check and
+ * wording exactly; any other target (the renderer's `render.path`) is
+ * matched against the patterns by its path, and the warning names that path.
  */
-function upsertManagedBlock(content: string, name: string, value: string): string {
-  const eol = detectEol(content);
-  const lines = content.length === 0 ? [] : content.split(eol);
-  const block = findBlock(lines);
-
-  const encoded = encodeValue(value);
-  if (block) {
-    const blockLines = lines.slice(block.beginIdx + 1, block.endIdx);
-    const existingIdx = blockLines.findIndex((l) => l.startsWith(`${name}=`));
-    if (existingIdx !== -1) {
-      blockLines[existingIdx] = `${name}=${encoded}`;
-    } else {
-      blockLines.push(`${name}=${encoded}`);
-    }
-    const newLines = [...lines.slice(0, block.beginIdx + 1), ...blockLines, ...lines.slice(block.endIdx)];
-    return newLines.join(eol);
-  }
-
-  const needsNewline = content.length > 0 && !content.endsWith(eol);
-  const prefix = needsNewline ? content + eol : content;
-  return `${prefix}${BEGIN_MARKER}${eol}${name}=${encoded}${eol}${END_MARKER}${eol}`;
-}
-
-function extractManagedValue(content: string, name: string): string | undefined {
-  const eol = detectEol(content);
-  const lines = content.length === 0 ? [] : content.split(eol);
-  const block = findBlock(lines);
-  if (!block) return undefined;
-  const match = lines.slice(block.beginIdx + 1, block.endIdx).find((l) => l.startsWith(`${name}=`));
-  return match ? decodeValue(match.slice(name.length + 1)) : undefined;
-}
-
-function removeManagedValue(content: string, name: string): string {
-  const eol = detectEol(content);
-  const lines = content.length === 0 ? [] : content.split(eol);
-  const block = findBlock(lines);
-  if (!block) return content;
-  const blockLines = lines.slice(block.beginIdx + 1, block.endIdx).filter((l) => !l.startsWith(`${name}=`));
-  const newLines = [...lines.slice(0, block.beginIdx + 1), ...blockLines, ...lines.slice(block.endIdx)];
-  return newLines.join(eol);
-}
-
-/** Returns a warning when `<projectPath>/.env` is not covered by `.gitignore` (proportionate literal-pattern check, not a full glob engine). */
-export function checkEnvGitignore(projectPath: string): string[] {
+export function checkEnvGitignore(projectPath: string, targetPath: string = '.env'): string[] {
   const gitignorePath = join(projectPath, '.gitignore');
+  const custom = targetPath !== '.env';
+  const label = custom ? targetPath.split(/[\\/]/).join('/') : '.env';
   if (!existsSync(gitignorePath)) {
-    return ['.env is not gitignored: no .gitignore file found in this project'];
+    return [`${label} is not gitignored: no .gitignore file found in this project`];
   }
   const lines = readFileSync(gitignorePath, 'utf8').split(/\r?\n/);
   const covered = lines.some((raw) => {
     const line = raw.trim();
-    if (!line || line.startsWith('#')) return false;
-    const normalized = line.replace(/^\//, '').replace(/\/$/, '');
-    return GITIGNORE_ENV_PATTERNS.has(normalized);
+    if (!line || line.startsWith('#') || line.startsWith('!')) return false;
+    if (custom) return gitignorePatternCovers(line, label);
+    return GITIGNORE_ENV_PATTERNS.has(line.replace(/^\//, '').replace(/\/$/, ''));
   });
-  return covered ? [] : ['.env is not gitignored: add .env to .gitignore before committing'];
+  return covered ? [] : [`${label} is not gitignored: add ${label} to .gitignore before committing`];
 }
 
 function requireProjectPath(ctx: DepositoryContext): string {
@@ -135,12 +102,12 @@ function createEnvDepository(ctx: DepositoryContext): Depository {
 
     // ref is the bare NAME for env — the file itself is located via DepositoryContext.projectPath.
     async set(ref, value) {
-      writeFileSync(envFilePath, upsertManagedBlock(readEnvFile(), ref, value), { mode: FILE_MODE });
+      writeFileSync(envFilePath, upsertManagedBlock(readEnvFile(), ref, value, ENV_BLOCK_MARKERS), { mode: FILE_MODE });
       return ref;
     },
 
     async resolve(ref) {
-      const value = extractManagedValue(readEnvFile(), ref);
+      const value = extractManagedValue(readEnvFile(), ref, ENV_BLOCK_MARKERS);
       if (value === undefined) {
         throw new EnigmaError({ code: 'E_NOT_FOUND', message: 'secret not found', depository: 'env' });
       }
@@ -149,7 +116,7 @@ function createEnvDepository(ctx: DepositoryContext): Depository {
 
     async delete(ref) {
       const content = readEnvFile();
-      if (content) writeFileSync(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE });
+      if (content) writeFileSync(envFilePath, removeManagedValue(content, ref, ENV_BLOCK_MARKERS), { mode: FILE_MODE });
     },
 
     // Issue #70: compare-and-delete in one synchronous read-modify-write, so
@@ -157,13 +124,13 @@ function createEnvDepository(ctx: DepositoryContext): Depository {
     // never removed.
     async deleteIfUnchanged(ref, expectedValue) {
       const content = readEnvFile();
-      if (extractManagedValue(content, ref) !== expectedValue) return false;
-      writeFileSync(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE });
+      if (extractManagedValue(content, ref, ENV_BLOCK_MARKERS) !== expectedValue) return false;
+      writeFileSync(envFilePath, removeManagedValue(content, ref, ENV_BLOCK_MARKERS), { mode: FILE_MODE });
       return true;
     },
 
     async has(ref) {
-      return extractManagedValue(readEnvFile(), ref) !== undefined;
+      return extractManagedValue(readEnvFile(), ref, ENV_BLOCK_MARKERS) !== undefined;
     },
   };
 }

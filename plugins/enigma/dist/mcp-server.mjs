@@ -42956,7 +42956,7 @@ function indexLockPath() {
 }
 
 // src/core/secure-file.ts
-import { mkdirSync, appendFileSync, chmodSync, existsSync as existsSync2, readFileSync as readFileSync2, renameSync, writeFileSync } from "node:fs";
+import { existsSync as existsSync2, mkdirSync, appendFileSync, chmodSync, readFileSync as readFileSync2, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname as dirname3 } from "node:path";
 import { randomBytes as randomBytes2 } from "node:crypto";
 var FILE_MODE = 384;
@@ -42991,6 +42991,22 @@ function appendLineSecure(path, line) {
   ensureParentDir(path);
   appendFileSync(path, `${line}
 `, { mode: FILE_MODE });
+}
+function writeFileAtomic(path, content, mode) {
+  const tmpPath = `${path}.${randomBytes2(6).toString("hex")}.tmp`;
+  try {
+    writeFileSync(tmpPath, content, { mode });
+    renameSync(tmpPath, path);
+    return { ok: true };
+  } catch (err) {
+    const error62 = err instanceof Error ? err.message : String(err);
+    try {
+      if (existsSync2(tmpPath)) unlinkSync(tmpPath);
+      return { ok: false, error: error62 };
+    } catch {
+      return { ok: false, error: error62, leftoverPath: tmpPath };
+    }
+  }
 }
 
 // src/core/audit.ts
@@ -43476,13 +43492,34 @@ var encryptedDepositoryModule = {
 // src/storage/depositories/env.ts
 import { existsSync as existsSync7, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
 import { join as join3 } from "node:path";
-var BEGIN_MARKER = "# enigma:begin";
-var END_MARKER = "# enigma:end";
-var FILE_MODE3 = 384;
-var GITIGNORE_ENV_PATTERNS = /* @__PURE__ */ new Set([".env", ".env*", "*.env", "**/.env", ".env**"]);
+
+// src/storage/dotenv-file.ts
+var ENV_BEGIN_MARKER = "# enigma:begin";
+var ENV_END_MARKER = "# enigma:end";
+var RENDER_BEGIN_MARKER = "# enigma:render:begin";
+var RENDER_END_MARKER = "# enigma:render:end";
 var NEEDS_QUOTING = /[\s#"'\\$]/;
 function detectEol(content) {
   return content.includes("\r\n") ? "\r\n" : "\n";
+}
+function splitPhysicalLines(content) {
+  const lines = [];
+  let start = 0;
+  while (start < content.length) {
+    const nl = content.indexOf("\n", start);
+    if (nl === -1) {
+      const raw2 = content.slice(start);
+      lines.push({ raw: raw2, term: "", text: raw2 });
+      break;
+    }
+    const raw = content.slice(start, nl);
+    lines.push({ raw, term: "\n", text: raw.endsWith("\r") ? raw.slice(0, -1) : raw });
+    start = nl + 1;
+  }
+  return lines;
+}
+function joinPhysicalLines(lines) {
+  return lines.map((l) => l.raw + l.term).join("");
 }
 function encodeValue(value) {
   if (!NEEDS_QUOTING.test(value)) return value;
@@ -43505,17 +43542,233 @@ function decodeValue(raw) {
     }
   });
 }
-function findBlock(lines) {
-  const beginIdx = lines.findIndex((l) => l === BEGIN_MARKER);
+function findBlock(lines, markers) {
+  const beginIdx = lines.findIndex((l) => l === markers.begin);
   if (beginIdx === -1) return void 0;
-  const endIdx = lines.findIndex((l, i) => l === END_MARKER && i > beginIdx);
+  const endIdx = lines.findIndex((l, i) => l === markers.end && i > beginIdx);
   if (endIdx === -1) return void 0;
   return { beginIdx, endIdx };
 }
-function upsertManagedBlock(content, name, value) {
+var TRAILING_WHITESPACE = /[ \t\r]+$/;
+function markerKind(line) {
+  switch (line.replace(TRAILING_WHITESPACE, "")) {
+    case RENDER_BEGIN_MARKER:
+      return "render-begin";
+    case RENDER_END_MARKER:
+      return "render-end";
+    case ENV_BEGIN_MARKER:
+      return "env-begin";
+    case ENV_END_MARKER:
+      return "env-end";
+    default:
+      return void 0;
+  }
+}
+function envBlockRanges(lines) {
+  const ranges = [];
+  const exact = findBlock(lines, { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER });
+  if (exact) ranges.push(exact);
+  let open2 = -1;
+  lines.forEach((line, i) => {
+    const kind = markerKind(line);
+    if (kind === "env-begin" && open2 === -1) open2 = i;
+    else if (kind === "env-end" && open2 !== -1) {
+      ranges.push({ beginIdx: open2, endIdx: i });
+      open2 = -1;
+    }
+  });
+  return ranges;
+}
+function scanRenderMarkers(lines) {
+  const beginIdxs = [];
+  const endIdxs = [];
+  const envIdxs = [];
+  lines.forEach((line, i) => {
+    const kind = markerKind(line);
+    if (kind === "render-begin") beginIdxs.push(i);
+    else if (kind === "render-end") endIdxs.push(i);
+    else if (kind === "env-begin" || kind === "env-end") envIdxs.push(i);
+  });
+  const scan = { damaged: false };
+  if (beginIdxs.length > 0) scan.firstBeginIdx = beginIdxs[0];
+  if (beginIdxs.length === 0 && endIdxs.length === 0) return scan;
+  const wellFormed = beginIdxs.length === 1 && endIdxs.length === 1 && beginIdxs[0] < endIdxs[0] && !envIdxs.some((i) => i > beginIdxs[0] && i < endIdxs[0]) && !envBlockRanges(lines).some((r) => r.beginIdx < endIdxs[0] && r.endIdx > beginIdxs[0]);
+  if (wellFormed) scan.block = { beginIdx: beginIdxs[0], endIdx: endIdxs[0] };
+  else scan.damaged = true;
+  return scan;
+}
+function isInsideAnyManagedBlock(blocks, i) {
+  for (const b of blocks) {
+    if (i >= b.beginIdx && i <= b.endIdx) return true;
+  }
+  return false;
+}
+function managedBlockRanges(lines) {
+  const ranges = envBlockRanges(lines);
+  const render = scanRenderMarkers(lines);
+  if (render.block) ranges.push(render.block);
+  else if (render.damaged && render.firstBeginIdx !== void 0) ranges.push({ beginIdx: render.firstBeginIdx, endIdx: lines.length - 1 });
+  return ranges;
+}
+var INLINE_COMMENT_REASON = 'the unquoted value contains a space then "#", which could start a comment or be part of the secret \u2014 quote the value if the # belongs to it, then rerun import';
+function isAmbiguousUnquoted(raw) {
+  return / #/.test(raw);
+}
+function scanAssignments(lines) {
+  const blocks = managedBlockRanges(lines.map((l) => l.text));
+  const assignments = [];
+  let i = 0;
+  while (i < lines.length) {
+    if (isInsideAnyManagedBlock(blocks, i)) {
+      i++;
+      continue;
+    }
+    const line = lines[i].text;
+    const trimmed = line.trim();
+    if (trimmed === "" || trimmed.startsWith("#")) {
+      i++;
+      continue;
+    }
+    const match = ASSIGNMENT.exec(trimmed);
+    if (!match) {
+      i++;
+      continue;
+    }
+    const name = match[1];
+    const rest = match[2];
+    const quote = rest[0];
+    if (quote === '"' || quote === "'") {
+      let joined = rest.slice(1);
+      let endIdx = i;
+      let closed = false;
+      for (; ; ) {
+        const closeIdx = findUnescapedQuote(joined, quote);
+        if (closeIdx !== -1) {
+          joined = joined.slice(0, closeIdx);
+          closed = true;
+          break;
+        }
+        const nextIdx = endIdx + 1;
+        if (nextIdx >= lines.length || isInsideAnyManagedBlock(blocks, nextIdx)) break;
+        endIdx = nextIdx;
+        joined += `
+${lines[endIdx].text}`;
+      }
+      if (closed) {
+        assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), ambiguous: false, startIdx: i, endIdx });
+        i = endIdx + 1;
+      } else {
+        const ambiguous = isAmbiguousUnquoted(rest);
+        assignments.push({
+          name,
+          value: rest.trim(),
+          valid: NAME_PATTERN.test(name),
+          ambiguous,
+          ambiguousReason: ambiguous ? INLINE_COMMENT_REASON : void 0,
+          startIdx: i,
+          endIdx: i
+        });
+        i++;
+      }
+      continue;
+    }
+    {
+      const ambiguous = isAmbiguousUnquoted(rest);
+      assignments.push({
+        name,
+        value: rest.trim(),
+        valid: NAME_PATTERN.test(name),
+        ambiguous,
+        ambiguousReason: ambiguous ? INLINE_COMMENT_REASON : void 0,
+        startIdx: i,
+        endIdx: i
+      });
+      i++;
+    }
+  }
+  return assignments;
+}
+function findUnescapedQuote(text, quote) {
+  for (let i = 0; i < text.length; i++) {
+    if (text[i] === quote && text[i - 1] !== "\\") return i;
+  }
+  return -1;
+}
+var ASSIGNMENT = /^(?:export\s+)?([^\s=]+)=(.*)$/;
+function parseDotEnv(content) {
+  const assignments = scanAssignments(splitPhysicalLines(content));
+  const order = [];
+  const values = /* @__PURE__ */ new Map();
+  const ambiguousFlags = /* @__PURE__ */ new Map();
+  const ambiguousReasons = /* @__PURE__ */ new Map();
+  const invalidSeen = /* @__PURE__ */ new Set();
+  const duplicateSeen = /* @__PURE__ */ new Set();
+  for (const a of assignments) {
+    if (!a.valid) {
+      invalidSeen.add(a.name);
+      continue;
+    }
+    if (values.has(a.name)) duplicateSeen.add(a.name);
+    else order.push(a.name);
+    values.set(a.name, a.value);
+    ambiguousFlags.set(a.name, a.ambiguous);
+    ambiguousReasons.set(a.name, a.ambiguousReason);
+  }
+  return {
+    entries: order.map((name) => {
+      const isDuplicate = duplicateSeen.has(name);
+      return {
+        name,
+        value: values.get(name),
+        ambiguous: isDuplicate || ambiguousFlags.get(name),
+        ambiguousReason: isDuplicate ? `${name} is assigned more than once in this file \u2014 remove the duplicate line(s) and rerun import` : ambiguousReasons.get(name)
+      };
+    }),
+    invalidNames: [...invalidSeen],
+    duplicateNames: [...duplicateSeen]
+  };
+}
+function removeDotEnvEntries(content, names, opts = {}) {
+  const lines = splitPhysicalLines(content);
+  const assignments = scanAssignments(lines);
+  const targets = new Set(names);
+  const toRemove = assignments.filter((a) => a.valid && targets.has(a.name));
+  if (toRemove.length === 0) return content;
+  const removedLineIdx = /* @__PURE__ */ new Set();
+  for (const a of toRemove) {
+    for (let idx = a.startIdx; idx <= a.endIdx; idx++) removedLineIdx.add(idx);
+  }
+  const firstRemovedIdx = Math.min(...toRemove.map((a) => a.startIdx));
+  const out = [];
+  const source = [];
+  for (let idx = 0; idx < lines.length; idx++) {
+    const line = lines[idx];
+    if (!removedLineIdx.has(idx)) {
+      out.push(line);
+      source.push(idx);
+      continue;
+    }
+    if (idx === firstRemovedIdx && opts.comment) {
+      const cr = line.term === "\n" && line.raw.endsWith("\r") ? "\r" : "";
+      out.push({ raw: `${opts.comment}${cr}`, term: line.term, text: opts.comment });
+      source.push(idx);
+    }
+  }
+  const last = lines[lines.length - 1];
+  if (removedLineIdx.has(lines.length - 1) && last.term === "" && out.length > 0) {
+    const previousSource = source[source.length - 1];
+    const protectedLine = isInsideAnyManagedBlock(managedBlockRanges(lines.map((l) => l.text)), previousSource);
+    if (!protectedLine) {
+      const tail = out[out.length - 1];
+      out[out.length - 1] = { raw: tail.raw.endsWith("\r") && tail.term === "\n" ? tail.raw.slice(0, -1) : tail.raw, term: "", text: tail.text };
+    }
+  }
+  return joinPhysicalLines(out);
+}
+function upsertManagedBlock(content, name, value, markers) {
   const eol = detectEol(content);
   const lines = content.length === 0 ? [] : content.split(eol);
-  const block = findBlock(lines);
+  const block = findBlock(lines, markers);
   const encoded = encodeValue(value);
   if (block) {
     const blockLines = lines.slice(block.beginIdx + 1, block.endIdx);
@@ -43530,38 +43783,70 @@ function upsertManagedBlock(content, name, value) {
   }
   const needsNewline = content.length > 0 && !content.endsWith(eol);
   const prefix = needsNewline ? content + eol : content;
-  return `${prefix}${BEGIN_MARKER}${eol}${name}=${encoded}${eol}${END_MARKER}${eol}`;
+  return `${prefix}${markers.begin}${eol}${name}=${encoded}${eol}${markers.end}${eol}`;
 }
-function extractManagedValue(content, name) {
+function extractManagedValue(content, name, markers) {
   const eol = detectEol(content);
   const lines = content.length === 0 ? [] : content.split(eol);
-  const block = findBlock(lines);
+  const block = findBlock(lines, markers);
   if (!block) return void 0;
   const match = lines.slice(block.beginIdx + 1, block.endIdx).find((l) => l.startsWith(`${name}=`));
   return match ? decodeValue(match.slice(name.length + 1)) : void 0;
 }
-function removeManagedValue(content, name) {
+function removeManagedValue(content, name, markers) {
   const eol = detectEol(content);
   const lines = content.length === 0 ? [] : content.split(eol);
-  const block = findBlock(lines);
+  const block = findBlock(lines, markers);
   if (!block) return content;
   const blockLines = lines.slice(block.beginIdx + 1, block.endIdx).filter((l) => !l.startsWith(`${name}=`));
   const newLines = [...lines.slice(0, block.beginIdx + 1), ...blockLines, ...lines.slice(block.endIdx)];
   return newLines.join(eol);
 }
-function checkEnvGitignore(projectPath) {
+
+// src/storage/depositories/env.ts
+var FILE_MODE3 = 384;
+var ENV_BLOCK_MARKERS = { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER };
+var GITIGNORE_ENV_PATTERNS = /* @__PURE__ */ new Set([".env", ".env*", "*.env", "**/.env", ".env**"]);
+function gitignoreGlobToRegExp(glob) {
+  let re = "";
+  for (let i = 0; i < glob.length; i++) {
+    const ch = glob[i];
+    if (ch === "*" && glob[i + 1] === "*") {
+      const slash = glob[i + 2] === "/";
+      re += slash ? "(?:.*/)?" : ".*";
+      i += slash ? 2 : 1;
+    } else if (ch === "*") {
+      re += "[^/]*";
+    } else if (ch === "?") {
+      re += "[^/]";
+    } else {
+      re += ch.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return new RegExp(`^${re}$`);
+}
+function gitignorePatternCovers(pattern, relPath) {
+  const glob = pattern.replace(/^\//, "").replace(/\/$/, "");
+  const re = gitignoreGlobToRegExp(glob);
+  const segments = relPath.split("/");
+  if (glob.includes("/") || pattern.startsWith("/")) return segments.some((_, i) => re.test(segments.slice(0, i + 1).join("/")));
+  return segments.some((segment) => re.test(segment));
+}
+function checkEnvGitignore(projectPath, targetPath = ".env") {
   const gitignorePath = join3(projectPath, ".gitignore");
+  const custom2 = targetPath !== ".env";
+  const label = custom2 ? targetPath.split(/[\\/]/).join("/") : ".env";
   if (!existsSync7(gitignorePath)) {
-    return [".env is not gitignored: no .gitignore file found in this project"];
+    return [`${label} is not gitignored: no .gitignore file found in this project`];
   }
   const lines = readFileSync4(gitignorePath, "utf8").split(/\r?\n/);
   const covered = lines.some((raw) => {
     const line = raw.trim();
-    if (!line || line.startsWith("#")) return false;
-    const normalized = line.replace(/^\//, "").replace(/\/$/, "");
-    return GITIGNORE_ENV_PATTERNS.has(normalized);
+    if (!line || line.startsWith("#") || line.startsWith("!")) return false;
+    if (custom2) return gitignorePatternCovers(line, label);
+    return GITIGNORE_ENV_PATTERNS.has(line.replace(/^\//, "").replace(/\/$/, ""));
   });
-  return covered ? [] : [".env is not gitignored: add .env to .gitignore before committing"];
+  return covered ? [] : [`${label} is not gitignored: add ${label} to .gitignore before committing`];
 }
 function requireProjectPath(ctx) {
   if (!ctx.projectPath) {
@@ -43581,11 +43866,11 @@ function createEnvDepository(ctx) {
     promptProfile: "none",
     // ref is the bare NAME for env — the file itself is located via DepositoryContext.projectPath.
     async set(ref, value) {
-      writeFileSync3(envFilePath, upsertManagedBlock(readEnvFile(), ref, value), { mode: FILE_MODE3 });
+      writeFileSync3(envFilePath, upsertManagedBlock(readEnvFile(), ref, value, ENV_BLOCK_MARKERS), { mode: FILE_MODE3 });
       return ref;
     },
     async resolve(ref) {
-      const value = extractManagedValue(readEnvFile(), ref);
+      const value = extractManagedValue(readEnvFile(), ref, ENV_BLOCK_MARKERS);
       if (value === void 0) {
         throw new EnigmaError({ code: "E_NOT_FOUND", message: "secret not found", depository: "env" });
       }
@@ -43593,19 +43878,19 @@ function createEnvDepository(ctx) {
     },
     async delete(ref) {
       const content = readEnvFile();
-      if (content) writeFileSync3(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE3 });
+      if (content) writeFileSync3(envFilePath, removeManagedValue(content, ref, ENV_BLOCK_MARKERS), { mode: FILE_MODE3 });
     },
     // Issue #70: compare-and-delete in one synchronous read-modify-write, so
     // a `.env` line repopulated since the displaced copy was captured is
     // never removed.
     async deleteIfUnchanged(ref, expectedValue) {
       const content = readEnvFile();
-      if (extractManagedValue(content, ref) !== expectedValue) return false;
-      writeFileSync3(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE3 });
+      if (extractManagedValue(content, ref, ENV_BLOCK_MARKERS) !== expectedValue) return false;
+      writeFileSync3(envFilePath, removeManagedValue(content, ref, ENV_BLOCK_MARKERS), { mode: FILE_MODE3 });
       return true;
     },
     async has(ref) {
-      return extractManagedValue(readEnvFile(), ref) !== void 0;
+      return extractManagedValue(readEnvFile(), ref, ENV_BLOCK_MARKERS) !== void 0;
     }
   };
 }
@@ -44534,6 +44819,33 @@ function loadConfig() {
   if (raw.ui === "web" || raw.ui === "native") config2.ui = raw.ui;
   return config2;
 }
+function parseRender(raw) {
+  if (raw === void 0) return { ok: true, value: {} };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, configError: "render must be an object" };
+  }
+  const record2 = raw;
+  const out = {};
+  if ("enabled" in record2) {
+    if (typeof record2.enabled !== "boolean") {
+      return { ok: false, configError: "render.enabled must be a boolean" };
+    }
+    out.enabled = record2.enabled;
+  }
+  if ("path" in record2) {
+    if (typeof record2.path !== "string") {
+      return { ok: false, configError: "render.path must be a string" };
+    }
+    out.path = record2.path;
+  }
+  if ("names" in record2) {
+    if (!Array.isArray(record2.names) || !record2.names.every((n) => typeof n === "string")) {
+      return { ok: false, configError: "render.names must be an array of strings" };
+    }
+    out.names = [...record2.names];
+  }
+  return { ok: true, value: out };
+}
 function loadProjectManifest(projectPath) {
   const raw = readJsonFile(join4(projectPath, ".enigma.json"), void 0, "E_CONFIG_CORRUPT");
   if (!raw) return { ...DEFAULT_MANIFEST, secrets: {} };
@@ -44542,6 +44854,14 @@ function loadProjectManifest(projectPath) {
   if (raw.secrets && typeof raw.secrets === "object") {
     for (const [name, description] of Object.entries(raw.secrets)) {
       if (typeof description === "string") manifest.secrets[name] = description;
+    }
+  }
+  if ("render" in raw) {
+    const parsed = parseRender(raw.render);
+    if (parsed.ok) {
+      if (Object.keys(parsed.value).length > 0) manifest.render = parsed.value;
+    } else {
+      manifest.renderError = parsed.configError;
     }
   }
   return manifest;
@@ -44913,183 +45233,9 @@ function registerDoctorTool(server) {
 import { existsSync as existsSync12, readFileSync as readFileSync7 } from "node:fs";
 import { isAbsolute as isAbsolute3, join as join6 } from "node:path";
 
-// src/storage/dotenv-file.ts
-var BEGIN_MARKER2 = "# enigma:begin";
-var END_MARKER2 = "# enigma:end";
-var INLINE_COMMENT_REASON = 'the unquoted value contains a space then "#", which could start a comment or be part of the secret \u2014 quote the value if the # belongs to it, then rerun import';
-function isAmbiguousUnquoted(raw) {
-  return / #/.test(raw);
-}
-function detectEol2(content) {
-  return content.includes("\r\n") ? "\r\n" : "\n";
-}
-function findManagedBlock(lines) {
-  const beginIdx = lines.findIndex((l) => l === BEGIN_MARKER2);
-  if (beginIdx === -1) return void 0;
-  const endIdx = lines.findIndex((l, i) => l === END_MARKER2 && i > beginIdx);
-  if (endIdx === -1) return void 0;
-  return { beginIdx, endIdx };
-}
-var ASSIGNMENT = /^(?:export\s+)?([^\s=]+)=(.*)$/;
-function scanAssignments(lines, block) {
-  const assignments = [];
-  let i = 0;
-  while (i < lines.length) {
-    if (block && i >= block.beginIdx && i <= block.endIdx) {
-      i++;
-      continue;
-    }
-    const line = lines[i];
-    const trimmed = line.trim();
-    if (trimmed === "" || trimmed.startsWith("#")) {
-      i++;
-      continue;
-    }
-    const match = ASSIGNMENT.exec(trimmed);
-    if (!match) {
-      i++;
-      continue;
-    }
-    const name = match[1];
-    const rest = match[2];
-    const quote = rest[0];
-    if (quote === '"' || quote === "'") {
-      let joined = rest.slice(1);
-      let endIdx = i;
-      let closed = false;
-      for (; ; ) {
-        const closeIdx = findUnescapedQuote(joined, quote);
-        if (closeIdx !== -1) {
-          joined = joined.slice(0, closeIdx);
-          closed = true;
-          break;
-        }
-        const nextIdx = endIdx + 1;
-        if (nextIdx >= lines.length || block && nextIdx >= block.beginIdx && nextIdx <= block.endIdx) break;
-        endIdx = nextIdx;
-        joined += `
-${lines[endIdx]}`;
-      }
-      if (closed) {
-        assignments.push({ name, value: joined, valid: NAME_PATTERN.test(name), ambiguous: false, startIdx: i, endIdx });
-        i = endIdx + 1;
-      } else {
-        const ambiguous = isAmbiguousUnquoted(rest);
-        assignments.push({
-          name,
-          value: rest.trim(),
-          valid: NAME_PATTERN.test(name),
-          ambiguous,
-          ambiguousReason: ambiguous ? INLINE_COMMENT_REASON : void 0,
-          startIdx: i,
-          endIdx: i
-        });
-        i++;
-      }
-      continue;
-    }
-    {
-      const ambiguous = isAmbiguousUnquoted(rest);
-      assignments.push({
-        name,
-        value: rest.trim(),
-        valid: NAME_PATTERN.test(name),
-        ambiguous,
-        ambiguousReason: ambiguous ? INLINE_COMMENT_REASON : void 0,
-        startIdx: i,
-        endIdx: i
-      });
-      i++;
-    }
-  }
-  return assignments;
-}
-function findUnescapedQuote(text, quote) {
-  for (let i = 0; i < text.length; i++) {
-    if (text[i] === quote && text[i - 1] !== "\\") return i;
-  }
-  return -1;
-}
-function parseDotEnv(content) {
-  const eol = detectEol2(content);
-  const lines = content.length === 0 ? [] : content.split(eol);
-  const block = findManagedBlock(lines);
-  const assignments = scanAssignments(lines, block);
-  const order = [];
-  const values = /* @__PURE__ */ new Map();
-  const ambiguousFlags = /* @__PURE__ */ new Map();
-  const ambiguousReasons = /* @__PURE__ */ new Map();
-  const invalidSeen = /* @__PURE__ */ new Set();
-  const duplicateSeen = /* @__PURE__ */ new Set();
-  for (const a of assignments) {
-    if (!a.valid) {
-      invalidSeen.add(a.name);
-      continue;
-    }
-    if (values.has(a.name)) duplicateSeen.add(a.name);
-    else order.push(a.name);
-    values.set(a.name, a.value);
-    ambiguousFlags.set(a.name, a.ambiguous);
-    ambiguousReasons.set(a.name, a.ambiguousReason);
-  }
-  return {
-    entries: order.map((name) => {
-      const isDuplicate = duplicateSeen.has(name);
-      return {
-        name,
-        value: values.get(name),
-        ambiguous: isDuplicate || ambiguousFlags.get(name),
-        ambiguousReason: isDuplicate ? `${name} is assigned more than once in this file \u2014 remove the duplicate line(s) and rerun import` : ambiguousReasons.get(name)
-      };
-    }),
-    invalidNames: [...invalidSeen],
-    duplicateNames: [...duplicateSeen]
-  };
-}
-function removeDotEnvEntries(content, names, opts = {}) {
-  const eol = detectEol2(content);
-  const lines = content.length === 0 ? [] : content.split(eol);
-  const block = findManagedBlock(lines);
-  const assignments = scanAssignments(lines, block);
-  const targets = new Set(names);
-  const toRemove = assignments.filter((a) => a.valid && targets.has(a.name));
-  if (toRemove.length === 0) return content;
-  const removedLineIdx = /* @__PURE__ */ new Set();
-  for (const a of toRemove) {
-    for (let idx = a.startIdx; idx <= a.endIdx; idx++) removedLineIdx.add(idx);
-  }
-  const firstRemovedIdx = Math.min(...toRemove.map((a) => a.startIdx));
-  const newLines = [];
-  for (let idx = 0; idx < lines.length; idx++) {
-    if (!removedLineIdx.has(idx)) {
-      newLines.push(lines[idx]);
-      continue;
-    }
-    if (idx === firstRemovedIdx && opts.comment) newLines.push(opts.comment);
-  }
-  return newLines.join(eol);
-}
-
 // src/storage/import-commit.ts
-import { randomBytes as randomBytes4 } from "node:crypto";
-import { existsSync as existsSync11, readFileSync as readFileSync6, renameSync as renameSync3, unlinkSync, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync11, readFileSync as readFileSync6 } from "node:fs";
 var FILE_MODE4 = 384;
-function writeFileAtomic(path, content, mode) {
-  const tmpPath = `${path}.${randomBytes4(6).toString("hex")}.tmp`;
-  try {
-    writeFileSync4(tmpPath, content, { mode });
-    renameSync3(tmpPath, path);
-    return { ok: true };
-  } catch (err) {
-    const error62 = err instanceof Error ? err.message : String(err);
-    try {
-      if (existsSync11(tmpPath)) unlinkSync(tmpPath);
-      return { ok: false, error: error62 };
-    } catch {
-      return { ok: false, error: error62, leftoverPath: tmpPath };
-    }
-  }
-}
 function ambiguousValueError(entry, envFilePath) {
   return new EnigmaError({
     code: "E_VALUE_AMBIGUOUS",

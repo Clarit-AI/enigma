@@ -266,6 +266,62 @@ export function removeNames(names: readonly string[]): void {
 }
 
 /**
+ * Set the target's `names` to exactly `input.names` (sorted-unique,
+ * refreshed `renderedAt`), under the ledger's own lock, re-reading the
+ * file inside the critical section.
+ *
+ * Issue #107 correction: `upsertTarget` MERGES incoming names into an
+ * existing target — fine for "added a name since last render" but wrong
+ * for the renderer's normal path, which must shrink the target to its
+ * current render set. `removeNames` strips a name from EVERY target,
+ * which would corrupt other worktrees' entries on a same-name shrink.
+ * `replaceTarget` is the only operation the renderer can call safely:
+ * it targets one key, ignores siblings, and replaces the names list
+ * verbatim.
+ *
+ * An empty `input.names` removes the target (the semantics of "nothing
+ * to render at this target" is "no record"). No-op on (same key already
+ * absent AND empty names).
+ */
+export function replaceTarget(input: UpsertTargetInput): RenderLedgerTarget | undefined {
+  if (input.names.length === 0) {
+    removeTargetsMatching(input);
+    return undefined;
+  }
+  const lock = acquireFileLock(renderLedgerLockPath());
+  try {
+    const current = readLedger();
+    const now = new Date().toISOString();
+    const sortedNames = mergeNames([], input.names);
+    const idx = current.targets.findIndex((t) => sameKey(t, input));
+    if (idx === -1) {
+      const created: RenderLedgerTarget = {
+        projectId: input.projectId,
+        worktree: input.worktree,
+        file: input.file,
+        names: sortedNames,
+        renderedAt: now,
+      };
+      const next: RenderLedgerFile = { ...current, targets: [...current.targets, created] };
+      writeJsonFileAtomic(renderLedgerPath(), next);
+      return created;
+    }
+    const prev = current.targets[idx]!;
+    const replaced: RenderLedgerTarget = {
+      ...prev,
+      names: sortedNames,
+      renderedAt: now,
+    };
+    const targets = current.targets.slice();
+    targets[idx] = replaced;
+    writeJsonFileAtomic(renderLedgerPath(), { ...current, targets });
+    return replaced;
+  } finally {
+    lock.release();
+  }
+}
+
+/**
  * In-memory filter over the ledger. Lock-free — see the read-modify-write
  * note on `readLedger`. `projectId` and `name` are independent filters
  * (AND); omit either to skip that axis. Empty/missing filter returns the

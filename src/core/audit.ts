@@ -4,7 +4,7 @@ import { appendLineSecure } from './secure-file.js';
 import type { DepositoryId } from '../storage/interfaces.js';
 import type { Scope } from './index-store.js';
 
-export type AuditOp = 'set' | 'rotated' | 'read' | 'reveal' | 'remove' | 'move' | 'import' | 'migrate' | 'leak';
+export type AuditOp = 'set' | 'rotated' | 'read' | 'reveal' | 'remove' | 'move' | 'import' | 'migrate' | 'leak' | 'render';
 export type AuditActor = 'agent' | 'user' | 'cli' | 'hook';
 
 /**

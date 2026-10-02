@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest';
-import { parseDotEnv, removeDotEnvEntries } from '../../../src/storage/dotenv-file.js';
+import { dominantEol, envBlockRanges, joinPhysicalLines, parseDotEnv, removeDotEnvEntries, scanRenderMarkers, splitPhysicalLines } from '../../../src/storage/dotenv-file.js';
+import { ENV_BEGIN_MARKER, ENV_END_MARKER, RENDER_BEGIN_MARKER, RENDER_END_MARKER } from '../../../src/storage/dotenv-file.js';
 
 describe('parseDotEnv', () => {
   it('parses a simple NAME=value file', () => {
@@ -231,5 +232,277 @@ describe('removeDotEnvEntries', () => {
     const content = 'BROKEN="never closed\nOPENAI_API_KEY=sk-abc\nGITHUB_TOKEN=ghp-xyz\n';
     const result = removeDotEnvEntries(content, ['OPENAI_API_KEY']);
     expect(result).toBe('BROKEN="never closed\nGITHUB_TOKEN=ghp-xyz\n');
+  });
+});
+
+describe('parseDotEnv / removeDotEnvEntries — both managed blocks (env + render) are skipped, in either order (Issue #107)', () => {
+  it('parseDotEnv: a render block in either order is skipped — its lines are not imported', () => {
+    const envFirst = `RAW=plain\n${ENV_BEGIN_MARKER}\nE=env-block-name\n${ENV_END_MARKER}\n${RENDER_BEGIN_MARKER}\nR=render-block-name\n${RENDER_END_MARKER}\n`;
+    const renderFirst = `RAW=plain\n${RENDER_BEGIN_MARKER}\nR=render-block-name\n${RENDER_END_MARKER}\n${ENV_BEGIN_MARKER}\nE=env-block-name\n${ENV_END_MARKER}\n`;
+
+    for (const content of [envFirst, renderFirst]) {
+      const result = parseDotEnv(content);
+      expect(result.entries.map((e) => e.name)).toEqual(['RAW']);
+    }
+  });
+
+  it('removeDotEnvEntries: with both blocks present, a raw-line name is removed; both blocks stay byte-identical (Tech Lead rule #6)', () => {
+    const content =
+      `RAW=plain\n${ENV_BEGIN_MARKER}\nE=env-block-name\n${ENV_END_MARKER}\n${RENDER_BEGIN_MARKER}\nR=render-block-name\n${RENDER_END_MARKER}\n`;
+    const result = removeDotEnvEntries(content, ['RAW']);
+    expect(result).toBe(
+      `${ENV_BEGIN_MARKER}\nE=env-block-name\n${ENV_END_MARKER}\n${RENDER_BEGIN_MARKER}\nR=render-block-name\n${RENDER_END_MARKER}\n`,
+    );
+  });
+
+  it('removeDotEnvEntries: a name in the render block is not removed by import (it lives in a different store and is read-only there)', () => {
+    const content =
+      `RAW=plain\n${RENDER_BEGIN_MARKER}\nRENDERED=in-render-block\n${RENDER_END_MARKER}\n`;
+    const result = removeDotEnvEntries(content, ['RENDERED']);
+    // The scanner never saw RENDERED (it was in a managed block) so
+    // nothing is removed. The whole file is unchanged.
+    expect(result).toBe(content);
+  });
+
+  it('removeDotEnvEntries: render block appearing before the env block is also preserved (either order)', () => {
+    const content =
+      `RAW=plain\n${RENDER_BEGIN_MARKER}\nR=render-block-name\n${RENDER_END_MARKER}\n${ENV_BEGIN_MARKER}\nE=env-block-name\n${ENV_END_MARKER}\n`;
+    const result = removeDotEnvEntries(content, ['RAW']);
+    expect(result).toBe(
+      `${RENDER_BEGIN_MARKER}\nR=render-block-name\n${RENDER_END_MARKER}\n${ENV_BEGIN_MARKER}\nE=env-block-name\n${ENV_END_MARKER}\n`,
+    );
+  });
+
+  it('parseDotEnv: a render block does not leak a value it carries as a parseDotEnv entry', () => {
+    const SENTINEL = 'sk-sentinel-value-should-never-appear';
+    const content = `RAW=plain\n${RENDER_BEGIN_MARKER}\nRENDERED=${SENTINEL}\n${RENDER_END_MARKER}\n`;
+    const result = parseDotEnv(content);
+    expect(result.entries).toEqual([{ name: 'RAW', value: 'plain', ambiguous: false }]);
+    // Sentinel never surfaces.
+    expect(JSON.stringify(result)).not.toContain(SENTINEL);
+  });
+});
+
+describe('[r3.3] an unterminated render block runs to EOF and is never imported or stripped', () => {
+  const damaged = `A=1\n${RENDER_BEGIN_MARKER}\nB=2\nC=3\n`;
+
+  it('parseDotEnv imports nothing from it', () => {
+    expect(parseDotEnv(damaged).entries.map((e) => e.name)).toEqual(['A']);
+  });
+
+  it('parseDotEnv also skips a render block whose end marker has text glued on', () => {
+    const glued = `A=1\n${RENDER_BEGIN_MARKER}\nB=2\n${RENDER_END_MARKER}D=4\n`;
+    expect(parseDotEnv(glued).entries.map((e) => e.name)).toEqual(['A']);
+  });
+
+  it('removeDotEnvEntries leaves every line of it in place', () => {
+    expect(removeDotEnvEntries(damaged, ['A', 'B', 'C'])).toBe(`${RENDER_BEGIN_MARKER}\nB=2\nC=3\n`);
+  });
+
+  it('a terminated render block followed by ordinary lines is unaffected (both still parsed and skipped as before)', () => {
+    const ok = `${RENDER_BEGIN_MARKER}\nB=2\n${RENDER_END_MARKER}\nD=4\n`;
+    expect(parseDotEnv(ok).entries.map((e) => e.name)).toEqual(['D']);
+  });
+
+  it('the env depository block keeps its own handling: an unterminated one is not a block, so its lines are ordinary assignments', () => {
+    const envDamaged = `${ENV_BEGIN_MARKER}\nB=2\n`;
+    expect(parseDotEnv(envDamaged).entries.map((e) => e.name)).toEqual(['B']);
+  });
+});
+
+describe('[r4.2] render markers: a well-formed block is protected; in a damaged file everything from the first render begin to EOF is protected (rule in scanRenderMarkers)', () => {
+  const names = (content: string): string[] => parseDotEnv(content).entries.map((e) => e.name);
+
+  it('a valid block followed by a second unterminated begin: neither block\'s assignments are imported', () => {
+    const content = `A=1\n${RENDER_BEGIN_MARKER}\nR=old\n${RENDER_END_MARKER}\n${RENDER_BEGIN_MARKER}\nB=old\n`;
+    expect(names(content)).toEqual(['A']);
+  });
+
+  it('a valid block followed by a second unterminated begin: removal strips only the ordinary line, keeping R and B', () => {
+    const content = `A=1\n${RENDER_BEGIN_MARKER}\nR=old\n${RENDER_END_MARKER}\n${RENDER_BEGIN_MARKER}\nB=old\n`;
+    expect(removeDotEnvEntries(content, ['A', 'R', 'B'])).toBe(`${RENDER_BEGIN_MARKER}\nR=old\n${RENDER_END_MARKER}\n${RENDER_BEGIN_MARKER}\nB=old\n`);
+  });
+
+  it('two complete render blocks are a damaged file: everything from the first begin to EOF is protected, including the line between them', () => {
+    const content = `U=0\n${RENDER_BEGIN_MARKER}\nR1=x\n${RENDER_END_MARKER}\nX=1\n${RENDER_BEGIN_MARKER}\nR2=y\n${RENDER_END_MARKER}\n`;
+    expect(names(content)).toEqual(['U']);
+    expect(removeDotEnvEntries(content, ['U', 'R1', 'R2', 'X'])).toBe(content.replace('U=0\n', ''));
+  });
+
+  it('a stray end marker protects nothing and does not hide the ordinary lines around it', () => {
+    const content = `A=1\n${RENDER_END_MARKER}\nB=2\n`;
+    expect(names(content)).toEqual(['A', 'B']);
+  });
+
+  it('a stray end marker before a complete block makes the file damaged: from the first begin to EOF is protected', () => {
+    const content = `Y=0\n${RENDER_END_MARKER}\n${RENDER_BEGIN_MARKER}\nR=old\n${RENDER_END_MARKER}\nX=1\n`;
+    expect(names(content)).toEqual(['Y']);
+  });
+
+  it('[r5] the nested shape (BEGIN / A / BEGIN / B / END / TAIL): A, B and TAIL are never imported, and removal keeps TAIL', () => {
+    const content = `U=1\n${RENDER_BEGIN_MARKER}\nA=1\n${RENDER_BEGIN_MARKER}\nB=1\n${RENDER_END_MARKER}\nTAIL=2\n`;
+    expect(names(content)).toEqual(['U']);
+    expect(removeDotEnvEntries(content, ['U', 'A', 'B', 'TAIL'])).toBe(content.replace('U=1\n', ''));
+  });
+
+  it('[r5] markers with trailing whitespace are recognized: a well-formed block is protected, ordinary lines around it are not', () => {
+    const content = `U=1\n${RENDER_BEGIN_MARKER}  \nR=old\n${RENDER_END_MARKER}\t\nV=2\n`;
+    expect(names(content)).toEqual(['U', 'V']);
+    expect(removeDotEnvEntries(content, ['U', 'R', 'V'])).toBe(`${RENDER_BEGIN_MARKER}  \nR=old\n${RENDER_END_MARKER}\t\n`);
+    expect(scanRenderMarkers(content.split('\n')).block).toEqual({ beginIdx: 1, endIdx: 3 });
+    expect(names(`U=1\r\n${RENDER_BEGIN_MARKER}\t\r\nR=old\r\n${RENDER_END_MARKER} \r\nV=2\r\n`)).toEqual(['U', 'V']);
+  });
+
+  it('[r5] render begin, env begin, render end, env end: protected from the render begin to EOF', () => {
+    const content = `U=1\n${RENDER_BEGIN_MARKER}\nR=old\n${ENV_BEGIN_MARKER}\nE=stored\n${RENDER_END_MARKER}\nX=1\n${ENV_END_MARKER}\nZ=2\n`;
+    expect(names(content)).toEqual(['U']);
+    expect(removeDotEnvEntries(content, ['U', 'R', 'E', 'X', 'Z'])).toBe(content.replace('U=1\n', ''));
+  });
+
+  it('[r5] env begin, render begin, env end, render end: protected from the render begin to EOF', () => {
+    const content = `U=1\n${ENV_BEGIN_MARKER}\nE=stored\n${RENDER_BEGIN_MARKER}\nR=old\n${ENV_END_MARKER}\nX=1\n${RENDER_END_MARKER}\nZ=2\n`;
+    expect(names(content)).toEqual(['U']);
+    expect(removeDotEnvEntries(content, ['U', 'R', 'E', 'X', 'Z'])).toBe(content.replace('U=1\n', ''));
+  });
+
+  it('[r5] an env-depository block wholly outside a well-formed render block keeps its existing handling', () => {
+    const content = `${ENV_BEGIN_MARKER}\nE=stored\n${ENV_END_MARKER}\nU=1\n${RENDER_BEGIN_MARKER}\nR=old\n${RENDER_END_MARKER}\nV=2\n`;
+    expect(names(content)).toEqual(['U', 'V']);
+  });
+
+  describe('[r6] physical lines: files with mixed line endings', () => {
+    it('the probed shape X=1\\n<RB>\\r\\nR=x\\r\\n<RE>\\n: R is never imported and never stripped', () => {
+      const content = `X=1\n${RENDER_BEGIN_MARKER}\r\nR=x\r\n${RENDER_END_MARKER}\n`;
+      expect(names(content)).toEqual(['X']);
+      expect(removeDotEnvEntries(content, ['X', 'R'])).toBe(`${RENDER_BEGIN_MARKER}\r\nR=x\r\n${RENDER_END_MARKER}\n`);
+    });
+
+    it('LF markers among CRLF lines are seen: a well-formed block is protected, the CRLF lines around it are imported', () => {
+      const content = `U=1\r\n${RENDER_BEGIN_MARKER}\nR=x\n${RENDER_END_MARKER}\nV=2\r\n`;
+      expect(names(content)).toEqual(['U', 'V']);
+      expect(removeDotEnvEntries(content, ['U', 'R', 'V'])).toBe(`${RENDER_BEGIN_MARKER}\nR=x\n${RENDER_END_MARKER}\n`);
+    });
+
+    it('a nested begin in a mixed file still protects everything from the first begin to EOF', () => {
+      const content = `U=1\r\n${RENDER_BEGIN_MARKER}\nA=1\r\n${RENDER_BEGIN_MARKER}\nB=1\n${RENDER_END_MARKER}\r\nTAIL=2\n`;
+      expect(names(content)).toEqual(['U']);
+    });
+
+    it('removal keeps every remaining line\'s own terminator', () => {
+      expect(removeDotEnvEntries('A=1\r\nB=2\nC=3\r\n', ['B'])).toBe('A=1\r\nC=3\r\n');
+      expect(removeDotEnvEntries('A=1\nB=2\r\nC=3', ['B'])).toBe('A=1\nC=3');
+      expect(removeDotEnvEntries('A=1\r\nB=2\r\n', ['B'], { comment: '# moved' })).toBe('A=1\r\n# moved\r\n');
+    });
+
+    it('a multi-line quoted value spanning mixed terminators still parses and removes as one unit', () => {
+      const content = 'K="line1\r\nline2\nline3"\nZ=1\r\n';
+      expect(parseDotEnv(content).entries.map((e) => [e.name, e.value])).toEqual([['K', 'line1\nline2\nline3'], ['Z', '1']]);
+      expect(removeDotEnvEntries(content, ['K'])).toBe('Z=1\r\n');
+    });
+
+    it('splitPhysicalLines / joinPhysicalLines round-trip every byte, and dominantEol counts terminators', () => {
+      for (const c of ['', 'a', 'a\n', 'a\r\nb\nc', '\n\n', 'a\r', 'a\r\n\r\n', 'x\ry\n']) expect(joinPhysicalLines(splitPhysicalLines(c))).toBe(c);
+      expect(splitPhysicalLines('a\r\nb').map((l) => [l.text, l.term])).toEqual([['a', '\n'], ['b', '']]);
+      expect(dominantEol(splitPhysicalLines('a\r\nb\r\nc\n'))).toBe('\r\n');
+      expect(dominantEol(splitPhysicalLines('a\r\nb\n'))).toBe('\n');
+      expect(dominantEol(splitPhysicalLines(''))).toBe('\n');
+    });
+
+    it('only trailing whitespace is trimmed for marker recognition: leading whitespace means not a marker', () => {
+      expect(scanRenderMarkers([`  ${RENDER_BEGIN_MARKER}`, 'A=1', `  ${RENDER_END_MARKER}`])).toEqual({ damaged: false });
+      expect(scanRenderMarkers([`${RENDER_BEGIN_MARKER} `, 'A=1', `${RENDER_END_MARKER}\t`]).damaged).toBe(false);
+    });
+
+    it('a render block inside or overlapping an env block is damaged; one wholly outside is not', () => {
+      const scan = (...l: string[]) => scanRenderMarkers(l);
+      expect(scan(ENV_BEGIN_MARKER, RENDER_BEGIN_MARKER, 'R=1', RENDER_END_MARKER, ENV_END_MARKER).damaged).toBe(true);
+      expect(scan(ENV_BEGIN_MARKER, 'E=1', RENDER_BEGIN_MARKER, ENV_END_MARKER, RENDER_END_MARKER).damaged).toBe(true);
+      expect(scan(RENDER_BEGIN_MARKER, ENV_BEGIN_MARKER, RENDER_END_MARKER, ENV_END_MARKER).damaged).toBe(true);
+      expect(scan(ENV_BEGIN_MARKER, 'E=1', ENV_END_MARKER, RENDER_BEGIN_MARKER, 'R=1', RENDER_END_MARKER).damaged).toBe(false);
+      expect(scan(RENDER_BEGIN_MARKER, 'R=1', RENDER_END_MARKER, ENV_BEGIN_MARKER, 'E=1', ENV_END_MARKER).damaged).toBe(false);
+    });
+
+    it('import does not take the render lines of a block wrapped by an env block', () => {
+      const content = `U=1\n${ENV_BEGIN_MARKER}\nE=stored\n${RENDER_BEGIN_MARKER}\nR=old\n${RENDER_END_MARKER}\n${ENV_END_MARKER}\nZ=2\n`;
+      // damaged: everything from the first render begin to EOF is protected (Z included)
+      expect(names(content)).toEqual(['U']);
+      expect(removeDotEnvEntries(content, ['U', 'R', 'E', 'Z'])).toBe(content.replace('U=1\n', ''));
+    });
+  });
+
+  describe('[r7] removal never modifies a protected line', () => {
+    it('the reviewer\'s shape: removing a final unterminated line leaves a render end marker its CRLF', () => {
+      const content = `${RENDER_BEGIN_MARKER}\r\nR=x\n${RENDER_END_MARKER}\r\nOUT=2`;
+      expect(removeDotEnvEntries(content, ['OUT'])).toBe(`${RENDER_BEGIN_MARKER}\r\nR=x\n${RENDER_END_MARKER}\r\n`);
+    });
+
+    it('LF variant: the render end marker keeps its newline', () => {
+      const content = `${RENDER_BEGIN_MARKER}\nR=x\n${RENDER_END_MARKER}\nOUT=2`;
+      expect(removeDotEnvEntries(content, ['OUT'])).toBe(`${RENDER_BEGIN_MARKER}\nR=x\n${RENDER_END_MARKER}\n`);
+    });
+
+    it('an env-depository block\'s end marker keeps its terminator too', () => {
+      expect(removeDotEnvEntries(`${ENV_BEGIN_MARKER}\nE=1\n${ENV_END_MARKER}\r\nOUT=2`, ['OUT'])).toBe(`${ENV_BEGIN_MARKER}\nE=1\n${ENV_END_MARKER}\r\n`);
+      expect(removeDotEnvEntries(`${ENV_BEGIN_MARKER}\nE=1\n${ENV_END_MARKER}\nOUT=2`, ['OUT'])).toBe(`${ENV_BEGIN_MARKER}\nE=1\n${ENV_END_MARKER}\n`);
+    });
+
+    it('a protected line in the middle of a damaged file (protected to EOF) is left alone too', () => {
+      const content = `${RENDER_BEGIN_MARKER}\r\nA=1\r\n${RENDER_BEGIN_MARKER}\r\nOUT=2`;
+      expect(removeDotEnvEntries(content, ['OUT'])).toBe(content);
+    });
+
+    it('control: with an UNPROTECTED previous line the inherited behavior is unchanged (its terminator goes with the removed line)', () => {
+      expect(removeDotEnvEntries('A=1\nOUT=2', ['OUT'])).toBe('A=1');
+      expect(removeDotEnvEntries('A=1\r\nOUT=2', ['OUT'])).toBe('A=1');
+      expect(removeDotEnvEntries('# note\nOUT=2', ['OUT'])).toBe('# note');
+    });
+  });
+
+  describe('[r7] env blocks: the union of exact and trimmed recognition', () => {
+    const names = (content: string): string[] => parseDotEnv(content).entries.map((e) => e.name);
+
+    it('probed shape 1: env markers with an extra CR (`EB\\r\\r\\n`): E is never imported or stripped', () => {
+      const content = `${ENV_BEGIN_MARKER}\r\r\nE=stored\n${ENV_END_MARKER}\nU=1\n`;
+      expect(names(content)).toEqual(['U']);
+      expect(removeDotEnvEntries(content, ['E', 'U'])).toBe(`${ENV_BEGIN_MARKER}\r\r\nE=stored\n${ENV_END_MARKER}\n`);
+    });
+
+    it.each([
+      ['a begin with trailing spaces', `${ENV_BEGIN_MARKER}  \nE=stored\n${ENV_END_MARKER}\nU=1\n`],
+      ['an end with a trailing tab', `${ENV_BEGIN_MARKER}\nE=stored\n${ENV_END_MARKER}\t\nU=1\n`],
+      ['an end with an extra CR', `${ENV_BEGIN_MARKER}\nE=stored\n${ENV_END_MARKER}\r\r\nU=1\n`],
+    ])('%s: the env block is protected', (_label, content) => {
+      expect(names(content)).toEqual(['U']);
+      expect(removeDotEnvEntries(content, ['E', 'U'])).toBe(content.replace('U=1\n', ''));
+    });
+
+    it('probed shape 2 (EB / EE with a trailing space / RB / RNAME / RE / EE): scanRenderMarkers says DAMAGED (the exact view\'s env range contains the render block)', () => {
+      const lines = [ENV_BEGIN_MARKER, `${ENV_END_MARKER} `, RENDER_BEGIN_MARKER, 'RNAME=old', RENDER_END_MARKER, ENV_END_MARKER];
+      expect(scanRenderMarkers(lines).damaged).toBe(true);
+    });
+
+    it('envBlockRanges returns the union of the exact and trimmed views', () => {
+      const lines = [ENV_BEGIN_MARKER, `${ENV_END_MARKER} `, 'X=1', ENV_END_MARKER];
+      expect(envBlockRanges(lines)).toEqual([
+        { beginIdx: 0, endIdx: 3 },
+        { beginIdx: 0, endIdx: 1 },
+      ]);
+      expect(envBlockRanges(['A=1'])).toEqual([]);
+    });
+
+    it('import protects lines inside an env range from either view', () => {
+      const content = `${ENV_BEGIN_MARKER}\n${ENV_END_MARKER} \nX=1\n${ENV_END_MARKER}\nU=2\n`;
+      expect(names(content)).toEqual(['U']);
+    });
+  });
+
+  it('scanRenderMarkers reports damage for each failing shape and none for zero or one well-formed block', () => {
+    const lines = (s: string): string[] => s.split('\n');
+    expect(scanRenderMarkers(lines('A=1\n')).damaged).toBe(false);
+    expect(scanRenderMarkers(lines(`${RENDER_BEGIN_MARKER}\nA=1\n${RENDER_END_MARKER}\n`)).damaged).toBe(false);
+    expect(scanRenderMarkers(lines(`${RENDER_BEGIN_MARKER}\nA=1\n`)).damaged).toBe(true);
+    expect(scanRenderMarkers(lines(`${RENDER_END_MARKER}\n`)).damaged).toBe(true);
+    expect(scanRenderMarkers(lines(`${RENDER_BEGIN_MARKER}\n${RENDER_END_MARKER}\n${RENDER_BEGIN_MARKER}\n${RENDER_END_MARKER}\n`)).damaged).toBe(true);
+    expect(scanRenderMarkers(lines(`${RENDER_BEGIN_MARKER}\n${RENDER_BEGIN_MARKER}\n${RENDER_END_MARKER}\n`)).damaged).toBe(true);
   });
 });

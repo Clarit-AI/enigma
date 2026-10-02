@@ -78,7 +78,7 @@ function secretsPath() {
 }
 
 // src/core/secure-file.ts
-import { mkdirSync, appendFileSync, chmodSync, existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, appendFileSync, chmodSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
 import { dirname as dirname2 } from "node:path";
 import { randomBytes } from "node:crypto";
 var FILE_MODE = 384;
@@ -130,6 +130,33 @@ function loadConfig() {
   if (raw.ui === "web" || raw.ui === "native") config.ui = raw.ui;
   return config;
 }
+function parseRender(raw) {
+  if (raw === void 0) return { ok: true, value: {} };
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    return { ok: false, configError: "render must be an object" };
+  }
+  const record = raw;
+  const out = {};
+  if ("enabled" in record) {
+    if (typeof record.enabled !== "boolean") {
+      return { ok: false, configError: "render.enabled must be a boolean" };
+    }
+    out.enabled = record.enabled;
+  }
+  if ("path" in record) {
+    if (typeof record.path !== "string") {
+      return { ok: false, configError: "render.path must be a string" };
+    }
+    out.path = record.path;
+  }
+  if ("names" in record) {
+    if (!Array.isArray(record.names) || !record.names.every((n) => typeof n === "string")) {
+      return { ok: false, configError: "render.names must be an array of strings" };
+    }
+    out.names = [...record.names];
+  }
+  return { ok: true, value: out };
+}
 function loadProjectManifest(projectPath) {
   const raw = readJsonFile(join2(projectPath, ".enigma.json"), void 0, "E_CONFIG_CORRUPT");
   if (!raw) return { ...DEFAULT_MANIFEST, secrets: {} };
@@ -138,6 +165,14 @@ function loadProjectManifest(projectPath) {
   if (raw.secrets && typeof raw.secrets === "object") {
     for (const [name, description] of Object.entries(raw.secrets)) {
       if (typeof description === "string") manifest.secrets[name] = description;
+    }
+  }
+  if ("render" in raw) {
+    const parsed = parseRender(raw.render);
+    if (parsed.ok) {
+      if (Object.keys(parsed.value).length > 0) manifest.render = parsed.value;
+    } else {
+      manifest.renderError = parsed.configError;
     }
   }
   return manifest;
@@ -502,9 +537,10 @@ var encryptedDepositoryModule = {
 // src/storage/depositories/env.ts
 import { existsSync as existsSync5, readFileSync as readFileSync4, writeFileSync as writeFileSync3 } from "node:fs";
 import { join as join4 } from "node:path";
-var BEGIN_MARKER = "# enigma:begin";
-var END_MARKER = "# enigma:end";
-var FILE_MODE3 = 384;
+
+// src/storage/dotenv-file.ts
+var ENV_BEGIN_MARKER = "# enigma:begin";
+var ENV_END_MARKER = "# enigma:end";
 var NEEDS_QUOTING = /[\s#"'\\$]/;
 function detectEol(content) {
   return content.includes("\r\n") ? "\r\n" : "\n";
@@ -530,17 +566,17 @@ function decodeValue(raw) {
     }
   });
 }
-function findBlock(lines) {
-  const beginIdx = lines.findIndex((l) => l === BEGIN_MARKER);
+function findBlock(lines, markers) {
+  const beginIdx = lines.findIndex((l) => l === markers.begin);
   if (beginIdx === -1) return void 0;
-  const endIdx = lines.findIndex((l, i) => l === END_MARKER && i > beginIdx);
+  const endIdx = lines.findIndex((l, i) => l === markers.end && i > beginIdx);
   if (endIdx === -1) return void 0;
   return { beginIdx, endIdx };
 }
-function upsertManagedBlock(content, name, value) {
+function upsertManagedBlock(content, name, value, markers) {
   const eol = detectEol(content);
   const lines = content.length === 0 ? [] : content.split(eol);
-  const block = findBlock(lines);
+  const block = findBlock(lines, markers);
   const encoded = encodeValue(value);
   if (block) {
     const blockLines = lines.slice(block.beginIdx + 1, block.endIdx);
@@ -555,25 +591,29 @@ function upsertManagedBlock(content, name, value) {
   }
   const needsNewline = content.length > 0 && !content.endsWith(eol);
   const prefix = needsNewline ? content + eol : content;
-  return `${prefix}${BEGIN_MARKER}${eol}${name}=${encoded}${eol}${END_MARKER}${eol}`;
+  return `${prefix}${markers.begin}${eol}${name}=${encoded}${eol}${markers.end}${eol}`;
 }
-function extractManagedValue(content, name) {
+function extractManagedValue(content, name, markers) {
   const eol = detectEol(content);
   const lines = content.length === 0 ? [] : content.split(eol);
-  const block = findBlock(lines);
+  const block = findBlock(lines, markers);
   if (!block) return void 0;
   const match = lines.slice(block.beginIdx + 1, block.endIdx).find((l) => l.startsWith(`${name}=`));
   return match ? decodeValue(match.slice(name.length + 1)) : void 0;
 }
-function removeManagedValue(content, name) {
+function removeManagedValue(content, name, markers) {
   const eol = detectEol(content);
   const lines = content.length === 0 ? [] : content.split(eol);
-  const block = findBlock(lines);
+  const block = findBlock(lines, markers);
   if (!block) return content;
   const blockLines = lines.slice(block.beginIdx + 1, block.endIdx).filter((l) => !l.startsWith(`${name}=`));
   const newLines = [...lines.slice(0, block.beginIdx + 1), ...blockLines, ...lines.slice(block.endIdx)];
   return newLines.join(eol);
 }
+
+// src/storage/depositories/env.ts
+var FILE_MODE3 = 384;
+var ENV_BLOCK_MARKERS = { begin: ENV_BEGIN_MARKER, end: ENV_END_MARKER };
 function requireProjectPath(ctx) {
   if (!ctx.projectPath) {
     throw new EnigmaError({
@@ -592,11 +632,11 @@ function createEnvDepository(ctx) {
     promptProfile: "none",
     // ref is the bare NAME for env — the file itself is located via DepositoryContext.projectPath.
     async set(ref, value) {
-      writeFileSync3(envFilePath, upsertManagedBlock(readEnvFile(), ref, value), { mode: FILE_MODE3 });
+      writeFileSync3(envFilePath, upsertManagedBlock(readEnvFile(), ref, value, ENV_BLOCK_MARKERS), { mode: FILE_MODE3 });
       return ref;
     },
     async resolve(ref) {
-      const value = extractManagedValue(readEnvFile(), ref);
+      const value = extractManagedValue(readEnvFile(), ref, ENV_BLOCK_MARKERS);
       if (value === void 0) {
         throw new EnigmaError({ code: "E_NOT_FOUND", message: "secret not found", depository: "env" });
       }
@@ -604,19 +644,19 @@ function createEnvDepository(ctx) {
     },
     async delete(ref) {
       const content = readEnvFile();
-      if (content) writeFileSync3(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE3 });
+      if (content) writeFileSync3(envFilePath, removeManagedValue(content, ref, ENV_BLOCK_MARKERS), { mode: FILE_MODE3 });
     },
     // Issue #70: compare-and-delete in one synchronous read-modify-write, so
     // a `.env` line repopulated since the displaced copy was captured is
     // never removed.
     async deleteIfUnchanged(ref, expectedValue) {
       const content = readEnvFile();
-      if (extractManagedValue(content, ref) !== expectedValue) return false;
-      writeFileSync3(envFilePath, removeManagedValue(content, ref), { mode: FILE_MODE3 });
+      if (extractManagedValue(content, ref, ENV_BLOCK_MARKERS) !== expectedValue) return false;
+      writeFileSync3(envFilePath, removeManagedValue(content, ref, ENV_BLOCK_MARKERS), { mode: FILE_MODE3 });
       return true;
     },
     async has(ref) {
-      return extractManagedValue(readEnvFile(), ref) !== void 0;
+      return extractManagedValue(readEnvFile(), ref, ENV_BLOCK_MARKERS) !== void 0;
     }
   };
 }

@@ -16,6 +16,7 @@ import {
   removeNames,
   targetsFor,
   upsertTarget,
+  replaceTarget,
   pruneTargets,
 } from '../../../src/render/ledger.js';
 
@@ -257,6 +258,74 @@ describe('render ledger (Issue #106)', () => {
     expect(raw).not.toContain(SENTINEL);
     expect(raw).toContain('OPENAI_API_KEY');
     expect(raw).toContain('GITHUB_TOKEN');
+  });
+});
+
+describe('render ledger — replaceTarget (Issue #107)', () => {
+  let tmpHome: string;
+  let originalHome: string | undefined;
+
+  beforeEach(() => {
+    tmpHome = mkdtempSync(join(tmpdir(), 'enigma-replace-target-'));
+    originalHome = process.env.ENIGMA_HOME;
+    process.env.ENIGMA_HOME = tmpHome;
+  });
+
+  afterEach(() => {
+    if (originalHome === undefined) delete process.env.ENIGMA_HOME;
+    else process.env.ENIGMA_HOME = originalHome;
+    rmSync(tmpHome, { recursive: true, force: true });
+  });
+
+  it('creates a target when the (projectId, worktree, file) key is absent', () => {
+    const out = replaceTarget({ projectId: 'p', worktree: '/w', file: '/w/.env', names: ['A', 'B'] });
+    expect(out?.names).toEqual(['A', 'B']);
+    expect(readLedger().targets).toHaveLength(1);
+  });
+
+  it('REPLACES (not merges) the names on an existing key — Tech Lead rule #1 correction', () => {
+    // Upsert merges; replace replaces. With the existing target holding
+    // [A, B, C], calling replaceTarget with [A, D] must produce [A, D],
+    // never [A, B, C, D].
+    upsertTarget({ projectId: 'p', worktree: '/w', file: '/w/.env', names: ['A', 'B', 'C'] });
+
+    const out = replaceTarget({ projectId: 'p', worktree: '/w', file: '/w/.env', names: ['A', 'D'] });
+    expect(out?.names).toEqual(['A', 'D']);
+    expect(readLedger().targets).toHaveLength(1);
+    expect(readLedger().targets[0]?.names).toEqual(['A', 'D']);
+  });
+
+  it('replaces to a smaller set on a key that already exists (shrink case)', () => {
+    upsertTarget({ projectId: 'p', worktree: '/w', file: '/w/.env', names: ['A', 'B', 'C'] });
+
+    replaceTarget({ projectId: 'p', worktree: '/w', file: '/w/.env', names: ['A'] });
+    expect(readLedger().targets[0]?.names).toEqual(['A']);
+  });
+
+  it('removes the target when names is empty', () => {
+    upsertTarget({ projectId: 'p', worktree: '/w', file: '/w/.env', names: ['A'] });
+    replaceTarget({ projectId: 'p', worktree: '/w', file: '/w/.env', names: [] });
+    expect(readLedger().targets).toHaveLength(0);
+  });
+
+  it('does NOT touch other targets with different keys (no cross-worktree corruption)', () => {
+    upsertTarget({ projectId: 'p', worktree: '/w1', file: '/w1/.env', names: ['A', 'B'] });
+    upsertTarget({ projectId: 'p', worktree: '/w2', file: '/w2/.env', names: ['C', 'D'] });
+
+    replaceTarget({ projectId: 'p', worktree: '/w1', file: '/w1/.env', names: ['A'] });
+
+    const ledger = readLedger();
+    const w1 = ledger.targets.find((t) => t.worktree === '/w1');
+    const w2 = ledger.targets.find((t) => t.worktree === '/w2');
+    expect(w1?.names).toEqual(['A']);
+    expect(w2?.names).toEqual(['C', 'D']);
+  });
+
+  it('the on-disk persisted payload is names-only — no value ever lands in the file', () => {
+    replaceTarget({ projectId: 'p', worktree: '/w', file: '/w/.env', names: ['NAME'] });
+    const raw = readFileSync(renderLedgerPath(), 'utf8');
+    expect(raw).not.toContain(SENTINEL);
+    expect(raw).toContain('NAME');
   });
 });
 
