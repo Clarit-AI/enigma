@@ -54,11 +54,11 @@ interface Worker {
   exit: Promise<{ code: number | null; stdout: string; stderr: string }>;
 }
 
-function spawnWorker(cwd: string, name: string, value: string, gate?: { goFile: string; signalFile: string }): Worker {
+function spawnWorker(cwd: string, name: string, value: string, gate?: { goFile: string; signalFile: string }, extraEnv: Record<string, string> = {}): Worker {
   const args = [workerPath, cwd, name, value, ...(gate ? [gate.goFile, gate.signalFile] : [])];
   const child = spawn(process.execPath, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, ENIGMA_HOME: process.env.ENIGMA_HOME!, ENIGMA_NATIVE_DIR: NATIVE_DIR },
+    env: { ...process.env, ENIGMA_HOME: process.env.ENIGMA_HOME!, ENIGMA_NATIVE_DIR: NATIVE_DIR, ...extraEnv },
   });
   let stdout = '';
   let stderr = '';
@@ -141,5 +141,29 @@ describe('render fan-out under concurrent rotates — real processes (Issue #108
       expect(readEnv(w)).toBe(`PRE=1\n${block(`API_KEY=${winner}`, 'KEEP=k')}POST=2\n`);
       expect(parseDotEnv(readEnv(w)).entries.length).toBeGreaterThan(0);
     }
+  }, 60_000);
+
+  it('create vs rotate (Rule B): a rotate that commits while a create is mid-fan-out waits for it, then writes the current value to the target the create just added', async () => {
+    const { worktrees: [w] } = makeRepo(sb);
+    const goFile = join(bundleDir, 'go-create');
+    const signalFile = join(bundleDir, 'signal-create');
+
+    // The create commits v1, takes the NAME lock, passes its guard for W, and is held right there.
+    const create = spawnWorker(w!, 'API_KEY', 'v1', undefined, { FANOUT_CREATE: '1', FANOUT_HOLD_AFTER_GUARD: `${goFile}:${signalFile}` });
+    await waitFor(signalFile);
+
+    // A rotate now commits v2. Its fan-out must not snapshot holders until the create's fan-out is done: it
+    // either exits (no per-NAME lock: it snapshotted a ledger that does not list W yet) or is still waiting.
+    const rotate = spawnWorker(w!, 'API_KEY', 'v2');
+    await rotate.committed;
+    const early = await Promise.race([rotate.exit.then(() => 'exited'), new Promise((r) => setTimeout(() => r('waiting'), 1500))]);
+    writeFileSync(goFile, 'go');
+
+    const [createExit, rotateExit] = await Promise.all([create.exit, rotate.exit]);
+    expect(createExit.code, createExit.stderr).toBe(0);
+    expect(rotateExit.code, rotateExit.stderr).toBe(0);
+    expect(early).toBe('waiting');
+    expect(valueLines(w!)).toEqual(['API_KEY=v2']);
+    await expect(resolveSecret('API_KEY', { scope: 'project', cwd: w!, actor: 'cli' })).resolves.toBe('v2');
   }, 60_000);
 });
