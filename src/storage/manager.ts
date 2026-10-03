@@ -308,7 +308,8 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
   // once the whole batch has committed.
   const commit: CommitIdentity = { updatedAt: committed.updatedAt, ref: committed.ref, depository: committed.depository };
   if (!opts.skipRenderFanout && opts.scope === 'project' && pid !== undefined && projectPath !== undefined) {
-    // Reconcile every holder of NAME to the state this commit made current (see `fanOutPolicy`): a value is
+    // Reconcile the holders of NAME to the state this commit made current (see `fanOutPolicy`; guarantees and
+    // limits: docs/api-contracts.md, "Render fan-out: guarantees and limits"): a value is
     // written for a no-prompt store (and for a rotate in a prompting store, holders only); a NEW prompting-store
     // secret, or one moved into a prompting store, strips.
     const fanned = await reconcileAfterCommit({

@@ -79,7 +79,9 @@
  *    resolved at all: no store prompt) and again under the lock. A name whose
  *    entry has moved on is not written: its existing line stays (or it stays
  *    absent) and it is reported under Failed as `E_SUPERSEDED`. Nothing is ever
- *    re-resolved under the lock.
+ *    re-resolved under the lock. This keeps a superseded VALUE out of the file; it
+ *    does not order a plain render against a concurrent strip of the same name
+ *    (docs/api-contracts.md, "Render fan-out: guarantees and limits"; #126).
  *  - Failure reasons are STATIC: an error's `message` is never copied
  *    into the outcome, stdout, stderr or the audit log.
  *  - Nothing to write and no existing block: the file is not touched. An

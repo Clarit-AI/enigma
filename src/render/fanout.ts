@@ -2,17 +2,20 @@
  *  Render lifecycle fan-out (Issue #108)                              *
  * ------------------------------------------------------------------ *
  *
- * Keeps every rendered copy of one secret current after `setSecret`,
- * `deleteSecret` and `move` commit to the index. Runs AFTER the index commit
+ * Keeps the rendered copies of one secret current after `setSecret`,
+ * `deleteSecret` and `move` commit to the index (guarantees and limits: see
+ * "Render fan-out: guarantees and limits" in docs/api-contracts.md). Runs AFTER the index commit
  * and outside the index lock (ADR-003), one target at a time, each under that
  * target's own per-file lock (`renderLockPath`, Issue #106).
  *
  * RECONCILIATION, not propagation. Under the per-NAME lock the operation whose
- * commit is the CURRENT index state for NAME brings EVERY holder of NAME (and, for
- * a create, the originating worktree) to that state: `fanOutPolicy` is the table
+ * commit is the CURRENT index state for NAME brings every holder of NAME (and, for
+ * a create, the originating worktree) to that state, for sequential operations and
+ * concurrent rotates of one name (NOT every cross-command interleaving, #126): `fanOutPolicy` is the table
  * (set the value, or strip), `reconcileAfterCommit` the one entry point that
  * `setSecret`, `enigma move` and `enigma import` all call. A superseded operation
- * is silent: the current one covers every holder.
+ * is silent, on the assumption that the current one covers every holder; that holds
+ * for sequential operations and concurrent rotates, not for every command pair.
  *
  * Two operations, both on ONE name:
  *
@@ -29,7 +32,9 @@
  * an in-block comment is kept too (the renderer rewrites it on a full render,
  * the fan-out does not).
  *
- * Three rules close every interleaving (PR #124 review):
+ * Three rules cover sequential operations and concurrent rotates of one name (PR #124
+ * review). They do NOT cover every interleaving of DIFFERENT commands on one name
+ * (docs/api-contracts.md, "Render fan-out: guarantees and limits"; follow-up #126):
  *
  *  Rule C — an operation carries the identity it acted on, captured ONCE (at
  *  its index commit; for plain `enigma render`, at PLAN time) and proceeds only
@@ -48,8 +53,8 @@
  *  skip entirely), THEN snapshot the holders from the ledger, then write each
  *  target under its own file lock. The NAME lock is always taken before any
  *  target lock. Plain `enigma render` takes no NAME lock; Rules A and C protect it.
- *  The wait is bounded; on timeout every holder gets a warning and an `ok:false`
- *  `lock-timeout` audit line (`lockTimeoutReport`).
+ *  The wait is bounded; on timeout every holder in the ledger snapshot gets a warning
+ *  and an `ok:false` `lock-timeout` audit line (`lockTimeoutReport`).
  *
  * `fanOutPolicy` is the one place that decides what an operation does; `setSecret`
  * and `enigma import` both call it.
@@ -483,10 +488,11 @@ function acquireNameLock(projectId: string, name: string): Lock {
 
 /**
  * The NAME lock could not be taken within its budget, so this fan-out cannot be ordered against the one that
- * holds it. Fail honestly instead of waiting forever: for EVERY holder (a read-only ledger snapshot, no NAME lock)
+ * holds it. Fail honestly instead of waiting forever: for every holder in a read-only ledger snapshot (no NAME lock;
+ * a worktree the lock holder is itself adding is not in it and cannot be known here)
  * and the worktree a create would have added, warn that its rendered copies of NAME may be stale and audit
  * `ok:false` `lock-timeout`. The originating operation stays successful. "Last committed wins" therefore holds
- * within the NAME-lock budget; beyond it every affected target is named, never silently left behind.
+ * within the NAME-lock budget; beyond it every target the snapshot knows is named.
  */
 function lockTimeoutReport(projectId: string, name: string, op: Operation['kind'], depository: DepositoryId, actor: AuditActor, extraWorktree: string | undefined): string[] {
   const worktrees: string[] = [];
@@ -543,9 +549,10 @@ async function withNameLock(
   try {
     hooks.afterNameLock?.(call.name);
     if (!operationIsCurrent(call.name, call.projectId, call.op)) {
-      // Superseded: the operation whose commit IS current reconciles every holder, so this one is silent. The one
-      // thing it cannot know is the worktree a superseded CREATE would have added: unless the current state's own
-      // fan-out already made it a holder, say so.
+      // Superseded: the operation whose commit IS current is expected to reconcile every holder (true for sequential
+      // operations and concurrent rotates, not for every cross-command race, #126), so this one is silent. The one
+      // thing it cannot know is the worktree a superseded CREATE (or an env move's restore worktree) would have added:
+      // unless the current state's own fan-out already made it a holder, say so.
       if (call.extraWorktree === undefined) return [];
       const holds = targetsFor({ projectId: call.projectId, name: call.name }).some((t) => t.worktree === call.extraWorktree);
       return holds ? [] : [warningFor(call.extraWorktree, call.name, `changed concurrently; ${renderHint(call.name, call.depository)} again`)];
@@ -599,7 +606,8 @@ export async function fanOutRemove(input: FanOutRemoveInput): Promise<string[]> 
 
 /**
  * What reconciling rendered copies to the committed state means. Fan-out is RECONCILIATION: under the NAME lock the
- * operation whose commit is the current index state brings EVERY holder of NAME to that state.
+ * operation whose commit is the current index state brings every holder of NAME to that state (guaranteed for
+ * sequential operations and concurrent rotates; see docs/api-contracts.md, "Render fan-out: guarantees and limits").
  */
 export type FanOutPolicy = { action: 'set'; addWorktree: boolean } | { action: 'strip' };
 
@@ -643,7 +651,7 @@ export interface ReconcileInput {
   restoreWorktree?: string;
 }
 
-/** Reconcile every holder of NAME to the state `commit` just made current. Returns names/paths-only warnings. */
+/** Reconcile the holders of NAME to the state `commit` just made current (scope of the guarantee: see the header). Returns names/paths-only warnings. */
 export async function reconcileAfterCommit(input: ReconcileInput): Promise<string[]> {
   const policy = fanOutPolicy({ moved: input.moved, isNew: input.isNew, depository: input.depository });
   if (policy.action === 'strip') {

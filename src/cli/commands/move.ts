@@ -73,7 +73,9 @@ export async function cmdMove(argv: string[]): Promise<number> {
 
   // Best-effort cleanup of the old value; the index already points at the new depository. Never delete an old
   // location the index still references: a newer commit may have reused it (a stable address such as encrypted's
-  // `<id>/NAME` or env's bare NAME), and deleting it would lose the value that commit stored.
+  // `<id>/NAME` or env's bare NAME), and deleting it would lose the value that commit stored. This narrows the
+  // window, it does not close it: the check is a read of the index followed by the delete, so a same-value
+  // repopulation committed in between can still be deleted (pre-existing, tracked as #125: fresh store refs).
   const oldModule = DEPOSITORY_MODULES.find((m) => m.id === entry.depository);
   if (oldModule) {
     await beforeCleanup?.();
