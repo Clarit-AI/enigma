@@ -2,6 +2,15 @@
 
 ## Completed
 
+### `v0.3.3` — prepared 2026-10-02 (not yet tagged: `enigma--v0.3.3` is pushed only at release)
+
+Fixes for credential prompts found in real use (a headless host never shows the web form; native dialogs for several names were confusing), and rendered copies that stay current.
+
+- Render fan-out: `set`, `add --rotate`, `remove`, `move` and `import` now bring every worktree in the project that holds a rendered line for NAME to the new state (value updated, line added for a no-prompt store, or line stripped), one target at a time under that target's file lock. Guaranteed for sequential operations and for concurrent rotates of one name; races between different commands on one name can leave a rendered line stale or missing (never a lost stored value), recoverable with `enigma render`. See "Render fan-out: guarantees and limits" in `docs/api-contracts.md`; follow-ups #125 and #126 (Issue #108 / PR #124).
+
+- `enigma_request` no longer ends with a bare `Request cancelled` when a client advertises URL-mode elicitation but declines, cancels, errors or never answers (a headless/stream-json host declines automatically, so the user was never shown a form). It returns `{ request_id, url, expiresAt }` with the LOCAL link, keeps the request open for `enigma_await`, and says it can be retried with `ui: "native"`. A remote tunnel is stopped on a definite non-delivery and its public link never reaches the tool result; on a timeout (a slow human) it is left alone. The 30 s acknowledgement timeout applies to `enigma_request` only (Issue #118 / PR #119).
+- `ui: "native"` with several names: each dialog now names its credential and position ("2 of 3", in the prompt and the title), asks for only that value, says the others follow (the last says it is the last), and shows the shared reason after that, labelled as covering the whole request. A single name looks as before (Issue #117 / PR #120).
+
 ### `v0.3.2` — shipped 2026-09-28 as `enigma--v0.3.2` (PR #103)
 
 Read-guard and PATH-shim corrections found after the first shim release.

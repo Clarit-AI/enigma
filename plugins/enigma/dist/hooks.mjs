@@ -1299,7 +1299,7 @@ import { basename as basename4, delimiter, dirname as dirname4, isAbsolute, join
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/core/version.ts
-var ENIGMA_VERSION = true ? "0.3.2" : "unknown";
+var ENIGMA_VERSION = true ? "0.3.3" : "unknown";
 
 // src/core/shim.ts
 function pathDirs(pathEnv) {
