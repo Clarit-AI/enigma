@@ -107,11 +107,15 @@ export interface SetSecretOptions {
   createVault?: boolean;
   /** Overrides the default audit op ('set'/'rotated'); mirrors resolveSecret's auditOp (Issue #7). `enigma import` passes 'import'. */
   auditOp?: AuditEvent['op'];
+  /** Issue #108: do not fan out to rendered copies; the caller will, after its own batch commits (`enigma import`). */
+  skipRenderFanout?: boolean;
 }
 
 export interface SetSecretResult {
   rotated: boolean;
   warnings: string[];
+  /** Identity of the index entry this call committed (Issue #108): what a render fan-out is checked against. Never a value. */
+  commit: CommitIdentity;
 }
 
 export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult> {
@@ -241,7 +245,8 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
       displaced = currentExisting;
       // Issue #108: `updatedAt` strictly increases per entry (+1 ms when the clock has not moved), so
       // two commits never share an identity and a stale render fan-out can tell it was superseded.
-      // Nothing else reads `updatedAt` for ordering; it is display/audit metadata.
+      // Other readers keep their meaning: `mcp/result-text.ts` picks the latest entry by `updatedAt`
+      // (still the later one), and `list` only displays it.
       committed = { ...entry, updatedAt: strictlyAfter(entry.updatedAt, currentExisting?.updatedAt) };
       return upsertIndexEntry(current, committed);
     });
@@ -298,29 +303,28 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
   }
 
   // Issue #108: keep rendered copies current. After the index commit and the cleanup above, outside
-  // the index lock; best-effort — warnings only, never a failure of the set/rotate/move itself.
-  if (opts.scope === 'project' && pid !== undefined && projectPath !== undefined) {
+  // the index lock; best-effort — warnings only, never a failure of the set/rotate/move itself. Callers
+  // that batch their own commit (`enigma import`) pass `skipRenderFanout` and run `fanOutSet` themselves
+  // once the whole batch has committed.
+  const commit: CommitIdentity = { updatedAt: committed.updatedAt, ref: committed.ref, depository: committed.depository };
+  if (!opts.skipRenderFanout && opts.scope === 'project' && pid !== undefined && projectPath !== undefined) {
     const isNew = displaced === undefined;
-    const commit: CommitIdentity = { updatedAt: committed.updatedAt, ref: committed.ref, depository: committed.depository };
-    let fanned: string[];
-    if (opts.auditOp === 'move') {
-      // A move keeps the value, so only the store's prompt profile matters: a prompting store is never
-      // auto-rendered (strip); env now holds NAME in this worktree's env block (drop the duplicate);
-      // encrypted changes nothing a render block shows.
-      if (!isAutoRenderable(opts.depository)) {
-        fanned = await fanOutRemove({ name: opts.name, projectId: pid, depository: opts.depository, actor: opts.actor, mode: 'strip' });
-      } else if (opts.depository === 'env') {
-        fanned = await fanOutRemove({ name: opts.name, projectId: pid, depository: opts.depository, actor: opts.actor, mode: 'dedupe' });
-      } else {
-        fanned = [];
-      }
-    } else {
+    const autoRenderable = isAutoRenderable(opts.depository);
+    let fanned: string[] = [];
+    if (opts.auditOp === 'move' && !autoRenderable) {
+      // A prompting store is never auto-rendered: strip every holder.
+      fanned = await fanOutRemove({ name: opts.name, projectId: pid, depository: opts.depository, actor: opts.actor });
+    } else if (autoRenderable || !isNew) {
+      // A move to a no-prompt store, a rotate, or a create: write the value in hand to every holder. A holder
+      // whose file's env block now holds NAME drops its render line instead (what `move --to env` needs).
+      // A NEW secret in a prompting store never fans out, not even to a holder left over from a deleted
+      // predecessor: nothing about it is auto-rendered.
       fanned = await fanOutSet({
         name: opts.name,
         value: opts.value,
         projectId: pid,
         worktree: projectPath,
-        addWorktree: isNew && isAutoRenderable(opts.depository),
+        addWorktree: isNew && autoRenderable,
         commit,
         actor: opts.actor,
       });
@@ -328,7 +332,7 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
     for (const w of fanned) if (!warnings.includes(w)) warnings.push(w);
   }
 
-  return { rotated: Boolean(existing), warnings };
+  return { rotated: Boolean(existing), warnings, commit };
 }
 
 export async function hasSecret(name: string, opts: { scope?: Scope | 'all'; cwd?: string } = {}): Promise<boolean> {
@@ -398,7 +402,7 @@ export async function deleteSecret(name: string, opts: DeleteSecretOptions): Pro
   // Issue #108: strip NAME from every rendered copy of this project (best-effort, outside the index lock).
   const warnings =
     removed.scope === 'project' && removed.projectId !== undefined
-      ? await fanOutRemove({ name, projectId: removed.projectId, depository: removed.depository, actor: opts.actor, mode: 'strip' })
+      ? await fanOutRemove({ name, projectId: removed.projectId, depository: removed.depository, actor: opts.actor })
       : [];
   return { warnings };
 }

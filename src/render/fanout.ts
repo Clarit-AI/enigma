@@ -48,15 +48,18 @@
  * Reasons in warnings and audit lines come from a fixed table or
  * `classifyCleanupError`; an error's message is never copied.
  */
+import { createHash } from 'node:crypto';
 import { chmodSync, existsSync, readFileSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import { appendAuditEvent, auditScopeFields, classifyCleanupError } from '../core/audit.js';
 import type { AuditActor } from '../core/audit.js';
 import { loadProjectManifest } from '../core/config.js';
 import type { ProjectManifest } from '../core/config.js';
 import { EnigmaError } from '../core/errors.js';
 import { acquireFileLock } from '../core/file-lock.js';
+import type { Lock } from '../core/file-lock.js';
 import { findIndexEntry, readIndex } from '../core/index-store.js';
-import { renderLockPath } from '../core/paths.js';
+import { enigmaHome, renderLockPath } from '../core/paths.js';
 import { writeFileAtomic } from '../core/secure-file.js';
 import { DEPOSITORY_MODULES } from '../storage/detect.js';
 import { checkEnvGitignore } from '../storage/depositories/env.js';
@@ -103,20 +106,16 @@ export interface FanOutSetInput {
   actor: AuditActor;
 }
 
+/** Remove NAME from every holder: the secret was deleted, or moved to a prompting store (never auto-rendered). */
 export interface FanOutRemoveInput {
   name: string;
   projectId: string;
   /** Depository of the entry that was removed or moved (audit only). */
   depository: DepositoryId;
   actor: AuditActor;
-  /** `strip`: delete / move to a prompting store. `dedupe`: move to env (drop only where the env block now holds NAME). */
-  mode: 'strip' | 'dedupe';
 }
 
-type Operation =
-  | { kind: 'set'; value: string; commit: CommitIdentity }
-  | { kind: 'strip' }
-  | { kind: 'dedupe' };
+type Operation = { kind: 'set'; value: string; commit: CommitIdentity } | { kind: 'strip' };
 
 interface TargetInput {
   name: string;
@@ -141,13 +140,33 @@ type TargetResult =
   | { status: 'silent' }
   | { status: 'warn'; reason: string; extraWarning?: string };
 
-/* ----------------------------- test seam --------------------------- */
+/* ----------------------------- test seams -------------------------- */
 
 let gate: ((commit?: CommitIdentity) => Promise<void> | void) | undefined;
 
-/** Test-only (like `__setLockTimingForTesting`): runs after the index commit and before any fan-out, so a real-process test can order two fan-outs deterministically. */
+/** Test-only (like `__setLockTimingForTesting`): runs after the index commit and before any fan-out, so a test can order two fan-outs deterministically. */
 export function __setFanoutGateForTesting(fn: ((commit?: CommitIdentity) => Promise<void> | void) | undefined): void {
   gate = fn;
+}
+
+/**
+ * Test-only synchronous hooks at the points the locking rules are about, so a test can prove a rule by
+ * acting exactly there (no timing): `afterNameLock` (NAME lock held, nothing checked yet), `beforeTargetLock`
+ * (about to take a target's file lock), `afterTargetLock` (file lock held, target revalidated, guard not yet
+ * run), `afterGuard` (guard passed, nothing read or written yet). `nameLockRetries` shortens the NAME-lock wait.
+ */
+export interface FanoutHooks {
+  afterNameLock?: (name: string) => void;
+  beforeTargetLock?: (file: string) => void;
+  afterTargetLock?: (file: string) => void;
+  afterGuard?: (file: string) => void;
+  nameLockRetries?: number;
+  /** Run no fan-out at all: for a test that asserts on a raw file or log shape the fan-out would legitimately change. */
+  disabled?: boolean;
+}
+let hooks: FanoutHooks = {};
+export function __setFanoutHooksForTesting(next: FanoutHooks | undefined): void {
+  hooks = next ?? {};
 }
 
 /* ----------------------------- helpers ----------------------------- */
@@ -286,7 +305,7 @@ function updateTarget(input: TargetInput): TargetResult {
   const { name, projectId, worktree, op } = input;
   // `render` for a line written, `unrender` for one removed. A `set` that finds NAME in the env
   // block removes instead, so this is settled once the file has been read.
-  let removes = op.kind !== 'set';
+  let removes = op.kind === 'strip';
   const audit = (ok: boolean, error: string | null): void =>
     appendAuditEvent({
       op: removes ? 'unrender' : 'render',
@@ -309,8 +328,10 @@ function updateTarget(input: TargetInput): TargetResult {
     const peekPath = validateTargetFile(worktree, lexicalFile);
     if (input.ledgerFile !== undefined && input.ledgerFile !== peekPath) throw new Skip('render-path-changed');
 
+    hooks.beforeTargetLock?.(peekPath);
     const lock = acquireFileLock(renderLockPath(peekPath));
     try {
+      hooks.afterTargetLock?.(peekPath);
       // The lock is held: validate again, before reading or writing (the parent or target may have been swapped).
       const target = validateTargetFile(worktree, lexicalFile);
       if (target !== peekPath) throw new Skip('target-refused');
@@ -318,6 +339,7 @@ function updateTarget(input: TargetInput): TargetResult {
       // Guard, in the same lock hold as the write (see the header).
       if (op.kind === 'set' && !isCurrentCommit(name, projectId, op.commit)) return { status: 'silent' };
       if (op.kind === 'strip' && eligibleEntryExists(name, projectId)) return { status: 'silent' };
+      hooks.afterGuard?.(peekPath);
 
       const current = existsSync(target) ? readFileSync(target, 'utf8') : '';
       try {
@@ -327,11 +349,10 @@ function updateTarget(input: TargetInput): TargetResult {
       }
 
       // A name in this file's env block is never in the render block (#107 AC #3): a `set` for it
-      // becomes a drop of any stale render line, and `dedupe` only ever acts on such a name.
+      // becomes a drop of any stale render line (this is also what a `move --to env` does).
       const inEnvBlock = envBlockNamesOf(current).has(name);
-      if (op.kind === 'dedupe' && !inEnvBlock) return { status: 'silent' };
-      removes = op.kind !== 'set' || inEnvBlock;
-      const result = removes ? applyStrip(current, name) : applySet(current, name, (op as { value: string }).value);
+      removes = op.kind === 'strip' || inEnvBlock;
+      const result = op.kind === 'set' && !inEnvBlock ? applySet(current, name, op.value) : applyStrip(current, name);
 
       const ledgerRow = targetsFor({ projectId }).find((t) => t.worktree === worktree && t.file === target);
       if (result.next === current) {
@@ -398,40 +419,102 @@ function runTargets(targets: TargetSpec[], base: Omit<TargetInput, 'worktree' | 
   return warnings;
 }
 
-/**
- * `set` fan-out: every ledger target of this project that holds NAME, plus
- * (for a brand-new secret in a no-prompt store) the originating worktree.
- * Returns names/paths-only warnings.
- */
-export async function fanOutSet(input: FanOutSetInput): Promise<string[]> {
-  try {
-    if (gate) await gate(input.commit);
-    const holders = targetsFor({ projectId: input.projectId, name: input.name });
-    const targets: TargetSpec[] = holders.map((h) => ({ worktree: h.worktree, ledgerFile: h.file }));
-    if (input.addWorktree && !holders.some((h) => h.worktree === input.worktree)) targets.push({ worktree: input.worktree, isNew: true });
-    return runTargets(targets, {
-      name: input.name,
-      projectId: input.projectId,
-      depository: input.commit.depository,
-      actor: input.actor,
-      op: { kind: 'set', value: input.value, commit: input.commit },
-    });
-  } catch (err) {
-    return [`render fan-out skipped for ${input.name} (${reasonFor(err)})`];
+const NAME_LOCK_RETRIES = 20;
+
+/** Anchor for the per-NAME fan-out lock (Rule B): one per (projectId, NAME), next to the per-target anchors. */
+export function nameLockPath(projectId: string, name: string): string {
+  const key = createHash('sha256').update(`${projectId}\0${name}`).digest('hex').slice(0, 32);
+  return join(enigmaHome(), 'locks', `fanout-${key}.lock`);
+}
+
+/** Take the NAME lock, retrying past the lock helper's short budget: a fan-out that waits is correct, one that gives up leaves copies stale. */
+function acquireNameLock(projectId: string, name: string): Lock {
+  const retries = hooks.nameLockRetries ?? NAME_LOCK_RETRIES;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return acquireFileLock(nameLockPath(projectId, name), 'the render fan-out lock');
+    } catch (err) {
+      if (!(err instanceof EnigmaError && err.code === 'E_LOCK_TIMEOUT') || attempt >= retries) throw err;
+    }
   }
 }
 
-/** `strip` / `dedupe` fan-out over every ledger target of this project that holds NAME. */
-export async function fanOutRemove(input: FanOutRemoveInput): Promise<string[]> {
+/**
+ * Rule B: fan-outs for one NAME never overlap. Inside the lock, FIRST `isCurrent()` (is this operation's
+ * commit still what the index says? else skip entirely), THEN the holder snapshot, then each target under its
+ * own file lock (Rule A, per target). The NAME lock is always taken before any target lock.
+ */
+async function withNameLock(
+  projectId: string,
+  name: string,
+  run: () => string[],
+  isCurrent: () => boolean,
+  supersededNote: string | undefined,
+  commit?: CommitIdentity,
+): Promise<string[]> {
+  if (hooks.disabled) return [];
+  if (gate) await gate(commit);
+  const lock = acquireNameLock(projectId, name);
   try {
-    if (gate) await gate();
-    const holders = targetsFor({ projectId: input.projectId, name: input.name });
-    return runTargets(
-      holders.map((h) => ({ worktree: h.worktree, ledgerFile: h.file })),
-      { name: input.name, projectId: input.projectId, depository: input.depository, actor: input.actor, op: { kind: input.mode } },
+    hooks.afterNameLock?.(name);
+    if (!isCurrent()) return supersededNote ? [supersededNote] : [];
+    return run();
+  } finally {
+    lock.release();
+  }
+}
+
+/**
+ * `set` fan-out: every ledger target of this project that holds NAME, plus (for a brand-new secret in a
+ * no-prompt store) the originating worktree. Returns names/paths-only warnings.
+ */
+export async function fanOutSet(input: FanOutSetInput): Promise<string[]> {
+  try {
+    // A superseded fan-out is silent (the newer commit's own fan-out writes every holder), except when it would
+    // have ADDED the originating worktree: nothing newer adds it, so it is told to run `enigma render`.
+    const note = input.addWorktree ? `render target ${input.worktree} was not updated for ${input.name} (changed concurrently; run \`enigma render\` again)` : undefined;
+    return await withNameLock(
+      input.projectId,
+      input.name,
+      () => {
+        const holders = targetsFor({ projectId: input.projectId, name: input.name });
+        const targets: TargetSpec[] = holders.map((h) => ({ worktree: h.worktree, ledgerFile: h.file }));
+        if (input.addWorktree && !holders.some((h) => h.worktree === input.worktree)) targets.push({ worktree: input.worktree, isNew: true });
+        return runTargets(targets, {
+          name: input.name,
+          projectId: input.projectId,
+          depository: input.commit.depository,
+          actor: input.actor,
+          op: { kind: 'set', value: input.value, commit: input.commit },
+        });
+      },
+      () => isCurrentCommit(input.name, input.projectId, input.commit),
+      note,
+      input.commit,
     );
   } catch (err) {
     return [`render fan-out skipped for ${input.name} (${reasonFor(err)})`];
   }
 }
 
+/** `strip` fan-out over every ledger target of this project that holds NAME (delete, or move to a prompting store). */
+export async function fanOutRemove(input: FanOutRemoveInput): Promise<string[]> {
+  try {
+    return await withNameLock(
+      input.projectId,
+      input.name,
+      () => {
+        const holders = targetsFor({ projectId: input.projectId, name: input.name });
+        return runTargets(
+          holders.map((h) => ({ worktree: h.worktree, ledgerFile: h.file })),
+          { name: input.name, projectId: input.projectId, depository: input.depository, actor: input.actor, op: { kind: 'strip' } },
+        );
+      },
+      // A removal is stale only when a render-eligible entry for NAME exists again.
+      () => !eligibleEntryExists(input.name, input.projectId),
+      undefined,
+    );
+  } catch (err) {
+    return [`render fan-out skipped for ${input.name} (${reasonFor(err)})`];
+  }
+}

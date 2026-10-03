@@ -91,6 +91,7 @@ import { acquireFileLock } from '../core/file-lock.js';
 import { EnigmaError, type EnigmaErrorCode } from '../core/errors.js';
 import { renderLockPath } from '../core/paths.js';
 import { writeFileAtomic } from '../core/secure-file.js';
+import { findIndexEntry, readIndex } from '../core/index-store.js';
 import type { IndexFile } from '../core/index-store.js';
 import type { ProjectManifest } from '../core/config.js';
 import type { DepositoryId, PromptProfile } from '../storage/interfaces.js';
@@ -367,10 +368,12 @@ const STATIC_REASONS: Partial<Record<EnigmaErrorCode, string>> = {
 };
 const UNKNOWN_ERROR_CODE = 'E_UNKNOWN';
 const TARGET_CHANGED_CODE = 'E_TARGET_CHANGED';
+const SUPERSEDED_CODE = 'E_SUPERSEDED';
 
 function staticReasonFor(code: string): string {
   if (code === UNKNOWN_ERROR_CODE) return 'failed to resolve: unknown error';
   if (code === TARGET_CHANGED_CODE) return 'not resolved: the target file changed while rendering; run enigma render again';
+  if (code === SUPERSEDED_CODE) return 'not written: changed concurrently; run enigma render again';
   return STATIC_REASONS[code as EnigmaErrorCode] ?? `failed to resolve (${code})`;
 }
 
@@ -399,6 +402,16 @@ export function stripRenderBlock(content: string, block: { beginIdx: number; end
 }
 
 type ResolveResult = { ok: true; value: string } | { ok: false; code: string };
+
+/**
+ * Identity of the index commit a name's entry is at: `(updatedAt, ref, depository)`. Captured BEFORE a name is
+ * resolved and compared under the target lock (Issue #108, Rule A): if it moved, the resolved value may be older
+ * than the index, so it is never written.
+ */
+function commitIdentityOf(name: string, projectId: string): string | undefined {
+  const entry = findIndexEntry(readIndex(), name, 'project', projectId);
+  return entry === undefined ? undefined : `${entry.updatedAt}|${entry.ref}|${entry.depository}`;
+}
 
 /**
  * The render-marker rule of `scanRenderMarkers`: the renderer accepts only a
@@ -452,8 +465,10 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
   // 1. Resolve BEFORE the lock. Values live only in this local map: they
   //    are encoded into a block line below and never returned or stored.
   const resolved = new Map<string, ResolveResult>();
+  const identities = new Map<string, string | undefined>();
   for (const item of plan.toResolve) {
     if (peekEnvNames.has(item.name)) continue;
+    identities.set(item.name, commitIdentityOf(item.name, opts.projectId));
     try {
       resolved.set(item.name, { ok: true, value: await opts.resolveValue(item.name, item.depository) });
     } catch (err) {
@@ -531,7 +546,12 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
     for (const item of plan.toResolve) {
       if (envBlockNames.has(item.name)) continue; // AC #3, handled below
       // Skipped before the lock as an env-block name, but not one on the locked read: the file changed in between.
-      const result = resolved.get(item.name) ?? { ok: false as const, code: TARGET_CHANGED_CODE };
+      let result = resolved.get(item.name) ?? { ok: false as const, code: TARGET_CHANGED_CODE };
+      // Rule A (Issue #108): a value resolved before the lock is written only if the index is still at the
+      // commit it was resolved at. A newer commit (and its fan-out) owns the line: keep it, or leave the name absent.
+      if (result.ok && commitIdentityOf(item.name, opts.projectId) !== identities.get(item.name)) {
+        result = { ok: false as const, code: SUPERSEDED_CODE };
+      }
       if (result.ok) {
         finalLines.set(item.name, `${item.name}=${encodeValue(result.value)}`);
         freshNames.add(item.name);

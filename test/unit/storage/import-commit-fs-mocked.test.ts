@@ -7,15 +7,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { __setFanoutHooksForTesting } from '../../../src/render/fanout.js';
 
-// Issue #108: `setSecret` now also renders into the worktree's `.env`. These tests use `setSecret`
-// as fixture setup and assert on the file or audit log WITHOUT that step, so they opt out of the
-// fan-out; the fan-out itself is covered by test/unit/render/fanout*.test.ts.
-vi.mock('../../../src/render/fanout.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../src/render/fanout.js')>()),
-  fanOutSet: async () => [],
-  fanOutRemove: async () => [],
-}));
 import type { ParsedDotEnvEntry } from '../../../src/storage/dotenv-file.js';
 
 let readFileOverride: ((path: unknown) => string | undefined) | undefined;
@@ -100,6 +93,7 @@ describe('commitImport (fs-mocked edge cases, Issue #13 review round 2)', () => 
   });
 
   afterEach(() => {
+    __setFanoutHooksForTesting(undefined);
     if (originalHome === undefined) delete process.env.ENIGMA_HOME;
     else process.env.ENIGMA_HOME = originalHome;
     rmSync(tmpHome, { recursive: true, force: true });
@@ -112,6 +106,9 @@ describe('commitImport (fs-mocked edge cases, Issue #13 review round 2)', () => 
 
   describe('B1: parse/rewrite interleaving', () => {
     it('a value edited on disk between parse and rewrite is never lost — left in place and reported, not removed', async () => {
+    // Issue #108: this test pins the raw rewrite of the imported file; the render fan-out (covered in
+    // test/unit/render/fanout-import.test.ts) would legitimately add a render block, so it is off here.
+    __setFanoutHooksForTesting({ disabled: true });
       writeFileSync(envFilePath, 'DB_PASSWORD=original-value\nUNRELATED=1\n');
 
       let rewriteTimeReadSeen = false;

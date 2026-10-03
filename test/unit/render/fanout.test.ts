@@ -339,7 +339,7 @@ describe('delete (AC 4)', () => {
     const { worktrees: [a], projectId } = makeRepo(sb);
     await add(a!, 'API_KEY', 'v1');
     seedTarget(a!, projectId, block('API_KEY=v1'), ['API_KEY']);
-    const warnings = await fanOutRemove({ name: 'API_KEY', projectId, depository: 'encrypted', actor: 'cli', mode: 'strip' });
+    const warnings = await fanOutRemove({ name: 'API_KEY', projectId, depository: 'encrypted', actor: 'cli' });
     expect(warnings).toEqual([]);
     expect(readEnv(a!)).toBe(block('API_KEY=v1'));
   });

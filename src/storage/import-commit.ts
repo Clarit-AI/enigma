@@ -14,6 +14,8 @@ import { parseDotEnv, removeDotEnvEntries } from './dotenv-file.js';
 import type { ParsedDotEnvEntry } from './dotenv-file.js';
 import type { DepositoryId } from './interfaces.js';
 import { setSecret } from './manager.js';
+import { fanOutSet, isAutoRenderable } from '../render/fanout.js';
+import type { CommitIdentity } from '../render/fanout.js';
 
 const FILE_MODE = 0o600;
 
@@ -46,6 +48,46 @@ export interface ImportCommitResult {
   skippedMismatch: string[];
   fileRewritten: boolean;
   warnings: string[];
+}
+
+interface StoredEntry {
+  name: string;
+  value: string;
+  commit: CommitIdentity;
+  isNew: boolean;
+}
+
+/** The dotenv depository keeps its values in its own block of the imported file; every other no-prompt store renders (Issue #108). */
+function rendersAfterImport(opts: ImportCommitOptions): boolean {
+  return opts.scope === 'project' && opts.depository !== 'env' && isAutoRenderable(opts.depository);
+}
+
+/** Names-only note for an import that stored names but did not complete, so nothing was rendered. */
+function notRenderedNote(opts: ImportCommitOptions, names: string[]): string | undefined {
+  if (names.length === 0 || !rendersAfterImport(opts)) return undefined;
+  return `${names.join(', ')} ${names.length === 1 ? 'was' : 'were'} stored but not rendered into this worktree's render block because the import did not complete; run \`enigma render\` once the issue is fixed.`;
+}
+
+/**
+ * Issue #108: after the import has COMMITTED (every entry stored, the plaintext rewrite done or not needed),
+ * run one render fan-out pass per stored name: the same Rules A and B as every other writer, with the value
+ * already in hand. Best-effort: its warnings join the import's.
+ */
+async function renderCommitted(opts: ImportCommitOptions, stored: StoredEntry[], warnings: string[]): Promise<void> {
+  if (opts.scope !== 'project') return;
+  const projectId = computeProjectId(opts.cwd);
+  for (const entry of stored) {
+    const fanned = await fanOutSet({
+      name: entry.name,
+      value: entry.value,
+      projectId,
+      worktree: opts.projectPath,
+      addWorktree: entry.isNew && isAutoRenderable(opts.depository),
+      commit: entry.commit,
+      actor: opts.actor,
+    });
+    for (const w of fanned) if (!warnings.includes(w)) warnings.push(w);
+  }
 }
 
 /** One code, one path, for every reason `parseDotEnv` can flag an entry `ambiguous` (inline-comment-like value, or a duplicated name) — the reason text itself comes from the parser, which is the only place with enough context to phrase it precisely. */
@@ -115,6 +157,7 @@ function ambiguousValueError(entry: ParsedDotEnvEntry, envFilePath: string): Eni
  *   unseen.
  */
 export async function commitImport(opts: ImportCommitOptions): Promise<ImportCommitResult> {
+  const stored: StoredEntry[] = [];
   const succeeded: string[] = [];
   const failed: ImportCommitFailure[] = [];
 
@@ -143,7 +186,9 @@ export async function commitImport(opts: ImportCommitOptions): Promise<ImportCom
         });
         throw err;
       }
-      await setSecret({
+      // Issue #108: no render fan-out per entry. An import that aborts must leave the file genuinely untouched
+      // (the loud-abort contract), so rendering waits until the whole batch, rewrite included, has committed.
+      const result = await setSecret({
         name: entry.name,
         value: entry.value,
         scope: opts.scope,
@@ -153,7 +198,9 @@ export async function commitImport(opts: ImportCommitOptions): Promise<ImportCom
         rotate: opts.rotate,
         createVault: opts.createVault,
         auditOp: 'import',
+        skipRenderFanout: true,
       });
+      stored.push({ name: entry.name, value: entry.value, commit: result.commit, isNew: !result.rotated });
       succeeded.push(entry.name);
     } catch (err) {
       failed.push({
@@ -184,6 +231,8 @@ export async function commitImport(opts: ImportCommitOptions): Promise<ImportCom
           : `${succeeded.length} secret(s) (${names}) are already stored in ${opts.depository} before the failure on ${failed[0]!.name}; .env was left untouched. Fix the issue and rerun import with rotate enabled to overwrite them, or remove them from ${opts.depository} manually.`,
       );
     }
+    const note = notRenderedNote(opts, succeeded);
+    if (note) warnings.push(note);
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
 
@@ -213,6 +262,7 @@ export async function commitImport(opts: ImportCommitOptions): Promise<ImportCom
   const needsWrite = rewritten !== currentContent;
 
   if (!needsWrite) {
+    await renderCommitted(opts, stored, warnings);
     return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: false, warnings };
   }
 
@@ -226,8 +276,11 @@ export async function commitImport(opts: ImportCommitOptions): Promise<ImportCom
         `A temporary file containing the full rewritten .env content was left behind at ${writeResult.leftoverPath} and could not be removed automatically — delete it manually as soon as possible.`,
       );
     }
+    const note = notRenderedNote(opts, succeeded);
+    if (note) warnings.push(note);
     return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: false, warnings };
   }
 
+  await renderCommitted(opts, stored, warnings);
   return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: true, warnings };
 }

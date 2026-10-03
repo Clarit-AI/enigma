@@ -2,15 +2,8 @@ import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSy
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { __setFanoutHooksForTesting } from '../../../../src/render/fanout.js';
 
-// Issue #108: `setSecret` now also renders into the worktree's `.env`. These tests use `setSecret`
-// as fixture setup and assert on the file or audit log WITHOUT that step, so they opt out of the
-// fan-out; the fan-out itself is covered by test/unit/render/fanout*.test.ts.
-vi.mock('../../../../src/render/fanout.js', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../../../../src/render/fanout.js')>()),
-  fanOutSet: async () => [],
-  fanOutRemove: async () => [],
-}));
 import { cmdImport } from '../../../../src/cli/commands/import.js';
 import { RequestStore } from '../../../../src/request/store.js';
 import { listSecrets } from '../../../../src/storage/manager.js';
@@ -75,6 +68,7 @@ describe('cmdImport', () => {
   });
 
   afterEach(async () => {
+    __setFanoutHooksForTesting(undefined);
     await stopServer();
     RequestStore.__resetForTests();
     process.chdir(originalCwd);
@@ -102,6 +96,9 @@ describe('cmdImport', () => {
   });
 
   it('AC1: --depository encrypted imports every key, rewrites the file, warns about a missing .gitignore, and never prints the value', async () => {
+    // Issue #108: this test pins the raw rewrite of the imported file; the render fan-out (covered in
+    // test/unit/render/fanout-import.test.ts) would legitimately add a render block, so it is off here.
+    __setFanoutHooksForTesting({ disabled: true });
     writeFileSync(
       envFilePath,
       `# a header comment, kept as-is\n\nOPENAI_API_KEY=${SENTINEL}\nGITHUB_TOKEN=ghp-xyz\nlower_case_ignored=untouched\n`,
@@ -182,6 +179,9 @@ describe('cmdImport', () => {
   });
 
   it('Issue #42: --rotate lets a rerun after a partial failure actually succeed — the tool\'s own printed remediation now works', async () => {
+    // Issue #108: this test pins the raw rewrite of the imported file; the render fan-out (covered in
+    // test/unit/render/fanout-import.test.ts) would legitimately add a render block, so it is off here.
+    __setFanoutHooksForTesting({ disabled: true });
     writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\n`);
     await cmdImport(['.env', '--depository', 'encrypted']);
     writeFileSync(envFilePath, `OPENAI_API_KEY=${SENTINEL}\nGITHUB_TOKEN=ghp-xyz\n`);
@@ -215,6 +215,9 @@ describe('cmdImport', () => {
   });
 
   it('A2: a quoted value containing "#" migrates intact and is unaffected by the ambiguity check', async () => {
+    // Issue #108: this test pins the raw rewrite of the imported file; the render fan-out (covered in
+    // test/unit/render/fanout-import.test.ts) would legitimately add a render block, so it is off here.
+    __setFanoutHooksForTesting({ disabled: true });
     writeFileSync(envFilePath, 'TOKEN="abc#def"\n');
 
     const code = await cmdImport(['.env', '--depository', 'encrypted']);
