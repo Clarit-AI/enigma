@@ -6,7 +6,7 @@
 // after the SECOND commit has fully fanned out. It fails on any implementation that does not
 // compare the commit against the index under each target's lock (the stale v1 would overwrite v2).
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -164,6 +164,38 @@ describe('render fan-out under concurrent rotates — real processes (Issue #108
     expect(rotateExit.code, rotateExit.stderr).toBe(0);
     expect(early).toBe('waiting');
     expect(valueLines(w!)).toEqual(['API_KEY=v2']);
+    await expect(resolveSecret('API_KEY', { scope: 'project', cwd: w!, actor: 'cli' })).resolves.toBe('v2');
+  }, 60_000);
+
+  it('NAME-lock timeout (QA H1): a rotate that cannot get the lock warns and audits ok:false lock-timeout for EVERY holder, and still succeeds', async () => {
+    const { worktrees: [w, b], projectId } = makeRepo(sb, 1);
+    await setSecret({ name: 'API_KEY', value: 'v0', scope: 'project', depository: 'encrypted', cwd: w!, actor: 'cli' });
+    seedTarget(w!, projectId, block('API_KEY=v0'), ['API_KEY']);
+    seedTarget(b!, projectId, block('API_KEY=v0'), ['API_KEY']);
+    const goFile = join(bundleDir, 'go-timeout');
+    const signalFile = join(bundleDir, 'signal-timeout');
+
+    // v1 holds the NAME lock, guard passed, mid-fan-out.
+    const holder = spawnWorker(w!, 'API_KEY', 'v1', undefined, { FANOUT_HOLD_AFTER_GUARD: `${goFile}:${signalFile}` });
+    await waitFor(signalFile);
+    // v2 commits, then cannot take the NAME lock within its (shortened) budget.
+    const loser = spawnWorker(b!, 'API_KEY', 'v2', undefined, { FANOUT_NAME_LOCK_RETRIES: '0' });
+    const loserExit = await loser.exit;
+    writeFileSync(goFile, 'go');
+    const holderExit = await holder.exit;
+
+    expect(loserExit.code, loserExit.stderr).toBe(0);
+    expect(holderExit.code, holderExit.stderr).toBe(0);
+    const warns = loserExit.stdout.split('\n').filter((l) => l.startsWith('WARN '));
+    for (const worktree of [w!, b!]) {
+      expect(warns.some((l) => l.includes(`render target ${worktree} was not updated for API_KEY (lock-timeout`) && l.includes('run `enigma render`'))).toBe(true);
+    }
+    const audited = readFileSync(join(sb.home, 'audit.log'), 'utf8')
+      .trim()
+      .split('\n')
+      .map((l) => JSON.parse(l) as Record<string, unknown>)
+      .filter((l) => l.op === 'render' && l.ok === false && l.error === 'lock-timeout');
+    expect(audited.map((l) => l.projectPath).sort()).toEqual([w!, b!].sort());
     await expect(resolveSecret('API_KEY', { scope: 'project', cwd: w!, actor: 'cli' })).resolves.toBe('v2');
   }, 60_000);
 });

@@ -22,23 +22,30 @@
  * an in-block comment is kept too (the renderer rewrites it on a full render,
  * the fan-out does not).
  *
- * Two rules close every interleaving (PR #124 review):
+ * Three rules close every interleaving (PR #124 review):
  *
- *  Rule A — never write a superseded value. Each `set` carries the identity of
- *  ITS index commit (`updatedAt`, `ref`, `depository`; `setSecret` makes
- *  `updatedAt` strictly increase per entry). Under the target's file lock,
- *  immediately before writing, the index is re-read (lock-free; atomic
- *  rename) and NAME is written only if the entry is still that commit.
- *  `strip` is the mirror: it skips when a render-eligible entry for NAME
- *  exists again. Plain `enigma render` applies the same rule (render.ts).
+ *  Rule C — an operation carries the identity it acted on, captured ONCE (at
+ *  its index commit; for plain `enigma render`, at PLAN time) and proceeds only
+ *  while the index still says exactly that. A `set` carries its commit
+ *  (`updatedAt`, `ref`, `depository`; `setSecret` makes `updatedAt` strictly
+ *  increase per entry); a delete `strip` expects NO entry for NAME; a
+ *  move-to-prompting `strip` expects the moved entry's commit.
+ *
+ *  Rule A — never write a superseded value: the Rule C check is re-run under the
+ *  target's file lock, immediately before writing or stripping (the index is
+ *  re-read lock-free; atomic rename). If it fails, the existing line stays (or
+ *  NAME stays absent) and the skip is reported.
  *
  *  Rule B — fan-outs for one NAME are serialized by a per-NAME lock
- *  (`nameLockPath`). Inside it: FIRST check the commit is still current (else
+ *  (`nameLockPath`). Inside it: FIRST check the operation is still current (else
  *  skip entirely), THEN snapshot the holders from the ledger, then write each
  *  target under its own file lock. The NAME lock is always taken before any
- *  target lock. So the last committed operation's fan-out runs after every
- *  earlier one has finished, and its snapshot includes any target they added.
- *  Plain `enigma render` takes no NAME lock; Rule A protects it.
+ *  target lock. Plain `enigma render` takes no NAME lock; Rules A and C protect it.
+ *  The wait is bounded; on timeout every holder gets a warning and an `ok:false`
+ *  `lock-timeout` audit line (`lockTimeoutReport`).
+ *
+ * `fanOutPolicy` is the one place that decides what an operation does; `setSecret`
+ * and `enigma import` both call it.
  *
  * Per-target outcomes (the originating operation always succeeds):
  *  - silent skip: `render.enabled:false`; `render.names` excludes NAME (`set`);
