@@ -2286,7 +2286,7 @@ import { basename as basename5, delimiter, dirname as dirname6, isAbsolute as is
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/core/version.ts
-var ENIGMA_VERSION = true ? "0.3.2" : "unknown";
+var ENIGMA_VERSION = true ? "0.3.3" : "unknown";
 
 // src/core/shim.ts
 function pathDirs(pathEnv) {
