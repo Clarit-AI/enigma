@@ -143,10 +143,10 @@ type TargetResult =
 
 /* ----------------------------- test seam --------------------------- */
 
-let gate: (() => Promise<void> | void) | undefined;
+let gate: ((commit?: CommitIdentity) => Promise<void> | void) | undefined;
 
 /** Test-only (like `__setLockTimingForTesting`): runs after the index commit and before any fan-out, so a real-process test can order two fan-outs deterministically. */
-export function __setFanoutGateForTesting(fn: (() => Promise<void> | void) | undefined): void {
+export function __setFanoutGateForTesting(fn: ((commit?: CommitIdentity) => Promise<void> | void) | undefined): void {
   gate = fn;
 }
 
@@ -405,7 +405,7 @@ function runTargets(targets: TargetSpec[], base: Omit<TargetInput, 'worktree' | 
  */
 export async function fanOutSet(input: FanOutSetInput): Promise<string[]> {
   try {
-    if (gate) await gate();
+    if (gate) await gate(input.commit);
     const holders = targetsFor({ projectId: input.projectId, name: input.name });
     const targets: TargetSpec[] = holders.map((h) => ({ worktree: h.worktree, ledgerFile: h.file }));
     if (input.addWorktree && !holders.some((h) => h.worktree === input.worktree)) targets.push({ worktree: input.worktree, isNew: true });
