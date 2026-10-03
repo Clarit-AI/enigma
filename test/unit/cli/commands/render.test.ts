@@ -16,6 +16,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 vi.mock('../../../../src/render/fanout.js', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../../../../src/render/fanout.js')>()),
   fanOutSet: async () => [],
+  reconcileAfterCommit: async () => [],
   fanOutRemove: async () => [],
 }));
 

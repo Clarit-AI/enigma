@@ -23,7 +23,7 @@ import {
 import type { IndexEntry, IndexEntryView, Scope } from '../core/index-store.js';
 import { DEPOSITORY_MODULES } from './detect.js';
 import { checkEnvGitignore } from './depositories/env.js';
-import { fanOutPolicy, fanOutRemove, fanOutSet } from '../render/fanout.js';
+import { fanOutRemove, reconcileAfterCommit } from '../render/fanout.js';
 import type { CommitIdentity } from '../render/fanout.js';
 import type { Depository, DepositoryContext, DepositoryId } from './interfaces.js';
 
@@ -76,7 +76,7 @@ function canonicalPath(p: string | undefined): string | undefined {
  * fully committed state, and no index state could make the delete safe
  * that a later commit couldn't invalidate anyway.
  */
-function locationReclaimed(displaced: IndexEntry): boolean {
+export function locationReclaimed(displaced: Pick<IndexEntry, 'depository' | 'ref' | 'projectPath'>): boolean {
   return readIndex().entries.some(
     (e) =>
       e.depository === displaced.depository &&
@@ -308,23 +308,20 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
   // once the whole batch has committed.
   const commit: CommitIdentity = { updatedAt: committed.updatedAt, ref: committed.ref, depository: committed.depository };
   if (!opts.skipRenderFanout && opts.scope === 'project' && pid !== undefined && projectPath !== undefined) {
-    const policy = fanOutPolicy({ moved: opts.auditOp === 'move', isNew: displaced === undefined, depository: opts.depository });
-    let fanned: string[] = [];
-    if (policy.action === 'strip') {
-      // A move to a prompting store: never auto-rendered. The strip proceeds only while the entry is still this moved one.
-      fanned = await fanOutRemove({ name: opts.name, projectId: pid, depository: opts.depository, actor: opts.actor, expect: { kind: 'moved', commit } });
-    } else if (policy.action === 'set') {
-      // Write the value in hand to every holder (a holder whose env block now holds NAME drops its render line instead).
-      fanned = await fanOutSet({
-        name: opts.name,
-        value: opts.value,
-        projectId: pid,
-        worktree: projectPath,
-        addWorktree: policy.addWorktree,
-        commit,
-        actor: opts.actor,
-      });
-    }
+    // Reconcile every holder of NAME to the state this commit made current (see `fanOutPolicy`): a value is
+    // written for a no-prompt store (and for a rotate in a prompting store, holders only); a NEW prompting-store
+    // secret, or one moved into a prompting store, strips.
+    const fanned = await reconcileAfterCommit({
+      name: opts.name,
+      value: opts.value,
+      projectId: pid,
+      worktree: projectPath,
+      depository: opts.depository,
+      commit,
+      actor: opts.actor,
+      isNew: displaced === undefined,
+      moved: opts.auditOp === 'move',
+    });
     for (const w of fanned) if (!warnings.includes(w)) warnings.push(w);
   }
 

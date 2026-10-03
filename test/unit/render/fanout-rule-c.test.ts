@@ -78,10 +78,10 @@ describe('strips carry identity (review B1)', () => {
 
     expect(readEnv(w!)).toBe(block('TOKEN=newest'));
     expect(readLedger().targets[0]!.names).toEqual(['TOKEN']);
-    expect(errText()).toContain('changed concurrently; run `enigma render` again');
+    expect(errText()).not.toContain('changed concurrently'); // superseded: silent
   });
 
-  it('(b) a delayed delete strip released after a new keychain create plus rotate keeps the new value', async () => {
+  it('(b) a delete held at its gate, then a NEW keychain create: the create reconciles (strips the stale holder and its row); the released delete is silent', async () => {
     const { worktrees: [w] } = makeRepo(sb);
     fake = installFakePromptingStore();
     await add(w!, 'TOKEN', 'v0');
@@ -89,14 +89,15 @@ describe('strips carry identity (review B1)', () => {
     const gate = holdFirstFanOut();
     const deleting = deleteSecret('TOKEN', { scope: 'project', cwd: w!, actor: 'cli' });
     await gate.reached; // the delete has committed; its strip has not run
-    await add(w!, 'TOKEN', 'created', { depository: 'keychain' }); // new prompting secret: no fan-out
-    await rotate(w!, 'TOKEN', 'newest', { depository: 'keychain' }); // updates the holder
-    expect(readEnv(w!)).toBe(block('TOKEN=newest'));
+    await add(w!, 'TOKEN', 'created', { depository: 'keychain' }); // a NEW prompting-store secret: strips the stale holder
+    expect(existsSync(join(w!, '.env')) ? readEnv(w!) : '').toBe('');
+    expect(readLedger().targets).toEqual([]);
     gate.release();
     const result = await deleting;
 
-    expect(readEnv(w!)).toBe(block('TOKEN=newest'));
-    expect(result.warnings).toEqual(['render fan-out skipped for TOKEN (changed concurrently; run `enigma render` again)']);
+    expect(result.warnings).toEqual([]);
+    expect(existsSync(join(w!, '.env')) ? readEnv(w!) : '').toBe('');
+    expect(readLedger().targets).toEqual([]);
   });
 });
 
@@ -122,7 +123,7 @@ describe('plain render binds to the PLANNED entry (review B4)', () => {
 });
 
 describe('one fan-out policy for setSecret AND import (Kilo critical, review B3/B5)', () => {
-  it('import --depository keychain of a NEW name leaves a stale holder unchanged', async () => {
+  it('import --depository keychain of a NEW name STRIPS a stale holder (reconciliation; the old expectation encoded the bug)', async () => {
     const { worktrees: [w] } = makeRepo(sb);
     await add(w!, 'TOKEN', 'old');
     writeFileSync(join(w!, '.enigma.json'), JSON.stringify({ secrets: {}, render: { enabled: false } }));
@@ -136,7 +137,10 @@ describe('one fan-out policy for setSecret AND import (Kilo critical, review B3/
     const result = await commitImport({ entries: parseDotEnv('TOKEN=imported\n').entries, depository: 'keychain', scope: 'project', cwd: w!, projectPath: w!, envFilePath: source, actor: 'cli' });
 
     expect(result.failed).toEqual([]);
-    expect(readEnv(w!)).toBe(block('TOKEN=old'));
+    // The stale line of the DELETED predecessor is gone, and so is its ledger row: nothing about the new
+    // prompting-store secret is auto-rendered, so no holder may keep a value for it.
+    expect(existsSync(join(w!, '.env')) ? readEnv(w!) : '').toBe('');
+    expect(readLedger().targets).toEqual([]);
     expect(fake.resolveCalls).toEqual([]);
   });
 

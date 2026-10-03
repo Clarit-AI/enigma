@@ -124,9 +124,10 @@ export interface FanOutSetInput {
 /**
  * What a strip acted on (Rule C). It proceeds only while the index still says exactly that:
  *  - `deleted`: there is NO entry for NAME;
- *  - `moved`: the entry for NAME is the moved (prompting-store) entry, identified by its commit.
+ *  - `entry`: the entry for NAME is the committed prompting-store entry (a NEW secret in a prompting store, or one
+ *    moved into it), identified by its commit.
  */
-export type StripExpectation = { kind: 'deleted' } | { kind: 'moved'; commit: CommitIdentity };
+export type StripExpectation = { kind: 'deleted' } | { kind: 'entry'; commit: CommitIdentity };
 
 export interface FanOutRemoveInput {
   name: string;
@@ -222,6 +223,11 @@ function reasonFor(err: unknown): string {
   if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') return 'not-writable';
   if (code === 'ENOENT' || code === 'ENOTDIR') return 'worktree-missing';
   return classifyCleanupError(err);
+}
+
+/** What to run to bring a name's rendered copies up to date: a prompting-store name is only ever rendered explicitly. */
+export function renderHint(name: string, depository: DepositoryId): string {
+  return isAutoRenderable(depository) ? 'run `enigma render`' : `run \`enigma render ${name}\``;
 }
 
 function warningFor(worktree: string, name: string, reason: string): string {
@@ -486,7 +492,7 @@ function lockTimeoutReport(projectId: string, name: string, op: Operation['kind'
   const warnings: string[] = [];
   for (const worktree of worktrees) {
     warnings.push(
-      `render target ${worktree} was not updated for ${name} (lock-timeout: its rendered copies of ${name} may be stale; run \`enigma render\`)`,
+      `render target ${worktree} was not updated for ${name} (lock-timeout: its rendered copies of ${name} may be stale; ${renderHint(name, depository)})`,
     );
     try {
       appendAuditEvent({
@@ -514,7 +520,6 @@ function lockTimeoutReport(projectId: string, name: string, op: Operation['kind'
 async function withNameLock(
   call: { projectId: string; name: string; op: Operation; depository: DepositoryId; actor: AuditActor; extraWorktree?: string },
   run: () => string[],
-  supersededNote: string,
   commit?: CommitIdentity,
 ): Promise<string[]> {
   if (hooks.disabled) return [];
@@ -530,7 +535,14 @@ async function withNameLock(
   }
   try {
     hooks.afterNameLock?.(call.name);
-    if (!operationIsCurrent(call.name, call.projectId, call.op)) return [supersededNote];
+    if (!operationIsCurrent(call.name, call.projectId, call.op)) {
+      // Superseded: the operation whose commit IS current reconciles every holder, so this one is silent. The one
+      // thing it cannot know is the worktree a superseded CREATE would have added: unless the current state's own
+      // fan-out already made it a holder, say so.
+      if (call.extraWorktree === undefined) return [];
+      const holds = targetsFor({ projectId: call.projectId, name: call.name }).some((t) => t.worktree === call.extraWorktree);
+      return holds ? [] : [warningFor(call.extraWorktree, call.name, `changed concurrently; ${renderHint(call.name, call.depository)} again`)];
+    }
     return run();
   } finally {
     lock.release();
@@ -552,7 +564,6 @@ export async function fanOutSet(input: FanOutSetInput): Promise<string[]> {
         if (input.addWorktree && !holders.some((h) => h.worktree === input.worktree)) targets.push({ worktree: input.worktree, isNew: true });
         return runTargets(targets, { name: input.name, projectId: input.projectId, depository: input.commit.depository, actor: input.actor, op });
       },
-      `render fan-out skipped for ${input.name} (changed concurrently; run \`enigma render\` again)`,
       input.commit,
     );
   } catch (err) {
@@ -573,25 +584,72 @@ export async function fanOutRemove(input: FanOutRemoveInput): Promise<string[]> 
           { name: input.name, projectId: input.projectId, depository: input.depository, actor: input.actor, op },
         );
       },
-      `render fan-out skipped for ${input.name} (changed concurrently; run \`enigma render\` again)`,
     );
   } catch (err) {
     return [`render fan-out skipped for ${input.name} (${reasonFor(err)})`];
   }
 }
 
-/** What an operation does to rendered copies. One function, used by `setSecret` AND `enigma import`, so they can never disagree. */
-export type FanOutPolicy = { action: 'set'; addWorktree: boolean } | { action: 'strip' } | { action: 'none' };
+/**
+ * What reconciling rendered copies to the committed state means. Fan-out is RECONCILIATION: under the NAME lock the
+ * operation whose commit is the current index state brings EVERY holder of NAME to that state.
+ */
+export type FanOutPolicy = { action: 'set'; addWorktree: boolean } | { action: 'strip' };
 
 /**
- *  - a move to a prompting store: strip (never auto-rendered);
- *  - a no-prompt store (create, rotate, move, import): set, adding the originating worktree only for a NEW secret;
- *  - a rotate in a prompting store: set, existing holders only (the value is in hand, nothing prompts, nothing is added);
- *  - a NEW prompting-store secret: nothing at all, not even to a holder left over from a deleted predecessor.
+ * The reconciliation table, used by `setSecret`, `enigma move` and `enigma import` so they can never disagree:
+ *
+ *  | current state of NAME (this commit)                      | every holder is brought to          |
+ *  |----------------------------------------------------------|-------------------------------------|
+ *  | a no-prompt entry (encrypted, env), value in hand        | SET the value (a NEW secret also adds the originating worktree; an env-block copy drops the render line) |
+ *  | a prompting-store entry, an EXISTING name rotated        | SET the value, existing holders only (nothing prompts, nothing is added) |
+ *  | a prompting-store entry that is NEW, or moved INTO a prompting store | STRIP NAME and its ledger row |
+ *  | no entry (deleted; see `fanOutRemove` with `expect: deleted`) | STRIP |
+ *
+ * There is no "do nothing" row: an operation that changes nothing a render block shows still reconciles, because
+ * it may be the one a superseded operation was relying on (a new keychain secret strips what a racing delete left).
  */
 export function fanOutPolicy(input: { moved: boolean; isNew: boolean; depository: DepositoryId }): FanOutPolicy {
   const autoRenderable = isAutoRenderable(input.depository);
-  if (input.moved && !autoRenderable) return { action: 'strip' };
-  if (autoRenderable || !input.isNew) return { action: 'set', addWorktree: input.isNew && autoRenderable };
-  return { action: 'none' };
+  if (autoRenderable) return { action: 'set', addWorktree: input.isNew };
+  if (input.moved || input.isNew) return { action: 'strip' };
+  return { action: 'set', addWorktree: false };
+}
+
+export interface ReconcileInput {
+  name: string;
+  /** The value already in hand (used only for a `set`). */
+  value: string;
+  projectId: string;
+  /** The worktree a NEW secret is added to (the originating worktree). */
+  worktree: string;
+  depository: DepositoryId;
+  commit: CommitIdentity;
+  actor: AuditActor;
+  isNew: boolean;
+  /** The commit was a `move` (the value is unchanged; only where it lives). */
+  moved: boolean;
+  /**
+   * A worktree that LOST its own copy of NAME in a move (the env depository's block in that worktree's `.env`) and so
+   * must gain a render line to keep the variable defined. Only used for a `set`.
+   */
+  restoreWorktree?: string;
+}
+
+/** Reconcile every holder of NAME to the state `commit` just made current. Returns names/paths-only warnings. */
+export async function reconcileAfterCommit(input: ReconcileInput): Promise<string[]> {
+  const policy = fanOutPolicy({ moved: input.moved, isNew: input.isNew, depository: input.depository });
+  if (policy.action === 'strip') {
+    return fanOutRemove({ name: input.name, projectId: input.projectId, depository: input.depository, actor: input.actor, expect: { kind: 'entry', commit: input.commit } });
+  }
+  const restore = input.restoreWorktree !== undefined;
+  return fanOutSet({
+    name: input.name,
+    value: input.value,
+    projectId: input.projectId,
+    worktree: restore ? input.restoreWorktree! : input.worktree,
+    addWorktree: restore || policy.addWorktree,
+    commit: input.commit,
+    actor: input.actor,
+  });
 }

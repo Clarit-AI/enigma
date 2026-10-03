@@ -14,7 +14,7 @@ import { parseDotEnv, removeDotEnvEntries } from './dotenv-file.js';
 import type { ParsedDotEnvEntry } from './dotenv-file.js';
 import type { DepositoryId } from './interfaces.js';
 import { setSecret } from './manager.js';
-import { fanOutPolicy, fanOutSet } from '../render/fanout.js';
+import { isAutoRenderable, reconcileAfterCommit } from '../render/fanout.js';
 import type { CommitIdentity } from '../render/fanout.js';
 
 const FILE_MODE = 0o600;
@@ -57,28 +57,23 @@ interface StoredEntry {
   isNew: boolean;
 }
 
-/** The one policy `setSecret` uses (Issue #108), applied to an imported entry: what would the fan-out have done for it? */
-function policyFor(opts: ImportCommitOptions, entry: StoredEntry) {
-  return fanOutPolicy({ moved: false, isNew: entry.isNew, depository: opts.depository });
-}
-
 /**
- * Names-only note for an import that stored names but did not complete, so no rendered copy was updated. Applies
- * to every stored name whose policy would have fanned out, the dotenv depository included (another worktree may
- * hold a render line for it).
+ * Names-only note for an import that stored names but did not complete, so no rendered copy was reconciled. Every
+ * stored name counts: with reconciliation there is no stored name whose rendered copies the import would not have
+ * touched (a no-prompt name is written, a new prompting-store name strips stale holders), `env` included.
  */
 function notRenderedNote(opts: ImportCommitOptions, stored: StoredEntry[]): string | undefined {
-  if (opts.scope !== 'project') return undefined;
-  const names = stored.filter((e) => policyFor(opts, e).action !== 'none').map((e) => e.name);
-  if (names.length === 0) return undefined;
-  return `${names.join(', ')} ${names.length === 1 ? 'was' : 'were'} stored but ${names.length === 1 ? 'its' : 'their'} rendered copies were not updated because the import did not complete; run \`enigma render\` once the issue is fixed.`;
+  if (opts.scope !== 'project' || stored.length === 0) return undefined;
+  const names = stored.map((e) => e.name);
+  const hint = isAutoRenderable(opts.depository) ? 'run `enigma render`' : `run ${names.map((n) => `\`enigma render ${n}\``).join(' or ')}`;
+  return `${names.join(', ')} ${names.length === 1 ? 'was' : 'were'} stored but ${names.length === 1 ? 'its' : 'their'} rendered copies were not updated because the import did not complete; ${hint} once the issue is fixed.`;
 }
 
 /**
  * Issue #108: after the import has COMMITTED (every entry stored, the plaintext rewrite done or not needed),
- * run one fan-out pass per stored name, under the same policy, Rules and locks as every other writer, with the
- * value already in hand. A name whose plaintext line was left in place (`skippedMismatch`: edited on disk before
- * the rewrite) is NOT fanned out: the file would hold two definitions and the older stored value could win.
+ * reconcile each stored name once, under the same policy, Rules and locks as every other writer, with the value
+ * already in hand. A name whose plaintext line was left in place (`skippedMismatch`: edited on disk before the
+ * rewrite) is NOT reconciled: the file would hold two definitions and the older stored value could win.
  * Best-effort: its warnings join the import's.
  */
 async function renderCommitted(opts: ImportCommitOptions, stored: StoredEntry[], skipped: string[], warnings: string[]): Promise<void> {
@@ -86,16 +81,16 @@ async function renderCommitted(opts: ImportCommitOptions, stored: StoredEntry[],
   const projectId = computeProjectId(opts.cwd);
   for (const entry of stored) {
     if (skipped.includes(entry.name)) continue;
-    const policy = policyFor(opts, entry);
-    if (policy.action !== 'set') continue;
-    const fanned = await fanOutSet({
+    const fanned = await reconcileAfterCommit({
       name: entry.name,
       value: entry.value,
       projectId,
       worktree: opts.projectPath,
-      addWorktree: policy.addWorktree,
+      depository: opts.depository,
       commit: entry.commit,
       actor: opts.actor,
+      isNew: entry.isNew,
+      moved: false,
     });
     for (const w of fanned) if (!warnings.includes(w)) warnings.push(w);
   }

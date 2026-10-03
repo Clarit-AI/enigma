@@ -197,8 +197,8 @@ describe('item 4: import fan-out is deferred until the batch commits', () => {
   });
 });
 
-describe('item 5: a NEW prompting-store secret never fans out', () => {
-  it('a stale holder (kept by a render-disabled skip during a delete) is left alone when TOKEN is re-created in a prompting store', async () => {
+describe('item 5 (reconciled in r3): a NEW prompting-store secret strips stale holders', () => {
+  it('a stale holder (kept by a render-disabled skip during a delete) is stripped when TOKEN is re-created in a prompting store; nothing is resolved or prompted', async () => {
     const { worktrees: [w] } = makeRepo(sb);
     await add(w!, 'TOKEN', 'old');
     expect(readEnv(w!)).toBe(block('TOKEN=old'));
@@ -210,7 +210,9 @@ describe('item 5: a NEW prompting-store secret never fans out', () => {
 
     await add(w!, 'TOKEN', 'brand-new', { depository: 'keychain' });
 
-    expect(readEnv(w!)).toBe(block('TOKEN=old'));
+    expect(readEnv(w!)).toBe(''); // the stale value is gone; the new secret is never auto-rendered
+    expect(readLedger().targets).toEqual([]);
+    expect(fake.resolveCalls).toEqual([]);
     expect(listSecrets({ scope: 'project', cwd: w! })[0]!.depository).toBe('keychain');
   });
 });
