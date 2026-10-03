@@ -45137,11 +45137,8 @@ function supportsUrlElicitation(server) {
 function supportsFormElicitation(server) {
   return getSupportedElicitationModes(server.getClientCapabilities()?.elicitation).supportsFormMode;
 }
-async function elicitUrl(server, opts) {
-  return server.elicitInput(
-    { mode: "url", elicitationId: opts.elicitationId, url: opts.url, message: opts.message },
-    { timeout: URL_ELICITATION_ACK_TIMEOUT_MS }
-  );
+async function elicitUrl(server, opts, requestOptions) {
+  return server.elicitInput({ mode: "url", elicitationId: opts.elicitationId, url: opts.url, message: opts.message }, requestOptions);
 }
 var URL_ELICITATION_ACK_TIMEOUT_MS = 3e4;
 async function sendElicitationComplete(server, elicitationId) {
@@ -48588,24 +48585,27 @@ function registerRequestTool(server) {
         );
       }
       let outcomeLead;
+      let timedOut2 = false;
       try {
-        const result = await elicitUrl(server.server, {
-          elicitationId: record2.id,
-          url: url2,
-          message: `Enter ${args.names.join(", ")} (${args.reason})`
-        });
+        const result = await elicitUrl(
+          server.server,
+          { elicitationId: record2.id, url: url2, message: `Enter ${args.names.join(", ")} (${args.reason})` },
+          { timeout: URL_ELICITATION_ACK_TIMEOUT_MS }
+        );
         if (result.action !== "accept") outcomeLead = `The client ${result.action === "cancel" ? "cancelled" : "declined"} the URL elicitation`;
-      } catch {
-        outcomeLead = "The client could not deliver the URL elicitation (error or no answer)";
+      } catch (err) {
+        timedOut2 = err instanceof McpError && err.code === ErrorCode.RequestTimeout;
+        outcomeLead = timedOut2 ? "The client did not acknowledge the URL elicitation in time" : "The client could not deliver the URL elicitation (error)";
       }
       if (outcomeLead !== void 0) {
-        if (remoteAttempt?.tunnel) {
+        const stopTunnel = Boolean(remoteAttempt?.tunnel) && !timedOut2;
+        if (stopTunnel) {
           discardActiveTunnel(record2.id, "Remote access was not used: the URL elicitation that would have carried the public link was not delivered.");
         }
         return fallbackResult(
           record2,
           `${handle.origin}/r/${record2.id}`,
-          remoteAttempt?.tunnel ? "Remote access was stopped for this request; the link above is local only." : void 0,
+          stopTunnel ? "Remote access was stopped for this request; the link above is local only." : void 0,
           `${outcomeLead}, so the user was probably never shown the web form (non-interactive hosts decline automatically). The request is still open. Ask the user to open this URL in their browser, then call enigma_await with this request_id once they have submitted the form. Or call enigma_request again with ui:"native" for a system dialog (macOS).`
         );
       }
