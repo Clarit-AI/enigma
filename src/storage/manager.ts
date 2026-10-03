@@ -23,6 +23,8 @@ import {
 import type { IndexEntry, IndexEntryView, Scope } from '../core/index-store.js';
 import { DEPOSITORY_MODULES } from './detect.js';
 import { checkEnvGitignore } from './depositories/env.js';
+import { fanOutRemove, fanOutSet, isAutoRenderable } from '../render/fanout.js';
+import type { CommitIdentity } from '../render/fanout.js';
 import type { Depository, DepositoryContext, DepositoryId } from './interfaces.js';
 
 function getDepositoryModule(id: DepositoryId) {
@@ -81,6 +83,13 @@ function locationReclaimed(displaced: IndexEntry): boolean {
       e.ref === displaced.ref &&
       (displaced.depository !== 'env' || canonicalPath(e.projectPath) === canonicalPath(displaced.projectPath)),
   );
+}
+
+/** `stamp`, or one millisecond after `previous` when `previous` is not earlier (Issue #108). */
+function strictlyAfter(stamp: string, previous: string | undefined): string {
+  if (previous === undefined) return stamp;
+  const prev = Date.parse(previous);
+  return prev >= Date.parse(stamp) ? new Date(prev + 1).toISOString() : stamp;
 }
 
 export interface SetSecretOptions {
@@ -208,6 +217,8 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
   // inside the lock, where the delta sees the post-acquire index. Captured
   // for the post-commit cleanup below; the pre-lock `existing` may be stale.
   let displaced: IndexEntry | undefined;
+  // Issue #108: the entry as actually committed — identity of THIS commit for the render fan-out.
+  let committed: IndexEntry = entry;
   try {
     mutateIndex((current) => {
       // Issue #66, AC #4/#5: re-read inside the lock so the delta sees the
@@ -228,7 +239,11 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
         });
       }
       displaced = currentExisting;
-      return upsertIndexEntry(current, entry);
+      // Issue #108: `updatedAt` strictly increases per entry (+1 ms when the clock has not moved), so
+      // two commits never share an identity and a stale render fan-out can tell it was superseded.
+      // Nothing else reads `updatedAt` for ordering; it is display/audit metadata.
+      committed = { ...entry, updatedAt: strictlyAfter(entry.updatedAt, currentExisting?.updatedAt) };
+      return upsertIndexEntry(current, committed);
     });
   } catch (err) {
     auditRefusal(err, op);
@@ -282,6 +297,37 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
     }
   }
 
+  // Issue #108: keep rendered copies current. After the index commit and the cleanup above, outside
+  // the index lock; best-effort — warnings only, never a failure of the set/rotate/move itself.
+  if (opts.scope === 'project' && pid !== undefined && projectPath !== undefined) {
+    const isNew = displaced === undefined;
+    const commit: CommitIdentity = { updatedAt: committed.updatedAt, ref: committed.ref, depository: committed.depository };
+    let fanned: string[];
+    if (opts.auditOp === 'move') {
+      // A move keeps the value, so only the store's prompt profile matters: a prompting store is never
+      // auto-rendered (strip); env now holds NAME in this worktree's env block (drop the duplicate);
+      // encrypted changes nothing a render block shows.
+      if (!isAutoRenderable(opts.depository)) {
+        fanned = await fanOutRemove({ name: opts.name, projectId: pid, depository: opts.depository, actor: opts.actor, mode: 'strip' });
+      } else if (opts.depository === 'env') {
+        fanned = await fanOutRemove({ name: opts.name, projectId: pid, depository: opts.depository, actor: opts.actor, mode: 'dedupe' });
+      } else {
+        fanned = [];
+      }
+    } else {
+      fanned = await fanOutSet({
+        name: opts.name,
+        value: opts.value,
+        projectId: pid,
+        worktree: projectPath,
+        addWorktree: isNew && isAutoRenderable(opts.depository),
+        commit,
+        actor: opts.actor,
+      });
+    }
+    for (const w of fanned) if (!warnings.includes(w)) warnings.push(w);
+  }
+
   return { rotated: Boolean(existing), warnings };
 }
 
@@ -306,7 +352,12 @@ export interface DeleteSecretOptions {
   actor: AuditActor;
 }
 
-export async function deleteSecret(name: string, opts: DeleteSecretOptions): Promise<void> {
+export interface DeleteSecretResult {
+  /** Names/paths-only notes about render targets that could not be updated (Issue #108); never a value. */
+  warnings: string[];
+}
+
+export async function deleteSecret(name: string, opts: DeleteSecretOptions): Promise<DeleteSecretResult> {
   const pid = opts.cwd ? computeProjectId(opts.cwd) : undefined;
   const index = readIndex();
   const { removed } = removeIndexEntry(index, name, opts.scope, pid);
@@ -343,6 +394,13 @@ export async function deleteSecret(name: string, opts: DeleteSecretOptions): Pro
     throw err;
   }
   appendAuditEvent({ op: 'remove', name, depository: removed.depository, actor: opts.actor, ok: true, error: null, ...auditScopeFields(removed) });
+
+  // Issue #108: strip NAME from every rendered copy of this project (best-effort, outside the index lock).
+  const warnings =
+    removed.scope === 'project' && removed.projectId !== undefined
+      ? await fanOutRemove({ name, projectId: removed.projectId, depository: removed.depository, actor: opts.actor, mode: 'strip' })
+      : [];
+  return { warnings };
 }
 
 export interface ResolveSecretOptions {

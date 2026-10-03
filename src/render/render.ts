@@ -109,8 +109,8 @@ import {
 } from '../storage/dotenv-file.js';
 import type { PhysicalLine, RenderMarkerScan } from '../storage/dotenv-file.js';
 
-const FILE_MODE = 0o600;
-const DEFAULT_RENDER_PATH = '.env';
+export const FILE_MODE = 0o600;
+export const DEFAULT_RENDER_PATH = '.env';
 const PATH_TRAVERSAL_SEGMENT_RE = /(^|[/\\])\.\.([/\\]|$)/;
 
 /* ----------------------------- types ------------------------------- */
@@ -193,7 +193,7 @@ const PROMPT_PROFILE_BY_DEPOSITORY = new Map<DepositoryId, PromptProfile>(
 );
 
 /** Bare name of a `NAME=…` block line, or undefined when it is not an assignment. */
-function nameFromLine(line: string): string | undefined {
+export function nameFromLine(line: string): string | undefined {
   const eq = line.indexOf('=');
   return eq > 0 ? line.slice(0, eq) : undefined;
 }
@@ -205,7 +205,7 @@ function nameFromLine(line: string): string | undefined {
  * merge lines. A name counts as "already in the env block" if it is in any of
  * them.
  */
-function envBlockNamesOf(content: string): Set<string> {
+export function envBlockNamesOf(content: string): Set<string> {
   const texts = splitPhysicalLines(content).map((l) => l.text);
   const names = new Set<string>();
   for (const range of envBlockRanges(texts)) {
@@ -235,7 +235,7 @@ function writeRefusal(message: string): EnigmaError {
  * lock, immediately before the read and write, because resolving a value
  * can take arbitrarily long. Messages name the problem only.
  */
-function validateTargetFile(worktree: string, file: string): string {
+export function validateTargetFile(worktree: string, file: string): string {
   const parentDir = dirname(file);
   if (!existsSync(parentDir)) {
     throw writeRefusal("render.path target parent directory does not exist; Enigma never creates directories in the user's worktree");
@@ -269,7 +269,7 @@ function validateTargetFile(worktree: string, file: string): string {
  * Validate `renderPath` against the worktree and return the absolute
  * target. Runs before anything is read or resolved.
  */
-function resolveRenderTarget(worktree: string, renderPath: string): string {
+export function resolveRenderTarget(worktree: string, renderPath: string): string {
   if (isAbsolute(renderPath)) {
     throw writeRefusal('render.path must be relative to the worktree; absolute paths are refused');
   }
@@ -375,7 +375,7 @@ function staticReasonFor(code: string): string {
 }
 
 /** Static text for a failed atomic write: the errno code when the message carries one, never the message. */
-function staticWriteError(message: string | undefined): string {
+export function staticWriteError(message: string | undefined): string {
   const code = message?.match(/^(E[A-Z0-9]+):/)?.[1];
   return code ? `failed to rewrite the target file (${code})` : 'failed to rewrite the target file';
 }
@@ -388,7 +388,7 @@ function staticWriteError(message: string | undefined): string {
  * remains has no terminator, it gets one in the file's dominant EOL so a
  * later `echo X >> file` cannot glue onto it; an emptied file stays empty.
  */
-function stripRenderBlock(content: string, block: { beginIdx: number; endIdx: number }): string {
+export function stripRenderBlock(content: string, block: { beginIdx: number; endIdx: number }): string {
   const lines = splitPhysicalLines(content);
   const remaining = [...lines.slice(0, block.beginIdx), ...lines.slice(block.endIdx + 1)];
   const last = remaining[remaining.length - 1];
@@ -407,7 +407,7 @@ type ResolveResult = { ok: true; value: string } | { ok: false; code: string };
  * anything else, so nothing is resolved or written on top of a damaged file.
  * Returns the scan (its `block` is the existing render block, if any).
  */
-function readRenderBlock(content: string, file: string): { scan: RenderMarkerScan; lines: PhysicalLine[] } {
+export function readRenderBlock(content: string, file: string): { scan: RenderMarkerScan; lines: PhysicalLine[] } {
   const lines = splitPhysicalLines(content);
   const scan = scanRenderMarkers(lines.map((l) => l.text));
   if (scan.damaged) {
