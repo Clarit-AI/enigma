@@ -1252,6 +1252,14 @@ var DEPOSITORY_MODULES = [
   onepasswordDepositoryModule
 ];
 
+// src/render/render.ts
+var PROMPT_PROFILE_BY_DEPOSITORY = new Map(
+  DEPOSITORY_MODULES.map((m) => [m.id, m.promptProfile])
+);
+
+// src/render/fanout.ts
+var PROMPT_PROFILE = new Map(DEPOSITORY_MODULES.map((m) => [m.id, m.promptProfile]));
+
 // src/storage/manager.ts
 function listSecrets(opts = {}) {
   const index = readIndex();

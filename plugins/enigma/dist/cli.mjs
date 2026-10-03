@@ -333,7 +333,7 @@ function loadProjectManifest(projectPath) {
 }
 
 // src/storage/manager.ts
-import { realpathSync as realpathSync4 } from "node:fs";
+import { realpathSync as realpathSync5 } from "node:fs";
 
 // src/core/naming.ts
 var NAME_PATTERN = /^[A-Z][A-Z0-9_]*$/;
@@ -2009,6 +2009,672 @@ async function detectAll() {
   return Promise.all(DEPOSITORY_MODULES.map((mod) => mod.detect()));
 }
 
+// src/render/fanout.ts
+import { chmodSync as chmodSync4, existsSync as existsSync10, readFileSync as readFileSync6, statSync as statSync4 } from "node:fs";
+
+// src/render/ledger.ts
+var RENDER_LEDGER_VERSION = 1;
+var EMPTY_LEDGER = { version: RENDER_LEDGER_VERSION, targets: [] };
+function sameKey(a, b) {
+  return a.projectId === b.projectId && a.worktree === b.worktree && a.file === b.file;
+}
+function mergeNames(existing, incoming) {
+  const set = new Set(existing);
+  for (const name of incoming) set.add(name);
+  return [...set].sort();
+}
+function readLedger() {
+  const path = renderLedgerPath();
+  const raw = readJsonFile(path, void 0, "E_CONFIG_CORRUPT");
+  return parseLedger(raw, path);
+}
+function parseLedger(raw, path) {
+  if (raw === void 0) return EMPTY_LEDGER;
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw corruptLedger(path, "expected an object with `version` and `targets`");
+  }
+  const record = raw;
+  const version = record.version;
+  if (version !== RENDER_LEDGER_VERSION) {
+    throw corruptLedger(path, `unsupported ledger version: ${JSON.stringify(version)}`);
+  }
+  if (!Array.isArray(record.targets)) {
+    throw corruptLedger(path, "`targets` must be an array");
+  }
+  const targets = [];
+  for (const entry of record.targets) {
+    targets.push(parseLedgerTarget(entry, path));
+  }
+  return { version: RENDER_LEDGER_VERSION, targets };
+}
+function parseLedgerTarget(raw, path) {
+  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
+    throw corruptLedger(path, "each target must be an object");
+  }
+  const record = raw;
+  if (typeof record.projectId !== "string") {
+    throw corruptLedger(path, "target.projectId must be a string");
+  }
+  if (typeof record.worktree !== "string") {
+    throw corruptLedger(path, "target.worktree must be a string");
+  }
+  if (typeof record.file !== "string") {
+    throw corruptLedger(path, "target.file must be a string");
+  }
+  if (!Array.isArray(record.names) || !record.names.every((n) => typeof n === "string")) {
+    throw corruptLedger(path, "target.names must be an array of strings");
+  }
+  if (typeof record.renderedAt !== "string") {
+    throw corruptLedger(path, "target.renderedAt must be an ISO-8601 string");
+  }
+  return {
+    projectId: record.projectId,
+    worktree: record.worktree,
+    file: record.file,
+    names: [...record.names],
+    renderedAt: record.renderedAt
+  };
+}
+function corruptLedger(path, reason) {
+  return new EnigmaError({
+    code: "E_CONFIG_CORRUPT",
+    message: `${path} is not a valid render ledger (${reason}); fix or remove it by hand, then try again.`
+  });
+}
+function replaceTarget(input) {
+  if (input.names.length === 0) {
+    removeTargetsMatching(input);
+    return void 0;
+  }
+  const lock = acquireFileLock(renderLedgerLockPath());
+  try {
+    const current = readLedger();
+    const now = (/* @__PURE__ */ new Date()).toISOString();
+    const sortedNames = mergeNames([], input.names);
+    const idx = current.targets.findIndex((t) => sameKey(t, input));
+    if (idx === -1) {
+      const created = {
+        projectId: input.projectId,
+        worktree: input.worktree,
+        file: input.file,
+        names: sortedNames,
+        renderedAt: now
+      };
+      const next = { ...current, targets: [...current.targets, created] };
+      writeJsonFileAtomic(renderLedgerPath(), next);
+      return created;
+    }
+    const prev = current.targets[idx];
+    const replaced = {
+      ...prev,
+      names: sortedNames,
+      renderedAt: now
+    };
+    const targets = current.targets.slice();
+    targets[idx] = replaced;
+    writeJsonFileAtomic(renderLedgerPath(), { ...current, targets });
+    return replaced;
+  } finally {
+    lock.release();
+  }
+}
+function targetsFor(filter = {}) {
+  const ledger = readLedger();
+  return ledger.targets.filter((t) => {
+    if (filter.projectId !== void 0 && t.projectId !== filter.projectId) return false;
+    if (filter.name !== void 0 && !t.names.includes(filter.name)) return false;
+    return true;
+  });
+}
+function removeTargetsMatching(input) {
+  const lock = acquireFileLock(renderLedgerLockPath());
+  try {
+    const current = readLedger();
+    const next = current.targets.filter((t) => !sameKey(t, input));
+    if (next.length === current.targets.length) return;
+    writeJsonFileAtomic(renderLedgerPath(), { ...current, targets: next });
+  } finally {
+    lock.release();
+  }
+}
+
+// src/render/render.ts
+import { chmodSync as chmodSync3, existsSync as existsSync9, lstatSync, readFileSync as readFileSync5, realpathSync as realpathSync4, statSync as statSync3 } from "node:fs";
+import { basename as basename5, dirname as dirname6, isAbsolute as isAbsolute2, join as join5, normalize, relative as relative2, resolve as resolve5, sep as sep2 } from "node:path";
+var FILE_MODE4 = 384;
+var DEFAULT_RENDER_PATH = ".env";
+var PATH_TRAVERSAL_SEGMENT_RE = /(^|[/\\])\.\.([/\\]|$)/;
+var PROMPT_PROFILE_BY_DEPOSITORY = new Map(
+  DEPOSITORY_MODULES.map((m) => [m.id, m.promptProfile])
+);
+function nameFromLine(line) {
+  const eq = line.indexOf("=");
+  return eq > 0 ? line.slice(0, eq) : void 0;
+}
+function envBlockNamesOf(content) {
+  const texts = splitPhysicalLines(content).map((l) => l.text);
+  const names = /* @__PURE__ */ new Set();
+  for (const range of envBlockRanges(texts)) {
+    for (const line of texts.slice(range.beginIdx + 1, range.endIdx)) {
+      const name = nameFromLine(line);
+      if (name !== void 0) names.add(name);
+    }
+  }
+  return names;
+}
+function writeRefusal(message) {
+  return new EnigmaError({ code: "E_WRITE_FAILED", message });
+}
+function validateTargetFile(worktree, file) {
+  const parentDir = dirname6(file);
+  if (!existsSync9(parentDir)) {
+    throw writeRefusal("render.path target parent directory does not exist; Enigma never creates directories in the user's worktree");
+  }
+  let realWorktree;
+  let realParent;
+  try {
+    realWorktree = realpathSync4(worktree);
+    realParent = realpathSync4(parentDir);
+  } catch (err) {
+    throw writeRefusal(`cannot resolve render.path: ${err.code ?? "unknown error"}`);
+  }
+  const rel = relative2(realWorktree, realParent);
+  if (rel.startsWith(`..${sep2}`) || rel === ".." || isAbsolute2(rel)) {
+    throw writeRefusal("render.path resolves outside the worktree via a symlinked parent directory");
+  }
+  const target = join5(realParent, basename5(file));
+  let stat;
+  try {
+    stat = lstatSync(target);
+  } catch (err) {
+    if (err.code === "ENOENT") return target;
+    throw writeRefusal(`cannot inspect render.path target: ${err.code ?? "unknown error"}`);
+  }
+  if (stat.isSymbolicLink()) throw writeRefusal("render.path target is a symlink; refusing to read through or replace it");
+  if (!stat.isFile()) throw writeRefusal("render.path target is not a regular file");
+  return target;
+}
+function resolveRenderTarget(worktree, renderPath) {
+  if (isAbsolute2(renderPath)) {
+    throw writeRefusal("render.path must be relative to the worktree; absolute paths are refused");
+  }
+  if (PATH_TRAVERSAL_SEGMENT_RE.test(renderPath)) {
+    throw writeRefusal("render.path must not contain a parent-directory traversal segment");
+  }
+  if (renderPath.trim() === "" || normalize(renderPath) === "." || /[/\\]$/.test(renderPath)) {
+    throw writeRefusal('render.path must name a file, not be empty, "." or a directory path ending in a separator');
+  }
+  const file = resolve5(worktree, renderPath);
+  validateTargetFile(worktree, file);
+  return file;
+}
+function buildRenderPlan(opts) {
+  const { projectId: projectId2, worktree, index, manifest, explicitName } = opts;
+  const renderOverride = manifest.render;
+  const enabled = renderOverride?.enabled !== false;
+  const renderPath = renderOverride?.path ?? DEFAULT_RENDER_PATH;
+  const file = enabled ? resolveRenderTarget(worktree, renderPath) : resolve5(worktree, renderPath);
+  const plan = {
+    enabled,
+    worktree,
+    file,
+    explicit: explicitName !== void 0,
+    warnings: [],
+    toResolve: [],
+    promptingStore: [],
+    narrowedOut: []
+  };
+  if (!enabled) return plan;
+  const projectEntries = index.entries.filter((e) => e.scope === "project" && e.projectId === projectId2);
+  if (explicitName !== void 0) {
+    const entry = projectEntries.find((e) => e.name === explicitName);
+    if (!entry) {
+      throw new EnigmaError({
+        code: "E_NOT_FOUND",
+        message: `${explicitName} is not a project-scoped secret for this repo`,
+        secretName: explicitName
+      });
+    }
+    plan.toResolve.push({ name: entry.name, depository: entry.depository });
+    return plan;
+  }
+  const narrowing = renderOverride?.names !== void 0 ? new Set(renderOverride.names) : void 0;
+  for (const entry of projectEntries) {
+    if (narrowing && !narrowing.has(entry.name)) {
+      plan.narrowedOut.push(entry.name);
+      continue;
+    }
+    const profile = PROMPT_PROFILE_BY_DEPOSITORY.get(entry.depository);
+    if (profile === void 0) continue;
+    const ref = { name: entry.name, depository: entry.depository };
+    if (profile === "none") plan.toResolve.push(ref);
+    else plan.promptingStore.push(ref);
+  }
+  return plan;
+}
+var STATIC_REASONS = {
+  E_NOT_FOUND: "failed to resolve: not found",
+  E_DEPOSITORY_UNAVAILABLE: "failed to resolve: depository unavailable",
+  E_READ_FAILED: "failed to resolve: read failed",
+  E_VALUE_TOO_LARGE: "failed to resolve: value too large for this depository",
+  E_REF_INVALID: "failed to resolve: ref invalid",
+  E_VAULT_MISSING: "failed to resolve: vault missing",
+  E_VAULT_CORRUPT: "failed to resolve: vault corrupt",
+  E_WRITE_FAILED: "failed to rewrite the target file"
+};
+var UNKNOWN_ERROR_CODE = "E_UNKNOWN";
+var TARGET_CHANGED_CODE = "E_TARGET_CHANGED";
+function staticReasonFor(code) {
+  if (code === UNKNOWN_ERROR_CODE) return "failed to resolve: unknown error";
+  if (code === TARGET_CHANGED_CODE) return "not resolved: the target file changed while rendering; run enigma render again";
+  return STATIC_REASONS[code] ?? `failed to resolve (${code})`;
+}
+function staticWriteError(message) {
+  const code = message?.match(/^(E[A-Z0-9]+):/)?.[1];
+  return code ? `failed to rewrite the target file (${code})` : "failed to rewrite the target file";
+}
+function stripRenderBlock(content, block) {
+  const lines = splitPhysicalLines(content);
+  const remaining = [...lines.slice(0, block.beginIdx), ...lines.slice(block.endIdx + 1)];
+  const last = remaining[remaining.length - 1];
+  if (block.endIdx === lines.length - 1 && last !== void 0 && last.term === "") {
+    remaining[remaining.length - 1] = { raw: last.raw + (dominantEol(lines) === "\r\n" ? "\r" : ""), term: "\n", text: last.text };
+  }
+  return joinPhysicalLines(remaining);
+}
+function readRenderBlock(content, file) {
+  const lines = splitPhysicalLines(content);
+  const scan = scanRenderMarkers(lines.map((l) => l.text));
+  if (scan.damaged) {
+    throw writeRefusal(
+      `${file}: the render block is damaged: the file must have either no render markers or exactly one "${RENDER_BEGIN_MARKER}" followed by exactly one "${RENDER_END_MARKER}" line, with no other render marker and no env-block marker between them. Fix the file by hand, then run enigma render again.`
+    );
+  }
+  return { scan, lines };
+}
+async function executeRender(plan, opts) {
+  const outcome = {
+    rendered: [],
+    kept: [],
+    removed: [],
+    failed: [],
+    alreadyInEnvBlock: [],
+    skipped: [],
+    warnings: [...plan.warnings],
+    disabled: false,
+    file: plan.file
+  };
+  if (!plan.enabled) {
+    outcome.disabled = true;
+    return outcome;
+  }
+  const peekPath = validateTargetFile(plan.worktree, plan.file);
+  const peek = existsSync9(peekPath) ? readFileSync5(peekPath, "utf8") : "";
+  readRenderBlock(peek, plan.file);
+  const peekEnvNames = envBlockNamesOf(peek);
+  const resolved = /* @__PURE__ */ new Map();
+  for (const item of plan.toResolve) {
+    if (peekEnvNames.has(item.name)) continue;
+    try {
+      resolved.set(item.name, { ok: true, value: await opts.resolveValue(item.name, item.depository) });
+    } catch (err) {
+      resolved.set(item.name, { ok: false, code: err instanceof EnigmaError ? err.code : UNKNOWN_ERROR_CODE });
+    }
+  }
+  const depositoryOf = new Map(plan.toResolve.map((t) => [t.name, t.depository]));
+  const lock = acquireFileLock(renderLockPath(peekPath));
+  try {
+    let target;
+    let current;
+    try {
+      target = validateTargetFile(plan.worktree, plan.file);
+      if (target !== peekPath) throw writeRefusal("render.path now resolves to a different file than the one that was locked; run enigma render again");
+      current = existsSync9(target) ? readFileSync5(target, "utf8") : "";
+      readRenderBlock(current, plan.file);
+    } catch (err) {
+      for (const item of plan.toResolve) {
+        appendAuditEvent({
+          op: "render",
+          name: item.name,
+          depository: item.depository,
+          actor: opts.actor,
+          ok: false,
+          error: staticReasonFor("E_WRITE_FAILED"),
+          ...auditScopeFields({ scope: "project", projectId: opts.projectId, projectPath: plan.worktree })
+        });
+      }
+      throw err;
+    }
+    outcome.file = target;
+    const envBlockNames = envBlockNamesOf(current);
+    const { scan: renderScan, lines: currentLines } = readRenderBlock(current, plan.file);
+    const existingBlock = renderScan.block;
+    const existing = /* @__PURE__ */ new Map();
+    if (existingBlock) {
+      for (const { text: line } of currentLines.slice(existingBlock.beginIdx + 1, existingBlock.endIdx)) {
+        const name = nameFromLine(line);
+        if (name !== void 0) existing.set(name, line);
+      }
+    }
+    const finalLines = /* @__PURE__ */ new Map();
+    const freshNames = /* @__PURE__ */ new Set();
+    const resolveFailures = [];
+    if (plan.explicit) {
+      for (const [name, line] of existing) finalLines.set(name, line);
+    } else {
+      for (const ref of plan.promptingStore) {
+        const line = existing.get(ref.name);
+        if (line !== void 0) finalLines.set(ref.name, line);
+        else outcome.skipped.push({ name: ref.name, reason: "prompting-store" });
+      }
+    }
+    for (const item of plan.toResolve) {
+      if (envBlockNames.has(item.name)) continue;
+      const result = resolved.get(item.name) ?? { ok: false, code: TARGET_CHANGED_CODE };
+      if (result.ok) {
+        finalLines.set(item.name, `${item.name}=${encodeValue(result.value)}`);
+        freshNames.add(item.name);
+      } else {
+        resolveFailures.push({ name: item.name, code: result.code });
+        const previous = existing.get(item.name);
+        if (previous !== void 0) finalLines.set(item.name, previous);
+      }
+    }
+    for (const name of envBlockNames) {
+      if (finalLines.delete(name) || plan.toResolve.some((t) => t.name === name)) {
+        outcome.alreadyInEnvBlock.push(name);
+      }
+    }
+    for (const name of plan.narrowedOut) {
+      if (!existing.has(name)) outcome.skipped.push({ name, reason: "narrowed-out" });
+    }
+    const bodyNames = [
+      ...[...existing.keys()].filter((n) => finalLines.has(n)),
+      ...[...finalLines.keys()].filter((n) => !existing.has(n)).sort((a, b) => a.localeCompare(b))
+    ];
+    let next;
+    if (bodyNames.length > 0) next = writeRenderBlock(current, bodyNames.map((n) => finalLines.get(n)), existingBlock);
+    else if (existingBlock) next = stripRenderBlock(current, existingBlock);
+    let writeOk = true;
+    if (next !== void 0) {
+      const result = writeFileAtomic(target, next, FILE_MODE4);
+      writeOk = result.ok;
+      if (!result.ok) {
+        outcome.writeError = staticWriteError(result.error);
+        if (result.leftoverPath) {
+          outcome.warnings.push(
+            `A temporary file with the rewritten content could not be removed automatically: delete ${result.leftoverPath} yourself as soon as possible.`
+          );
+        }
+      } else {
+        try {
+          if ((statSync3(target).mode & 511) !== FILE_MODE4) chmodSync3(target, FILE_MODE4);
+        } catch {
+        }
+      }
+    }
+    const scope = auditScopeFields({ scope: "project", projectId: opts.projectId, projectPath: plan.worktree });
+    const audit = (name, ok, error) => appendAuditEvent({ op: "render", name, depository: depositoryOf.get(name), actor: opts.actor, ok, error, ...scope });
+    if (!writeOk) {
+      const resolveCodes = new Map(resolveFailures.map((f) => [f.name, f.code]));
+      for (const item of plan.toResolve) {
+        if (envBlockNames.has(item.name)) continue;
+        const code = resolveCodes.get(item.name) ?? "E_WRITE_FAILED";
+        const reason = staticReasonFor(code);
+        audit(item.name, false, reason);
+        outcome.failed.push({ name: item.name, errorCode: code, reason, keptPreviousLine: existing.has(item.name) });
+      }
+      return outcome;
+    }
+    replaceTarget({ projectId: opts.projectId, worktree: plan.worktree, file: target, names: bodyNames });
+    for (const name of freshNames) {
+      audit(name, true, null);
+      outcome.rendered.push(name);
+    }
+    for (const f of resolveFailures) {
+      const reason = staticReasonFor(f.code);
+      audit(f.name, false, reason);
+      outcome.failed.push({ name: f.name, errorCode: f.code, reason, keptPreviousLine: finalLines.has(f.name) });
+    }
+    const failedNames = new Set(resolveFailures.map((f) => f.name));
+    for (const name of bodyNames) {
+      if (existing.has(name) && !freshNames.has(name) && !failedNames.has(name)) outcome.kept.push(name);
+    }
+    for (const name of existing.keys()) {
+      if (!finalLines.has(name)) outcome.removed.push(name);
+    }
+    outcome.rendered.sort();
+    outcome.kept.sort();
+    outcome.removed.sort();
+    outcome.alreadyInEnvBlock.sort();
+    return outcome;
+  } finally {
+    lock.release();
+  }
+}
+
+// src/render/fanout.ts
+var gate;
+var PROMPT_PROFILE = new Map(DEPOSITORY_MODULES.map((m) => [m.id, m.promptProfile]));
+function isAutoRenderable(depository) {
+  return PROMPT_PROFILE.get(depository) === "none";
+}
+var Skip = class extends Error {
+  constructor(reason, extraWarning) {
+    super(reason);
+    this.reason = reason;
+    this.extraWarning = extraWarning;
+  }
+  reason;
+  extraWarning;
+};
+function reasonFor(err) {
+  if (err instanceof Skip) return err.reason;
+  if (err instanceof EnigmaError) {
+    if (err.code === "E_LOCK_TIMEOUT" || err.code === "E_LOCK_UNAVAILABLE") return "lock-timeout";
+    if (err.code === "E_CONFIG_CORRUPT") return "config-invalid";
+    if (err.code === "E_WRITE_FAILED") return "target-refused";
+  }
+  const code = err?.code;
+  if (code === "EACCES" || code === "EPERM" || code === "EROFS") return "not-writable";
+  if (code === "ENOENT" || code === "ENOTDIR") return "worktree-missing";
+  return classifyCleanupError(err);
+}
+function warningFor(worktree, name, reason) {
+  return `render target ${worktree} was not updated for ${name} (${reason})`;
+}
+function eligibleEntryExists(name, projectId2) {
+  const entry = findIndexEntry(readIndex(), name, "project", projectId2);
+  return entry !== void 0 && isAutoRenderable(entry.depository);
+}
+function isCurrentCommit(name, projectId2, commit) {
+  const entry = findIndexEntry(readIndex(), name, "project", projectId2);
+  return entry !== void 0 && entry.updatedAt === commit.updatedAt && entry.ref === commit.ref && entry.depository === commit.depository;
+}
+function terminated(line, eol) {
+  return line.term === "" ? { raw: line.raw + (eol === "\r\n" ? "\r" : ""), term: "\n", text: line.text } : line;
+}
+function bodyIndicesFor(lines, block, name) {
+  const out = [];
+  for (let i = block.beginIdx + 1; i < block.endIdx; i++) {
+    if (nameFromLine(lines[i].text) === name) out.push(i);
+  }
+  return out;
+}
+function blockAssignmentNames(lines, block) {
+  const names = [];
+  for (let i = block.beginIdx + 1; i < block.endIdx; i++) {
+    const n = nameFromLine(lines[i].text);
+    if (n !== void 0) names.push(n);
+  }
+  return names;
+}
+function applySet(current, name, value) {
+  const lines = splitPhysicalLines(current);
+  const eol = dominantEol(lines);
+  const text = `${name}=${encodeValue(value)}`;
+  const { scan } = readRenderBlock(current, "");
+  if (!scan.block) {
+    return { next: writeRenderBlock(current, [text]), names: [name] };
+  }
+  const block = scan.block;
+  const fresh = { raw: text + (eol === "\r\n" ? "\r" : ""), term: "\n", text };
+  const existing = bodyIndicesFor(lines, block, name);
+  const out = [];
+  lines.forEach((line, i) => {
+    if (i === block.endIdx) {
+      if (existing.length === 0) out.push(fresh);
+      out.push(terminated(line, eol));
+    } else if (existing.length > 0 && i === existing[0]) {
+      out.push(fresh);
+    } else if (existing.includes(i)) {
+    } else {
+      out.push(line);
+    }
+  });
+  const next = joinPhysicalLines(out);
+  const after = splitPhysicalLines(next);
+  const rescanned = readRenderBlock(next, "").scan.block;
+  return { next, names: blockAssignmentNames(after, rescanned) };
+}
+function applyStrip(current, name) {
+  const lines = splitPhysicalLines(current);
+  const { scan } = readRenderBlock(current, "");
+  if (!scan.block) return { next: current, names: [] };
+  const block = scan.block;
+  const existing = bodyIndicesFor(lines, block, name);
+  if (existing.length === 0) return { next: current, names: blockAssignmentNames(lines, block) };
+  const eol = dominantEol(lines);
+  const remaining = lines.filter((_, i) => !existing.includes(i));
+  const shifted = { beginIdx: block.beginIdx, endIdx: block.endIdx - existing.length };
+  if (blockAssignmentNames(remaining, shifted).length === 0) {
+    return { next: stripRenderBlock(current, block), names: [] };
+  }
+  remaining[shifted.endIdx] = terminated(remaining[shifted.endIdx], eol);
+  return { next: joinPhysicalLines(remaining), names: blockAssignmentNames(remaining, shifted) };
+}
+function loadManifest(worktree) {
+  const manifest = loadProjectManifest(worktree);
+  if (manifest.renderError !== void 0) throw new Skip("config-invalid");
+  return manifest;
+}
+function updateTarget(input) {
+  const { name, projectId: projectId2, worktree, op } = input;
+  let removes = op.kind !== "set";
+  const audit = (ok, error) => appendAuditEvent({
+    op: removes ? "unrender" : "render",
+    name,
+    depository: input.depository,
+    actor: input.actor,
+    ok,
+    error,
+    ...auditScopeFields({ scope: "project", projectId: projectId2, projectPath: worktree })
+  });
+  try {
+    if (!existsSync10(worktree)) throw new Skip("worktree-missing");
+    const manifest = loadManifest(worktree);
+    if (manifest.render?.enabled === false) return { status: "silent" };
+    if (op.kind === "set" && manifest.render?.names !== void 0 && !manifest.render.names.includes(name)) return { status: "silent" };
+    const renderPath = manifest.render?.path ?? DEFAULT_RENDER_PATH;
+    const lexicalFile = resolveRenderTarget(worktree, renderPath);
+    const peekPath = validateTargetFile(worktree, lexicalFile);
+    if (input.ledgerFile !== void 0 && input.ledgerFile !== peekPath) throw new Skip("render-path-changed");
+    const lock = acquireFileLock(renderLockPath(peekPath));
+    try {
+      const target = validateTargetFile(worktree, lexicalFile);
+      if (target !== peekPath) throw new Skip("target-refused");
+      if (op.kind === "set" && !isCurrentCommit(name, projectId2, op.commit)) return { status: "silent" };
+      if (op.kind === "strip" && eligibleEntryExists(name, projectId2)) return { status: "silent" };
+      const current = existsSync10(target) ? readFileSync6(target, "utf8") : "";
+      try {
+        readRenderBlock(current, lexicalFile);
+      } catch {
+        throw new Skip("damaged-render-block");
+      }
+      const inEnvBlock = envBlockNamesOf(current).has(name);
+      if (op.kind === "dedupe" && !inEnvBlock) return { status: "silent" };
+      removes = op.kind !== "set" || inEnvBlock;
+      const result = removes ? applyStrip(current, name) : applySet(current, name, op.value);
+      const ledgerRow = targetsFor({ projectId: projectId2 }).find((t) => t.worktree === worktree && t.file === target);
+      if (result.next === current) {
+        syncLedger(projectId2, worktree, target, result.names, ledgerRow?.names);
+        return { status: "silent" };
+      }
+      const written = writeFileAtomic(target, result.next, FILE_MODE4);
+      if (!written.ok) {
+        throw new Skip(
+          "not-writable",
+          written.leftoverPath ? `A temporary file with the rewritten content could not be removed automatically: delete ${written.leftoverPath} yourself as soon as possible.` : void 0
+        );
+      }
+      try {
+        if ((statSync4(target).mode & 511) !== FILE_MODE4) chmodSync4(target, FILE_MODE4);
+      } catch {
+      }
+      replaceTarget({ projectId: projectId2, worktree, file: target, names: result.names });
+      audit(true, null);
+      return { status: "written", renderPath };
+    } finally {
+      lock.release();
+    }
+  } catch (err) {
+    const reason = reasonFor(err);
+    try {
+      audit(false, reason);
+    } catch {
+    }
+    return { status: "warn", reason, extraWarning: err instanceof Skip ? err.extraWarning : void 0 };
+  }
+}
+function syncLedger(projectId2, worktree, file, names, rowNames) {
+  const want = [...names].sort();
+  const have = rowNames === void 0 ? [] : [...rowNames].sort();
+  if (want.length === have.length && want.every((n, i) => n === have[i])) return;
+  replaceTarget({ projectId: projectId2, worktree, file, names });
+}
+function runTargets(targets, base) {
+  const warnings = [];
+  for (const t of targets) {
+    const result = updateTarget({ ...base, worktree: t.worktree, ledgerFile: t.ledgerFile });
+    if (result.status === "warn") {
+      warnings.push(warningFor(t.worktree, base.name, result.reason));
+      if (result.extraWarning) warnings.push(result.extraWarning);
+    } else if (result.status === "written" && t.isNew) {
+      for (const w of checkEnvGitignore(t.worktree, result.renderPath)) if (!warnings.includes(w)) warnings.push(w);
+    }
+  }
+  return warnings;
+}
+async function fanOutSet(input) {
+  try {
+    if (gate) await gate(input.commit);
+    const holders = targetsFor({ projectId: input.projectId, name: input.name });
+    const targets = holders.map((h) => ({ worktree: h.worktree, ledgerFile: h.file }));
+    if (input.addWorktree && !holders.some((h) => h.worktree === input.worktree)) targets.push({ worktree: input.worktree, isNew: true });
+    return runTargets(targets, {
+      name: input.name,
+      projectId: input.projectId,
+      depository: input.commit.depository,
+      actor: input.actor,
+      op: { kind: "set", value: input.value, commit: input.commit }
+    });
+  } catch (err) {
+    return [`render fan-out skipped for ${input.name} (${reasonFor(err)})`];
+  }
+}
+async function fanOutRemove(input) {
+  try {
+    if (gate) await gate();
+    const holders = targetsFor({ projectId: input.projectId, name: input.name });
+    return runTargets(
+      holders.map((h) => ({ worktree: h.worktree, ledgerFile: h.file })),
+      { name: input.name, projectId: input.projectId, depository: input.depository, actor: input.actor, op: { kind: input.mode } }
+    );
+  } catch (err) {
+    return [`render fan-out skipped for ${input.name} (${reasonFor(err)})`];
+  }
+}
+
 // src/storage/manager.ts
 function getDepositoryModule(id) {
   const mod = DEPOSITORY_MODULES.find((m) => m.id === id);
@@ -2031,7 +2697,7 @@ function projectPathFor(entry, cwd) {
 function canonicalPath(p) {
   if (p === void 0) return void 0;
   try {
-    return realpathSync4(p);
+    return realpathSync5(p);
   } catch {
     return p;
   }
@@ -2040,6 +2706,11 @@ function locationReclaimed(displaced) {
   return readIndex().entries.some(
     (e) => e.depository === displaced.depository && e.ref === displaced.ref && (displaced.depository !== "env" || canonicalPath(e.projectPath) === canonicalPath(displaced.projectPath))
   );
+}
+function strictlyAfter(stamp, previous) {
+  if (previous === void 0) return stamp;
+  const prev = Date.parse(previous);
+  return prev >= Date.parse(stamp) ? new Date(prev + 1).toISOString() : stamp;
 }
 async function setSecret(opts) {
   const needsProjectPath = opts.scope === "project" || opts.depository === "env";
@@ -2109,6 +2780,7 @@ async function setSecret(opts) {
     updatedAt: now
   };
   let displaced;
+  let committed = entry;
   try {
     mutateIndex((current) => {
       const currentExisting = findIndexEntry(current, opts.name, opts.scope, pid);
@@ -2120,7 +2792,8 @@ async function setSecret(opts) {
         });
       }
       displaced = currentExisting;
-      return upsertIndexEntry(current, entry);
+      committed = { ...entry, updatedAt: strictlyAfter(entry.updatedAt, currentExisting?.updatedAt) };
+      return upsertIndexEntry(current, committed);
     });
   } catch (err) {
     auditRefusal(err, op);
@@ -2147,6 +2820,31 @@ async function setSecret(opts) {
         appendAuditEvent({ op: "remove", name: opts.name, depository: opts.depository, actor: opts.actor, ok: false, error: classifyCleanupError(err), ...auditScopeFields({ scope: opts.scope, projectId: pid, projectPath }) });
       }
     }
+  }
+  if (opts.scope === "project" && pid !== void 0 && projectPath !== void 0) {
+    const isNew = displaced === void 0;
+    const commit = { updatedAt: committed.updatedAt, ref: committed.ref, depository: committed.depository };
+    let fanned;
+    if (opts.auditOp === "move") {
+      if (!isAutoRenderable(opts.depository)) {
+        fanned = await fanOutRemove({ name: opts.name, projectId: pid, depository: opts.depository, actor: opts.actor, mode: "strip" });
+      } else if (opts.depository === "env") {
+        fanned = await fanOutRemove({ name: opts.name, projectId: pid, depository: opts.depository, actor: opts.actor, mode: "dedupe" });
+      } else {
+        fanned = [];
+      }
+    } else {
+      fanned = await fanOutSet({
+        name: opts.name,
+        value: opts.value,
+        projectId: pid,
+        worktree: projectPath,
+        addWorktree: isNew && isAutoRenderable(opts.depository),
+        commit,
+        actor: opts.actor
+      });
+    }
+    for (const w of fanned) if (!warnings.includes(w)) warnings.push(w);
   }
   return { rotated: Boolean(existing), warnings };
 }
@@ -2179,6 +2877,8 @@ async function deleteSecret(name, opts) {
     throw err;
   }
   appendAuditEvent({ op: "remove", name, depository: removed.depository, actor: opts.actor, ok: true, error: null, ...auditScopeFields(removed) });
+  const warnings = removed.scope === "project" && removed.projectId !== void 0 ? await fanOutRemove({ name, projectId: removed.projectId, depository: removed.depository, actor: opts.actor, mode: "strip" }) : [];
+  return { warnings };
 }
 async function resolveSecret(name, opts) {
   const pid = opts.cwd ? projectId(opts.cwd) : void 0;
@@ -2250,7 +2950,7 @@ async function cmdAdd(argv, streams = {}) {
 
 // src/cli/commands/doctor.ts
 import { execFile as execFile4 } from "node:child_process";
-import { existsSync as existsSync10 } from "node:fs";
+import { existsSync as existsSync12 } from "node:fs";
 import { platform, release } from "node:os";
 import { promisify } from "node:util";
 
@@ -2272,17 +2972,17 @@ function computeManifestGaps(cwd) {
 import {
   accessSync,
   constants,
-  existsSync as existsSync9,
-  lstatSync,
-  readFileSync as readFileSync5,
+  existsSync as existsSync11,
+  lstatSync as lstatSync2,
+  readFileSync as readFileSync7,
   readlinkSync,
-  realpathSync as realpathSync5,
+  realpathSync as realpathSync6,
   renameSync as renameSync2,
   rmSync,
-  statSync as statSync3,
+  statSync as statSync5,
   symlinkSync
 } from "node:fs";
-import { basename as basename5, delimiter, dirname as dirname6, isAbsolute as isAbsolute2, join as join5, resolve as resolve5 } from "node:path";
+import { basename as basename6, delimiter, dirname as dirname7, isAbsolute as isAbsolute3, join as join6, resolve as resolve6 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/core/version.ts
@@ -2294,8 +2994,8 @@ function pathDirs(pathEnv) {
   const dirs = [];
   for (const raw of pathEnv.split(delimiter)) {
     const entry = raw.trim();
-    if (entry.length === 0 || !isAbsolute2(entry)) continue;
-    const abs = resolve5(entry);
+    if (entry.length === 0 || !isAbsolute3(entry)) continue;
+    const abs = resolve6(entry);
     if (seen.has(abs)) continue;
     seen.add(abs);
     dirs.push(abs);
@@ -2305,18 +3005,18 @@ function pathDirs(pathEnv) {
 function isWritableDir(dir) {
   try {
     accessSync(dir, constants.W_OK | constants.X_OK);
-    return (statSync3(dir).mode & 2) === 0;
+    return (statSync5(dir).mode & 2) === 0;
   } catch {
     return false;
   }
 }
 function readBundleManifest(cli) {
   try {
-    if (basename5(cli) !== "cli.mjs") return null;
-    const dist = dirname6(cli);
-    if (basename5(dist) !== "dist") return null;
-    const root = dirname6(dist);
-    const manifest = JSON.parse(readFileSync5(join5(root, ".claude-plugin", "plugin.json"), "utf8"));
+    if (basename6(cli) !== "cli.mjs") return null;
+    const dist = dirname7(cli);
+    if (basename6(dist) !== "dist") return null;
+    const root = dirname7(dist);
+    const manifest = JSON.parse(readFileSync7(join6(root, ".claude-plugin", "plugin.json"), "utf8"));
     if (typeof manifest !== "object" || manifest === null) return null;
     const { name, version } = manifest;
     return { name: typeof name === "string" ? name : null, version: typeof version === "string" ? version : null, root };
@@ -2363,7 +3063,7 @@ function isOlder(a, b) {
 function classify(dest, cli) {
   let stats;
   try {
-    stats = lstatSync(dest);
+    stats = lstatSync2(dest);
   } catch {
     return { slot: "free", link: null };
   }
@@ -2374,7 +3074,7 @@ function classify(dest, cli) {
   } catch {
     return { slot: "foreign", link: null };
   }
-  const link = isAbsolute2(raw) ? resolve5(raw) : resolve5(dirname6(dest), raw);
+  const link = isAbsolute3(raw) ? resolve6(raw) : resolve6(dirname7(dest), raw);
   let resolves = true;
   try {
     accessSync(link, constants.F_OK);
@@ -2383,8 +3083,8 @@ function classify(dest, cli) {
   }
   if (!resolves) return { slot: "dangling", link };
   try {
-    const realLink = realpathSync5(link);
-    const realCli = realpathSync5(cli);
+    const realLink = realpathSync6(link);
+    const realCli = realpathSync6(cli);
     if (realLink === realCli) return { slot: "ours", link };
     const other = readBundleManifest(realLink);
     if (other?.name === "enigma") {
@@ -2418,7 +3118,7 @@ function defaultPluginRoot() {
   const fromEnv = process.env.CLAUDE_PLUGIN_ROOT;
   if (fromEnv) return fromEnv;
   try {
-    return resolve5(dirname6(fileURLToPath2(import.meta.url)), "..");
+    return resolve6(dirname7(fileURLToPath2(import.meta.url)), "..");
   } catch {
     return null;
   }
@@ -2432,8 +3132,8 @@ function ensureCliShim(options = {}) {
     if (!pluginRoot) {
       return { status: "unavailable", target: null, cli: null, link: null, detail: "not running from a plugin install" };
     }
-    const cli = resolve5(pluginRoot, "dist", "cli.mjs");
-    if (!existsSync9(cli)) {
+    const cli = resolve6(pluginRoot, "dist", "cli.mjs");
+    if (!existsSync11(cli)) {
       return { status: "unavailable", target: null, cli: null, link: null, detail: `no CLI bundle at ${cli}` };
     }
     const dirs = pathDirs(options.pathEnv ?? process.env.PATH ?? "");
@@ -2443,7 +3143,7 @@ function ensureCliShim(options = {}) {
     const write = options.write !== false;
     let firstFree = null;
     for (const dir of dirs) {
-      const dest = join5(dir, "enigma");
+      const dest = join6(dir, "enigma");
       const { slot, link, detail: slotDetail } = classify(dest, cli);
       if (slot === "ours") return { status: "present", target: dest, cli, link, detail: null };
       if (slot === "foreign") {
@@ -2522,8 +3222,8 @@ async function cmdDoctor(argv) {
     index = { ok: false, error: err instanceof EnigmaError ? err.code : "unknown error" };
   }
   const vault = {
-    keyPresent: existsSync10(keyPath()),
-    secretsFilePresent: existsSync10(secretsPath())
+    keyPresent: existsSync12(keyPath()),
+    secretsFilePresent: existsSync12(secretsPath())
   };
   const { gaps: manifestGaps } = computeManifestGaps(process.cwd());
   const pathShim = ensureCliShim({ write: false });
@@ -2594,8 +3294,8 @@ async function cmdGet(argv) {
 }
 
 // src/cli/commands/import.ts
-import { existsSync as existsSync12, readFileSync as readFileSync7 } from "node:fs";
-import { isAbsolute as isAbsolute3, join as join6 } from "node:path";
+import { existsSync as existsSync14, readFileSync as readFileSync9 } from "node:fs";
+import { isAbsolute as isAbsolute4, join as join7 } from "node:path";
 
 // src/request/store.ts
 import { randomBytes as randomBytes3 } from "node:crypto";
@@ -2950,8 +3650,8 @@ function renderOutcome(results, cwd) {
 }
 
 // src/storage/import-commit.ts
-import { existsSync as existsSync11, readFileSync as readFileSync6 } from "node:fs";
-var FILE_MODE4 = 384;
+import { existsSync as existsSync13, readFileSync as readFileSync8 } from "node:fs";
+var FILE_MODE5 = 384;
 function ambiguousValueError(entry, envFilePath) {
   return new EnigmaError({
     code: "E_VALUE_AMBIGUOUS",
@@ -3014,7 +3714,7 @@ async function commitImport(opts) {
     }
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
-  const currentContent = existsSync11(opts.envFilePath) ? readFileSync6(opts.envFilePath, "utf8") : "";
+  const currentContent = existsSync13(opts.envFilePath) ? readFileSync8(opts.envFilePath, "utf8") : "";
   const valueByName = new Map(opts.entries.map((e) => [e.name, e.value]));
   const currentValueByName = new Map(parseDotEnv(currentContent).entries.map((e) => [e.name, e.value]));
   const toRemove = [];
@@ -3036,7 +3736,7 @@ async function commitImport(opts) {
   if (!needsWrite) {
     return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: false, warnings };
   }
-  const writeResult = writeFileAtomic(opts.envFilePath, rewritten, FILE_MODE4);
+  const writeResult = writeFileAtomic(opts.envFilePath, rewritten, FILE_MODE5);
   if (!writeResult.ok) {
     warnings.push(
       `Failed to rewrite ${opts.envFilePath} (${writeResult.error}). The migrated secret(s) (${toRemove.join(", ")}) are safely stored, but their plaintext line(s) were left in place because the file could not be rewritten \u2014 rerun import once the issue is fixed, or remove them from .env manually.`
@@ -6006,11 +6706,11 @@ async function cmdImport(argv) {
   if (positionals.length > 1) throw new UsageError(USAGE3);
   const cwd = process.cwd();
   const projectPath = findProjectPath(cwd);
-  const absPath = isAbsolute3(pathArg) ? pathArg : join6(cwd, pathArg);
-  if (!existsSync12(absPath)) {
+  const absPath = isAbsolute4(pathArg) ? pathArg : join7(cwd, pathArg);
+  if (!existsSync14(absPath)) {
     throw new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` });
   }
-  const content = readFileSync7(absPath, "utf8");
+  const content = readFileSync9(absPath, "utf8");
   const parsed = parseDotEnv(content);
   if (parsed.entries.length === 0) {
     return report(
@@ -6058,15 +6758,15 @@ async function cmdImport(argv) {
 }
 
 // src/cli/commands/install.ts
-import { existsSync as existsSync13, mkdirSync as mkdirSync3, readFileSync as readFileSync8, renameSync as renameSync3, writeFileSync as writeFileSync4 } from "node:fs";
+import { existsSync as existsSync15, mkdirSync as mkdirSync3, readFileSync as readFileSync10, renameSync as renameSync3, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname7, join as join7 } from "node:path";
+import { dirname as dirname8, join as join8 } from "node:path";
 var MARKETPLACE_NAME = "clarit-enigma";
 var REPO = "Clarit-AI/enigma";
 var PLUGIN_ENTRY = `enigma@${MARKETPLACE_NAME}`;
 function claudeSettingsPath() {
-  const configDir = process.env.CLAUDE_CONFIG_DIR || join7(homedir2(), ".claude");
-  return join7(configDir, "settings.json");
+  const configDir = process.env.CLAUDE_CONFIG_DIR || join8(homedir2(), ".claude");
+  return join8(configDir, "settings.json");
 }
 var DEFAULT_STYLE = { indent: "  ", trailingNewline: true, eol: "\n" };
 function detectStyle(raw) {
@@ -6078,10 +6778,10 @@ function detectStyle(raw) {
   };
 }
 function readSettings(path) {
-  if (!existsSync13(path)) return { settings: {}, style: DEFAULT_STYLE };
+  if (!existsSync15(path)) return { settings: {}, style: DEFAULT_STYLE };
   let raw;
   try {
-    raw = readFileSync8(path, "utf8");
+    raw = readFileSync10(path, "utf8");
   } catch (err) {
     throw new EnigmaError({
       code: "E_CLAUDE_SETTINGS_UNWRITABLE",
@@ -6124,7 +6824,7 @@ function errorReason(err) {
   return err instanceof Error ? err.message : String(err);
 }
 function writeSettingsAtomic(path, settings, style) {
-  const dir = dirname7(path);
+  const dir = dirname8(path);
   try {
     mkdirSync3(dir, { recursive: true });
   } catch (err) {
@@ -6415,451 +7115,16 @@ async function cmdRemove(argv) {
   const [name] = positionals;
   if (!name) throw new UsageError(USAGE6);
   const scope = parseScope(flags.scope);
-  await deleteSecret(name, { scope, cwd: process.cwd(), actor: "cli" });
+  const result = await deleteSecret(name, { scope, cwd: process.cwd(), actor: "cli" });
   process.stdout.write(`Removed ${name}${scope ? ` (${scope})` : ""}
+`);
+  for (const warning of result.warnings) process.stderr.write(`warning: ${warning}
 `);
   return 0;
 }
 
 // src/cli/commands/render.ts
 import { relative as relative3 } from "node:path";
-
-// src/render/render.ts
-import { chmodSync as chmodSync3, existsSync as existsSync14, lstatSync as lstatSync2, readFileSync as readFileSync9, realpathSync as realpathSync6, statSync as statSync4 } from "node:fs";
-import { basename as basename6, dirname as dirname8, isAbsolute as isAbsolute4, join as join8, normalize, relative as relative2, resolve as resolve6, sep as sep2 } from "node:path";
-
-// src/render/ledger.ts
-var RENDER_LEDGER_VERSION = 1;
-var EMPTY_LEDGER = { version: RENDER_LEDGER_VERSION, targets: [] };
-function sameKey(a, b) {
-  return a.projectId === b.projectId && a.worktree === b.worktree && a.file === b.file;
-}
-function mergeNames(existing, incoming) {
-  const set = new Set(existing);
-  for (const name of incoming) set.add(name);
-  return [...set].sort();
-}
-function readLedger() {
-  const path = renderLedgerPath();
-  const raw = readJsonFile(path, void 0, "E_CONFIG_CORRUPT");
-  return parseLedger(raw, path);
-}
-function parseLedger(raw, path) {
-  if (raw === void 0) return EMPTY_LEDGER;
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw corruptLedger(path, "expected an object with `version` and `targets`");
-  }
-  const record = raw;
-  const version = record.version;
-  if (version !== RENDER_LEDGER_VERSION) {
-    throw corruptLedger(path, `unsupported ledger version: ${JSON.stringify(version)}`);
-  }
-  if (!Array.isArray(record.targets)) {
-    throw corruptLedger(path, "`targets` must be an array");
-  }
-  const targets = [];
-  for (const entry of record.targets) {
-    targets.push(parseLedgerTarget(entry, path));
-  }
-  return { version: RENDER_LEDGER_VERSION, targets };
-}
-function parseLedgerTarget(raw, path) {
-  if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
-    throw corruptLedger(path, "each target must be an object");
-  }
-  const record = raw;
-  if (typeof record.projectId !== "string") {
-    throw corruptLedger(path, "target.projectId must be a string");
-  }
-  if (typeof record.worktree !== "string") {
-    throw corruptLedger(path, "target.worktree must be a string");
-  }
-  if (typeof record.file !== "string") {
-    throw corruptLedger(path, "target.file must be a string");
-  }
-  if (!Array.isArray(record.names) || !record.names.every((n) => typeof n === "string")) {
-    throw corruptLedger(path, "target.names must be an array of strings");
-  }
-  if (typeof record.renderedAt !== "string") {
-    throw corruptLedger(path, "target.renderedAt must be an ISO-8601 string");
-  }
-  return {
-    projectId: record.projectId,
-    worktree: record.worktree,
-    file: record.file,
-    names: [...record.names],
-    renderedAt: record.renderedAt
-  };
-}
-function corruptLedger(path, reason) {
-  return new EnigmaError({
-    code: "E_CONFIG_CORRUPT",
-    message: `${path} is not a valid render ledger (${reason}); fix or remove it by hand, then try again.`
-  });
-}
-function replaceTarget(input) {
-  if (input.names.length === 0) {
-    removeTargetsMatching(input);
-    return void 0;
-  }
-  const lock = acquireFileLock(renderLedgerLockPath());
-  try {
-    const current = readLedger();
-    const now = (/* @__PURE__ */ new Date()).toISOString();
-    const sortedNames = mergeNames([], input.names);
-    const idx = current.targets.findIndex((t) => sameKey(t, input));
-    if (idx === -1) {
-      const created = {
-        projectId: input.projectId,
-        worktree: input.worktree,
-        file: input.file,
-        names: sortedNames,
-        renderedAt: now
-      };
-      const next = { ...current, targets: [...current.targets, created] };
-      writeJsonFileAtomic(renderLedgerPath(), next);
-      return created;
-    }
-    const prev = current.targets[idx];
-    const replaced = {
-      ...prev,
-      names: sortedNames,
-      renderedAt: now
-    };
-    const targets = current.targets.slice();
-    targets[idx] = replaced;
-    writeJsonFileAtomic(renderLedgerPath(), { ...current, targets });
-    return replaced;
-  } finally {
-    lock.release();
-  }
-}
-function removeTargetsMatching(input) {
-  const lock = acquireFileLock(renderLedgerLockPath());
-  try {
-    const current = readLedger();
-    const next = current.targets.filter((t) => !sameKey(t, input));
-    if (next.length === current.targets.length) return;
-    writeJsonFileAtomic(renderLedgerPath(), { ...current, targets: next });
-  } finally {
-    lock.release();
-  }
-}
-
-// src/render/render.ts
-var FILE_MODE5 = 384;
-var DEFAULT_RENDER_PATH = ".env";
-var PATH_TRAVERSAL_SEGMENT_RE = /(^|[/\\])\.\.([/\\]|$)/;
-var PROMPT_PROFILE_BY_DEPOSITORY = new Map(
-  DEPOSITORY_MODULES.map((m) => [m.id, m.promptProfile])
-);
-function nameFromLine(line) {
-  const eq = line.indexOf("=");
-  return eq > 0 ? line.slice(0, eq) : void 0;
-}
-function envBlockNamesOf(content) {
-  const texts = splitPhysicalLines(content).map((l) => l.text);
-  const names = /* @__PURE__ */ new Set();
-  for (const range of envBlockRanges(texts)) {
-    for (const line of texts.slice(range.beginIdx + 1, range.endIdx)) {
-      const name = nameFromLine(line);
-      if (name !== void 0) names.add(name);
-    }
-  }
-  return names;
-}
-function writeRefusal(message) {
-  return new EnigmaError({ code: "E_WRITE_FAILED", message });
-}
-function validateTargetFile(worktree, file) {
-  const parentDir = dirname8(file);
-  if (!existsSync14(parentDir)) {
-    throw writeRefusal("render.path target parent directory does not exist; Enigma never creates directories in the user's worktree");
-  }
-  let realWorktree;
-  let realParent;
-  try {
-    realWorktree = realpathSync6(worktree);
-    realParent = realpathSync6(parentDir);
-  } catch (err) {
-    throw writeRefusal(`cannot resolve render.path: ${err.code ?? "unknown error"}`);
-  }
-  const rel = relative2(realWorktree, realParent);
-  if (rel.startsWith(`..${sep2}`) || rel === ".." || isAbsolute4(rel)) {
-    throw writeRefusal("render.path resolves outside the worktree via a symlinked parent directory");
-  }
-  const target = join8(realParent, basename6(file));
-  let stat;
-  try {
-    stat = lstatSync2(target);
-  } catch (err) {
-    if (err.code === "ENOENT") return target;
-    throw writeRefusal(`cannot inspect render.path target: ${err.code ?? "unknown error"}`);
-  }
-  if (stat.isSymbolicLink()) throw writeRefusal("render.path target is a symlink; refusing to read through or replace it");
-  if (!stat.isFile()) throw writeRefusal("render.path target is not a regular file");
-  return target;
-}
-function resolveRenderTarget(worktree, renderPath) {
-  if (isAbsolute4(renderPath)) {
-    throw writeRefusal("render.path must be relative to the worktree; absolute paths are refused");
-  }
-  if (PATH_TRAVERSAL_SEGMENT_RE.test(renderPath)) {
-    throw writeRefusal("render.path must not contain a parent-directory traversal segment");
-  }
-  if (renderPath.trim() === "" || normalize(renderPath) === "." || /[/\\]$/.test(renderPath)) {
-    throw writeRefusal('render.path must name a file, not be empty, "." or a directory path ending in a separator');
-  }
-  const file = resolve6(worktree, renderPath);
-  validateTargetFile(worktree, file);
-  return file;
-}
-function buildRenderPlan(opts) {
-  const { projectId: projectId2, worktree, index, manifest, explicitName } = opts;
-  const renderOverride = manifest.render;
-  const enabled = renderOverride?.enabled !== false;
-  const renderPath = renderOverride?.path ?? DEFAULT_RENDER_PATH;
-  const file = enabled ? resolveRenderTarget(worktree, renderPath) : resolve6(worktree, renderPath);
-  const plan = {
-    enabled,
-    worktree,
-    file,
-    explicit: explicitName !== void 0,
-    warnings: [],
-    toResolve: [],
-    promptingStore: [],
-    narrowedOut: []
-  };
-  if (!enabled) return plan;
-  const projectEntries = index.entries.filter((e) => e.scope === "project" && e.projectId === projectId2);
-  if (explicitName !== void 0) {
-    const entry = projectEntries.find((e) => e.name === explicitName);
-    if (!entry) {
-      throw new EnigmaError({
-        code: "E_NOT_FOUND",
-        message: `${explicitName} is not a project-scoped secret for this repo`,
-        secretName: explicitName
-      });
-    }
-    plan.toResolve.push({ name: entry.name, depository: entry.depository });
-    return plan;
-  }
-  const narrowing = renderOverride?.names !== void 0 ? new Set(renderOverride.names) : void 0;
-  for (const entry of projectEntries) {
-    if (narrowing && !narrowing.has(entry.name)) {
-      plan.narrowedOut.push(entry.name);
-      continue;
-    }
-    const profile = PROMPT_PROFILE_BY_DEPOSITORY.get(entry.depository);
-    if (profile === void 0) continue;
-    const ref = { name: entry.name, depository: entry.depository };
-    if (profile === "none") plan.toResolve.push(ref);
-    else plan.promptingStore.push(ref);
-  }
-  return plan;
-}
-var STATIC_REASONS = {
-  E_NOT_FOUND: "failed to resolve: not found",
-  E_DEPOSITORY_UNAVAILABLE: "failed to resolve: depository unavailable",
-  E_READ_FAILED: "failed to resolve: read failed",
-  E_VALUE_TOO_LARGE: "failed to resolve: value too large for this depository",
-  E_REF_INVALID: "failed to resolve: ref invalid",
-  E_VAULT_MISSING: "failed to resolve: vault missing",
-  E_VAULT_CORRUPT: "failed to resolve: vault corrupt",
-  E_WRITE_FAILED: "failed to rewrite the target file"
-};
-var UNKNOWN_ERROR_CODE = "E_UNKNOWN";
-var TARGET_CHANGED_CODE = "E_TARGET_CHANGED";
-function staticReasonFor(code) {
-  if (code === UNKNOWN_ERROR_CODE) return "failed to resolve: unknown error";
-  if (code === TARGET_CHANGED_CODE) return "not resolved: the target file changed while rendering; run enigma render again";
-  return STATIC_REASONS[code] ?? `failed to resolve (${code})`;
-}
-function staticWriteError(message) {
-  const code = message?.match(/^(E[A-Z0-9]+):/)?.[1];
-  return code ? `failed to rewrite the target file (${code})` : "failed to rewrite the target file";
-}
-function stripRenderBlock(content, block) {
-  const lines = splitPhysicalLines(content);
-  const remaining = [...lines.slice(0, block.beginIdx), ...lines.slice(block.endIdx + 1)];
-  const last = remaining[remaining.length - 1];
-  if (block.endIdx === lines.length - 1 && last !== void 0 && last.term === "") {
-    remaining[remaining.length - 1] = { raw: last.raw + (dominantEol(lines) === "\r\n" ? "\r" : ""), term: "\n", text: last.text };
-  }
-  return joinPhysicalLines(remaining);
-}
-function readRenderBlock(content, file) {
-  const lines = splitPhysicalLines(content);
-  const scan = scanRenderMarkers(lines.map((l) => l.text));
-  if (scan.damaged) {
-    throw writeRefusal(
-      `${file}: the render block is damaged: the file must have either no render markers or exactly one "${RENDER_BEGIN_MARKER}" followed by exactly one "${RENDER_END_MARKER}" line, with no other render marker and no env-block marker between them. Fix the file by hand, then run enigma render again.`
-    );
-  }
-  return { scan, lines };
-}
-async function executeRender(plan, opts) {
-  const outcome = {
-    rendered: [],
-    kept: [],
-    removed: [],
-    failed: [],
-    alreadyInEnvBlock: [],
-    skipped: [],
-    warnings: [...plan.warnings],
-    disabled: false,
-    file: plan.file
-  };
-  if (!plan.enabled) {
-    outcome.disabled = true;
-    return outcome;
-  }
-  const peekPath = validateTargetFile(plan.worktree, plan.file);
-  const peek = existsSync14(peekPath) ? readFileSync9(peekPath, "utf8") : "";
-  readRenderBlock(peek, plan.file);
-  const peekEnvNames = envBlockNamesOf(peek);
-  const resolved = /* @__PURE__ */ new Map();
-  for (const item of plan.toResolve) {
-    if (peekEnvNames.has(item.name)) continue;
-    try {
-      resolved.set(item.name, { ok: true, value: await opts.resolveValue(item.name, item.depository) });
-    } catch (err) {
-      resolved.set(item.name, { ok: false, code: err instanceof EnigmaError ? err.code : UNKNOWN_ERROR_CODE });
-    }
-  }
-  const depositoryOf = new Map(plan.toResolve.map((t) => [t.name, t.depository]));
-  const lock = acquireFileLock(renderLockPath(peekPath));
-  try {
-    let target;
-    let current;
-    try {
-      target = validateTargetFile(plan.worktree, plan.file);
-      if (target !== peekPath) throw writeRefusal("render.path now resolves to a different file than the one that was locked; run enigma render again");
-      current = existsSync14(target) ? readFileSync9(target, "utf8") : "";
-      readRenderBlock(current, plan.file);
-    } catch (err) {
-      for (const item of plan.toResolve) {
-        appendAuditEvent({
-          op: "render",
-          name: item.name,
-          depository: item.depository,
-          actor: opts.actor,
-          ok: false,
-          error: staticReasonFor("E_WRITE_FAILED"),
-          ...auditScopeFields({ scope: "project", projectId: opts.projectId, projectPath: plan.worktree })
-        });
-      }
-      throw err;
-    }
-    outcome.file = target;
-    const envBlockNames = envBlockNamesOf(current);
-    const { scan: renderScan, lines: currentLines } = readRenderBlock(current, plan.file);
-    const existingBlock = renderScan.block;
-    const existing = /* @__PURE__ */ new Map();
-    if (existingBlock) {
-      for (const { text: line } of currentLines.slice(existingBlock.beginIdx + 1, existingBlock.endIdx)) {
-        const name = nameFromLine(line);
-        if (name !== void 0) existing.set(name, line);
-      }
-    }
-    const finalLines = /* @__PURE__ */ new Map();
-    const freshNames = /* @__PURE__ */ new Set();
-    const resolveFailures = [];
-    if (plan.explicit) {
-      for (const [name, line] of existing) finalLines.set(name, line);
-    } else {
-      for (const ref of plan.promptingStore) {
-        const line = existing.get(ref.name);
-        if (line !== void 0) finalLines.set(ref.name, line);
-        else outcome.skipped.push({ name: ref.name, reason: "prompting-store" });
-      }
-    }
-    for (const item of plan.toResolve) {
-      if (envBlockNames.has(item.name)) continue;
-      const result = resolved.get(item.name) ?? { ok: false, code: TARGET_CHANGED_CODE };
-      if (result.ok) {
-        finalLines.set(item.name, `${item.name}=${encodeValue(result.value)}`);
-        freshNames.add(item.name);
-      } else {
-        resolveFailures.push({ name: item.name, code: result.code });
-        const previous = existing.get(item.name);
-        if (previous !== void 0) finalLines.set(item.name, previous);
-      }
-    }
-    for (const name of envBlockNames) {
-      if (finalLines.delete(name) || plan.toResolve.some((t) => t.name === name)) {
-        outcome.alreadyInEnvBlock.push(name);
-      }
-    }
-    for (const name of plan.narrowedOut) {
-      if (!existing.has(name)) outcome.skipped.push({ name, reason: "narrowed-out" });
-    }
-    const bodyNames = [
-      ...[...existing.keys()].filter((n) => finalLines.has(n)),
-      ...[...finalLines.keys()].filter((n) => !existing.has(n)).sort((a, b) => a.localeCompare(b))
-    ];
-    let next;
-    if (bodyNames.length > 0) next = writeRenderBlock(current, bodyNames.map((n) => finalLines.get(n)), existingBlock);
-    else if (existingBlock) next = stripRenderBlock(current, existingBlock);
-    let writeOk = true;
-    if (next !== void 0) {
-      const result = writeFileAtomic(target, next, FILE_MODE5);
-      writeOk = result.ok;
-      if (!result.ok) {
-        outcome.writeError = staticWriteError(result.error);
-        if (result.leftoverPath) {
-          outcome.warnings.push(
-            `A temporary file with the rewritten content could not be removed automatically: delete ${result.leftoverPath} yourself as soon as possible.`
-          );
-        }
-      } else {
-        try {
-          if ((statSync4(target).mode & 511) !== FILE_MODE5) chmodSync3(target, FILE_MODE5);
-        } catch {
-        }
-      }
-    }
-    const scope = auditScopeFields({ scope: "project", projectId: opts.projectId, projectPath: plan.worktree });
-    const audit = (name, ok, error) => appendAuditEvent({ op: "render", name, depository: depositoryOf.get(name), actor: opts.actor, ok, error, ...scope });
-    if (!writeOk) {
-      const resolveCodes = new Map(resolveFailures.map((f) => [f.name, f.code]));
-      for (const item of plan.toResolve) {
-        if (envBlockNames.has(item.name)) continue;
-        const code = resolveCodes.get(item.name) ?? "E_WRITE_FAILED";
-        const reason = staticReasonFor(code);
-        audit(item.name, false, reason);
-        outcome.failed.push({ name: item.name, errorCode: code, reason, keptPreviousLine: existing.has(item.name) });
-      }
-      return outcome;
-    }
-    replaceTarget({ projectId: opts.projectId, worktree: plan.worktree, file: target, names: bodyNames });
-    for (const name of freshNames) {
-      audit(name, true, null);
-      outcome.rendered.push(name);
-    }
-    for (const f of resolveFailures) {
-      const reason = staticReasonFor(f.code);
-      audit(f.name, false, reason);
-      outcome.failed.push({ name: f.name, errorCode: f.code, reason, keptPreviousLine: finalLines.has(f.name) });
-    }
-    const failedNames = new Set(resolveFailures.map((f) => f.name));
-    for (const name of bodyNames) {
-      if (existing.has(name) && !freshNames.has(name) && !failedNames.has(name)) outcome.kept.push(name);
-    }
-    for (const name of existing.keys()) {
-      if (!finalLines.has(name)) outcome.removed.push(name);
-    }
-    outcome.rendered.sort();
-    outcome.kept.sort();
-    outcome.removed.sort();
-    outcome.alreadyInEnvBlock.sort();
-    return outcome;
-  } finally {
-    lock.release();
-  }
-}
-
-// src/cli/commands/render.ts
 var USAGE7 = "enigma render [NAME] [--json]";
 var SKIP_REASONS = {
   "prompting-store": "prompting store, not previously rendered; use `enigma render NAME` to render it explicitly",

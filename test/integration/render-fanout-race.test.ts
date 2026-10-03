@@ -6,7 +6,7 @@
 // after the SECOND commit has fully fanned out. It fails on any implementation that does not
 // compare the commit against the index under each target's lock (the stale v1 would overwrite v2).
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
