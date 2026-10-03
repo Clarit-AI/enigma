@@ -7,14 +7,21 @@
  * and outside the index lock (ADR-003), one target at a time, each under that
  * target's own per-file lock (`renderLockPath`, Issue #106).
  *
+ * RECONCILIATION, not propagation. Under the per-NAME lock the operation whose
+ * commit is the CURRENT index state for NAME brings EVERY holder of NAME (and, for
+ * a create, the originating worktree) to that state: `fanOutPolicy` is the table
+ * (set the value, or strip), `reconcileAfterCommit` the one entry point that
+ * `setSecret`, `enigma move` and `enigma import` all call. A superseded operation
+ * is silent: the current one covers every holder.
+ *
  * Two operations, both on ONE name:
  *
  *  - `set`   — write `NAME=<value>` into the target's render block. If THIS
  *              file's env-depository block holds NAME, the render line is
  *              dropped instead (#107 AC #3: a name is never in both blocks),
  *              which is also what a `move --to env` needs.
- *  - `strip` — remove NAME's line (the secret was deleted, or moved to a
- *              prompting store, which is never auto-rendered).
+ *  - `strip` — remove NAME's line (deleted; or a NEW secret in, or a move into,
+ *              a prompting store, which is never auto-rendered).
  *
  * Value in hand only. `set` receives the value as an argument and encodes it
  * into one line; nothing here resolves a value, prompts a store, or reads

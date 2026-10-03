@@ -11,6 +11,13 @@ import type { DepositoryId } from '../../storage/interfaces.js';
 
 const USAGE = 'enigma move NAME --to ID [--scope project|global]';
 
+let beforeCleanup: (() => Promise<void> | void) | undefined;
+
+/** Test-only: runs after the new entry is committed and before the old copy is cleaned up, so a test can land a newer commit exactly there. */
+export function __setMoveCleanupHookForTesting(fn: (() => Promise<void> | void) | undefined): void {
+  beforeCleanup = fn;
+}
+
 export async function cmdMove(argv: string[]): Promise<number> {
   const { positionals, flags } = parseArgs(argv, { value: ['to', 'scope'] });
   const [name] = positionals;
@@ -69,6 +76,7 @@ export async function cmdMove(argv: string[]): Promise<number> {
   // `<id>/NAME` or env's bare NAME), and deleting it would lose the value that commit stored.
   const oldModule = DEPOSITORY_MODULES.find((m) => m.id === entry.depository);
   if (oldModule) {
+    await beforeCleanup?.();
     if (locationReclaimed(entry)) {
       warnings.push(`left the old copy of ${name} in ${entry.depository} in place: a newer change to ${name} uses that location`);
     } else {

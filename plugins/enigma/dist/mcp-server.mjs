@@ -44864,6 +44864,9 @@ function reasonFor(err) {
   if (code === "ENOENT" || code === "ENOTDIR") return "worktree-missing";
   return classifyCleanupError(err);
 }
+function renderHint(name, depository) {
+  return isAutoRenderable(depository) ? "run `enigma render`" : `run \`enigma render ${name}\``;
+}
 function warningFor(worktree, name, reason) {
   return `render target ${worktree} was not updated for ${name} (${reason})`;
 }
@@ -45058,7 +45061,7 @@ function lockTimeoutReport(projectId2, name, op, depository, actor, extraWorktre
   const warnings = [];
   for (const worktree of worktrees) {
     warnings.push(
-      `render target ${worktree} was not updated for ${name} (lock-timeout: its rendered copies of ${name} may be stale; run \`enigma render\`)`
+      `render target ${worktree} was not updated for ${name} (lock-timeout: its rendered copies of ${name} may be stale; ${renderHint(name, depository)})`
     );
     try {
       appendAuditEvent({
@@ -45076,7 +45079,7 @@ function lockTimeoutReport(projectId2, name, op, depository, actor, extraWorktre
   if (worktrees.length === 0) warnings.push(`render fan-out skipped for ${name} (lock-timeout)`);
   return warnings;
 }
-async function withNameLock(call, run, supersededNote, commit) {
+async function withNameLock(call, run, commit) {
   if (hooks.disabled) return [];
   if (gate) await gate(commit);
   let lock;
@@ -45090,7 +45093,11 @@ async function withNameLock(call, run, supersededNote, commit) {
   }
   try {
     hooks.afterNameLock?.(call.name);
-    if (!operationIsCurrent(call.name, call.projectId, call.op)) return [supersededNote];
+    if (!operationIsCurrent(call.name, call.projectId, call.op)) {
+      if (call.extraWorktree === void 0) return [];
+      const holds = targetsFor({ projectId: call.projectId, name: call.name }).some((t) => t.worktree === call.extraWorktree);
+      return holds ? [] : [warningFor(call.extraWorktree, call.name, `changed concurrently; ${renderHint(call.name, call.depository)} again`)];
+    }
     return run();
   } finally {
     lock.release();
@@ -45107,7 +45114,6 @@ async function fanOutSet(input2) {
         if (input2.addWorktree && !holders.some((h) => h.worktree === input2.worktree)) targets.push({ worktree: input2.worktree, isNew: true });
         return runTargets(targets, { name: input2.name, projectId: input2.projectId, depository: input2.commit.depository, actor: input2.actor, op });
       },
-      `render fan-out skipped for ${input2.name} (changed concurrently; run \`enigma render\` again)`,
       input2.commit
     );
   } catch (err) {
@@ -45125,8 +45131,7 @@ async function fanOutRemove(input2) {
           holders.map((h) => ({ worktree: h.worktree, ledgerFile: h.file })),
           { name: input2.name, projectId: input2.projectId, depository: input2.depository, actor: input2.actor, op }
         );
-      },
-      `render fan-out skipped for ${input2.name} (changed concurrently; run \`enigma render\` again)`
+      }
     );
   } catch (err) {
     return [`render fan-out skipped for ${input2.name} (${reasonFor(err)})`];
@@ -45134,9 +45139,25 @@ async function fanOutRemove(input2) {
 }
 function fanOutPolicy(input2) {
   const autoRenderable = isAutoRenderable(input2.depository);
-  if (input2.moved && !autoRenderable) return { action: "strip" };
-  if (autoRenderable || !input2.isNew) return { action: "set", addWorktree: input2.isNew && autoRenderable };
-  return { action: "none" };
+  if (autoRenderable) return { action: "set", addWorktree: input2.isNew };
+  if (input2.moved || input2.isNew) return { action: "strip" };
+  return { action: "set", addWorktree: false };
+}
+async function reconcileAfterCommit(input2) {
+  const policy = fanOutPolicy({ moved: input2.moved, isNew: input2.isNew, depository: input2.depository });
+  if (policy.action === "strip") {
+    return fanOutRemove({ name: input2.name, projectId: input2.projectId, depository: input2.depository, actor: input2.actor, expect: { kind: "entry", commit: input2.commit } });
+  }
+  const restore = input2.restoreWorktree !== void 0;
+  return fanOutSet({
+    name: input2.name,
+    value: input2.value,
+    projectId: input2.projectId,
+    worktree: restore ? input2.restoreWorktree : input2.worktree,
+    addWorktree: restore || policy.addWorktree,
+    commit: input2.commit,
+    actor: input2.actor
+  });
 }
 
 // src/storage/manager.ts
@@ -45287,21 +45308,17 @@ async function setSecret(opts) {
   }
   const commit = { updatedAt: committed.updatedAt, ref: committed.ref, depository: committed.depository };
   if (!opts.skipRenderFanout && opts.scope === "project" && pid !== void 0 && projectPath !== void 0) {
-    const policy = fanOutPolicy({ moved: opts.auditOp === "move", isNew: displaced === void 0, depository: opts.depository });
-    let fanned = [];
-    if (policy.action === "strip") {
-      fanned = await fanOutRemove({ name: opts.name, projectId: pid, depository: opts.depository, actor: opts.actor, expect: { kind: "moved", commit } });
-    } else if (policy.action === "set") {
-      fanned = await fanOutSet({
-        name: opts.name,
-        value: opts.value,
-        projectId: pid,
-        worktree: projectPath,
-        addWorktree: policy.addWorktree,
-        commit,
-        actor: opts.actor
-      });
-    }
+    const fanned = await reconcileAfterCommit({
+      name: opts.name,
+      value: opts.value,
+      projectId: pid,
+      worktree: projectPath,
+      depository: opts.depository,
+      commit,
+      actor: opts.actor,
+      isNew: displaced === void 0,
+      moved: opts.auditOp === "move"
+    });
     for (const w of fanned) if (!warnings.includes(w)) warnings.push(w);
   }
   return { rotated: Boolean(existing), warnings, commit };
@@ -45841,30 +45858,27 @@ import { isAbsolute as isAbsolute4, join as join8 } from "node:path";
 // src/storage/import-commit.ts
 import { existsSync as existsSync13, readFileSync as readFileSync8 } from "node:fs";
 var FILE_MODE5 = 384;
-function policyFor(opts, entry) {
-  return fanOutPolicy({ moved: false, isNew: entry.isNew, depository: opts.depository });
-}
 function notRenderedNote(opts, stored) {
-  if (opts.scope !== "project") return void 0;
-  const names = stored.filter((e) => policyFor(opts, e).action !== "none").map((e) => e.name);
-  if (names.length === 0) return void 0;
-  return `${names.join(", ")} ${names.length === 1 ? "was" : "were"} stored but ${names.length === 1 ? "its" : "their"} rendered copies were not updated because the import did not complete; run \`enigma render\` once the issue is fixed.`;
+  if (opts.scope !== "project" || stored.length === 0) return void 0;
+  const names = stored.map((e) => e.name);
+  const hint = isAutoRenderable(opts.depository) ? "run `enigma render`" : `run ${names.map((n) => `\`enigma render ${n}\``).join(" or ")}`;
+  return `${names.join(", ")} ${names.length === 1 ? "was" : "were"} stored but ${names.length === 1 ? "its" : "their"} rendered copies were not updated because the import did not complete; ${hint} once the issue is fixed.`;
 }
 async function renderCommitted(opts, stored, skipped, warnings) {
   if (opts.scope !== "project") return;
   const projectId2 = projectId(opts.cwd);
   for (const entry of stored) {
     if (skipped.includes(entry.name)) continue;
-    const policy = policyFor(opts, entry);
-    if (policy.action !== "set") continue;
-    const fanned = await fanOutSet({
+    const fanned = await reconcileAfterCommit({
       name: entry.name,
       value: entry.value,
       projectId: projectId2,
       worktree: opts.projectPath,
-      addWorktree: policy.addWorktree,
+      depository: opts.depository,
       commit: entry.commit,
-      actor: opts.actor
+      actor: opts.actor,
+      isNew: entry.isNew,
+      moved: false
     });
     for (const w of fanned) if (!warnings.includes(w)) warnings.push(w);
   }

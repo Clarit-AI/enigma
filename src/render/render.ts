@@ -59,6 +59,10 @@
  *    in a prompting store is rendered only explicitly
  *    (`enigma render NAME`); once its line is in the block, a plain
  *    render keeps that line as bytes and never re-resolves it.
+ *  - Plain render reconciles removals with the CURRENT index (Issue #108): a line
+ *    for a name the plan never covered stays verbatim if that name now has a
+ *    render-eligible entry (a fan-out wrote it since the plan; it is never
+ *    re-resolved), and is dropped only when it has none.
  *  - Lines already in the block are copied as bytes from the file read
  *    under the lock; the plan never holds them. Existing lines keep their
  *    order; new names are appended sorted. Explicit `enigma render NAME`
@@ -153,6 +157,8 @@ export interface RenderPlan {
   promptingStore: RenderEntryRef[];
   /** Plain mode only: project entries excluded by `.enigma.json` `render.names`. */
   narrowedOut: string[];
+  /** `.enigma.json` `render.names` as configured (undefined: no narrowing). Used to tell a name created AFTER the plan that is excluded from one the plan simply never saw. */
+  narrowing?: string[];
 }
 
 export interface RenderFailure {
@@ -329,6 +335,7 @@ export function buildRenderPlan(opts: {
     toResolve: [],
     promptingStore: [],
     narrowedOut: [],
+    narrowing: renderOverride?.names,
   };
   if (!enabled) return plan;
 
@@ -382,10 +389,14 @@ const UNKNOWN_ERROR_CODE = 'E_UNKNOWN';
 const TARGET_CHANGED_CODE = 'E_TARGET_CHANGED';
 const SUPERSEDED_CODE = 'E_SUPERSEDED';
 
-function staticReasonFor(code: string): string {
+function staticReasonFor(code: string, subject?: { name: string; depository: DepositoryId | undefined }): string {
   if (code === UNKNOWN_ERROR_CODE) return 'failed to resolve: unknown error';
   if (code === TARGET_CHANGED_CODE) return 'not resolved: the target file changed while rendering; run enigma render again';
-  if (code === SUPERSEDED_CODE) return 'not written: changed concurrently; run enigma render again';
+  if (code === SUPERSEDED_CODE) {
+    // A prompting-store name is never rendered by a plain `enigma render`, so point it at the explicit form.
+    const prompting = subject?.depository !== undefined && PROMPT_PROFILE_BY_DEPOSITORY.get(subject.depository) !== 'none';
+    return `not written: changed concurrently; run enigma render${prompting ? ` ${subject!.name}` : ''} again`;
+  }
   return STATIC_REASONS[code as EnigmaErrorCode] ?? `failed to resolve (${code})`;
 }
 
@@ -562,6 +573,18 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
         if (line !== undefined) finalLines.set(ref.name, line);
         else outcome.skipped.push({ name: ref.name, reason: 'prompting-store' });
       }
+      // Reconcile removals against the CURRENT index, not only the plan (Issue #108): a line for a name the plan
+      // never covered (created after the plan, its fan-out has written it) stays verbatim if that name now has a
+      // render-eligible entry and `render.names` does not exclude it; it is dropped only when it has none.
+      // A kept line is never re-resolved.
+      const covered = new Set([...plan.toResolve, ...plan.promptingStore].map((r) => r.name).concat(plan.narrowedOut));
+      const liveIndex = readIndex();
+      for (const [name, line] of existing) {
+        if (covered.has(name)) continue;
+        if (plan.narrowing !== undefined && !plan.narrowing.includes(name)) continue;
+        const live = findIndexEntry(liveIndex, name, 'project', opts.projectId);
+        if (live !== undefined && PROMPT_PROFILE_BY_DEPOSITORY.get(live.depository) === 'none') finalLines.set(name, line);
+      }
     }
     for (const item of plan.toResolve) {
       if (envBlockNames.has(item.name)) continue; // AC #3, handled below
@@ -637,7 +660,7 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
       for (const item of plan.toResolve) {
         if (envBlockNames.has(item.name)) continue;
         const code = resolveCodes.get(item.name) ?? 'E_WRITE_FAILED';
-        const reason = staticReasonFor(code);
+        const reason = staticReasonFor(code, { name: item.name, depository: item.depository });
         audit(item.name, false, reason);
         // The file is unchanged, so an old line for this name is still in it.
         outcome.failed.push({ name: item.name, errorCode: code, reason, keptPreviousLine: existing.has(item.name) });
@@ -652,7 +675,7 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
       outcome.rendered.push(name);
     }
     for (const f of resolveFailures) {
-      const reason = staticReasonFor(f.code);
+      const reason = staticReasonFor(f.code, { name: f.name, depository: depositoryOf.get(f.name) });
       audit(f.name, false, reason);
       outcome.failed.push({ name: f.name, errorCode: f.code, reason, keptPreviousLine: finalLines.has(f.name) });
     }
