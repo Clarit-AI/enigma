@@ -48320,10 +48320,11 @@ function escapeAppleScriptString(input2) {
 }
 function buildHiddenAnswerScript(name, reason, progress) {
   const multi = progress !== void 0 && progress.total > 1;
-  const prompt = multi ? `Enter value for ${name} (${progress.index} of ${progress.total}). Enter only this one value; the other credentials are requested in separate dialogs.${reason ? `
+  const closing = multi && progress.index >= progress.total ? "this is the last dialog." : "the other credentials are requested in separate dialogs.";
+  const prompt = multi ? `Enter value for ${name} (${progress.index} of ${progress.total}). Enter only this one value; ${closing}${reason ? `
 
 Reason for the whole request: ${reason}` : ""}` : reason ? `Enter value for ${name} (${reason}):` : `Enter value for ${name}:`;
-  const title = multi ? `Enigma (${progress.index} of ${progress.total})` : "Enigma";
+  const title = escapeAppleScriptString(multi ? `Enigma (${progress.index} of ${progress.total})` : "Enigma");
   const escapedPrompt = escapeAppleScriptString(prompt);
   return [
     `set dialogResult to display dialog "${escapedPrompt}" default answer "" with hidden answer with title "${title}"`,
