@@ -48318,11 +48318,16 @@ function registerRemoveTool(server) {
 function escapeAppleScriptString(input2) {
   return input2.replace(/\\/g, "\\\\").replace(/"/g, '\\"').replace(/\r\n|\r|\n/g, "\\n");
 }
-function buildHiddenAnswerScript(name, reason) {
-  const prompt = reason ? `Enter value for ${name} (${reason}):` : `Enter value for ${name}:`;
+function buildHiddenAnswerScript(name, reason, progress) {
+  const multi = progress !== void 0 && progress.total > 1;
+  const closing = multi && progress.index >= progress.total ? "this is the last dialog." : "the other credentials are requested in separate dialogs.";
+  const prompt = multi ? `Enter value for ${name} (${progress.index} of ${progress.total}). Enter only this one value; ${closing}${reason ? `
+
+Reason for the whole request: ${reason}` : ""}` : reason ? `Enter value for ${name} (${reason}):` : `Enter value for ${name}:`;
+  const title = escapeAppleScriptString(multi ? `Enigma (${progress.index} of ${progress.total})` : "Enigma");
   const escapedPrompt = escapeAppleScriptString(prompt);
   return [
-    `set dialogResult to display dialog "${escapedPrompt}" default answer "" with hidden answer with title "Enigma"`,
+    `set dialogResult to display dialog "${escapedPrompt}" default answer "" with hidden answer with title "${title}"`,
     "return text returned of dialogResult"
   ].join("\n");
 }
@@ -48395,8 +48400,8 @@ function assertDarwin() {
 var DIALOG_TIMEOUT_MS = 10 * 60 * 1e3;
 var DIALOG_MAX_BUFFER_BYTES = 64 * 1024;
 var CANCEL_MARKER = "-128";
-async function promptHiddenAnswer(name, reason) {
-  const script = buildHiddenAnswerScript(name, reason);
+async function promptHiddenAnswer(name, reason, progress) {
+  const script = buildHiddenAnswerScript(name, reason, progress);
   const { code, stdout, stderr } = await execWithStdin("osascript", ["-"], script, {
     timeoutMs: DIALOG_TIMEOUT_MS,
     maxBufferBytes: DIALOG_MAX_BUFFER_BYTES
@@ -48415,9 +48420,11 @@ async function nativeRequest(opts) {
   const scope = opts.scope ?? "project";
   const depository = opts.depository ?? loadConfig().defaultDepository ?? "encrypted";
   const actor = opts.actor ?? "user";
+  const offset = opts.progress?.offset ?? 0;
+  const total = opts.progress?.total ?? opts.names.length;
   const stored = [];
-  for (const name of opts.names) {
-    const value = await promptHiddenAnswer(name, opts.reason);
+  for (const [i, name] of opts.names.entries()) {
+    const value = await promptHiddenAnswer(name, opts.reason, { index: offset + i + 1, total });
     await setSecret({
       name,
       value,
@@ -48476,7 +48483,8 @@ async function runNative(args, cwd, server) {
         cwd,
         usage: args.usage,
         rotate: args.rotate,
-        createVault: createVault2
+        createVault: createVault2,
+        progress: { offset: args.names.length - pendingNames.length, total: args.names.length }
       });
       settled2.push(...result.stored.map((name) => ({ name, ok: true })));
       const outcome = renderOutcome(settled2, cwd);

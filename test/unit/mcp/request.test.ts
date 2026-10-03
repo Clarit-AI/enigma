@@ -370,6 +370,39 @@ describe('enigma_request', () => {
     await pair.close();
   });
 
+  it('Issue #117: ui:"native" with several names shows one labelled dialog per name through the tool, each stored under its own name', async () => {
+    Object.defineProperty(process, 'platform', { value: 'darwin' });
+    const names = ['R2_ACCESS_KEY_ID', 'R2_SECRET_ACCESS_KEY', 'R2_ENDPOINT'];
+    const children = names.map(() => new FakeChild());
+    let call = 0;
+    spawnMock.mockImplementation(() => {
+      const index = call;
+      call += 1;
+      const child = children[index]!;
+      queueMicrotask(() => {
+        child.stdout.emit('data', Buffer.from(`${SENTINEL}-${index}\n`));
+        child.emit('close', 0);
+      });
+      return child;
+    });
+
+    const pair = await connectWithCapabilities({});
+    const result = await pair.client.callTool({
+      name: 'enigma_request',
+      arguments: { names, reason: 'R2 backups; R2_ENDPOINT is the account URL', usage: 'interactive', scope: 'global', depository: 'encrypted', ui: 'native' },
+    });
+
+    expect(result.isError).toBeFalsy();
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+    expect(text).toBe(names.map((n) => `Stored ${n} in encrypted (global)`).join('\n'));
+    children.forEach((child, i) => {
+      const script = child.stdin.write.mock.calls[0]?.[0] as string;
+      expect(script).toContain(`Enter value for ${names[i]} (${i + 1} of 3).`);
+      expect(script).toContain(`with title "Enigma (${i + 1} of 3)"`);
+    });
+    await pair.close();
+  });
+
   it('ui:"native" all failed (first dialog cancelled): isError:true', async () => {
     Object.defineProperty(process, 'platform', { value: 'darwin' });
     const child = new FakeChild();

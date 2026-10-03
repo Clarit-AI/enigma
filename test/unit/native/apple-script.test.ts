@@ -70,3 +70,63 @@ describe('buildHiddenAnswerScript', () => {
     expect(script.split('\n')).toHaveLength(2);
   });
 });
+
+describe('buildHiddenAnswerScript with several names (Issue #117)', () => {
+  const REASON = 'R2 API token scoped to bucket b. R2_ENDPOINT is the https://<account-id>.r2.cloudflarestorage.com URL.';
+
+  it('names the credential and its position in the prompt and in the title', () => {
+    const script = buildHiddenAnswerScript('R2_ACCESS_KEY_ID', REASON, { index: 1, total: 3 });
+    expect(script).toContain('Enter value for R2_ACCESS_KEY_ID (1 of 3).');
+    expect(script).toContain('with title "Enigma (1 of 3)"');
+  });
+
+  it('asks for only that one value and says the others follow in separate dialogs', () => {
+    const script = buildHiddenAnswerScript('R2_ACCESS_KEY_ID', REASON, { index: 1, total: 3 });
+    expect(script).toContain('Enter only this one value; the other credentials are requested in separate dialogs.');
+  });
+
+  it('shows the shared reason after the name, labelled as covering the whole request, so it cannot read as this dialog asking for several values', () => {
+    const script = buildHiddenAnswerScript('R2_ACCESS_KEY_ID', REASON, { index: 2, total: 3 });
+    expect(script.indexOf('Enter value for R2_ACCESS_KEY_ID (2 of 3)')).toBeLessThan(script.indexOf('Reason for the whole request:'));
+    expect(script).toContain(`Reason for the whole request: ${REASON}`);
+    // not the old single-name shape that put the whole reason in parentheses right after the name
+    expect(script).not.toContain(`Enter value for R2_ACCESS_KEY_ID (${REASON}`);
+  });
+
+  it('the last dialog says it is the last instead of promising more dialogs', () => {
+    const last = buildHiddenAnswerScript('R2_ENDPOINT', REASON, { index: 3, total: 3 });
+    expect(last).toContain('Enter only this one value; this is the last dialog.');
+    expect(last).not.toContain('requested in separate dialogs');
+    const middle = buildHiddenAnswerScript('R2_ENDPOINT', REASON, { index: 2, total: 3 });
+    expect(middle).toContain('the other credentials are requested in separate dialogs.');
+    expect(middle).not.toContain('this is the last dialog');
+  });
+
+  it('escapes the title too, so a non-integer progress can never break out of the literal', () => {
+    const hostile = { index: '1" & (do shell script "touch pwned") & "', total: 3 } as unknown as { index: number; total: number };
+    const script = buildHiddenAnswerScript('A', 'r', hostile);
+    expect(script).not.toContain('with title "Enigma (1" &');
+    expect(script).toContain('with title "Enigma (1\\" & (do shell script \\"touch pwned\\") & \\" of 3)"');
+    expect(script.split('\n')).toHaveLength(2);
+  });
+
+  it('omits the reason section when the reason is empty', () => {
+    const script = buildHiddenAnswerScript('A', '', { index: 1, total: 2 });
+    expect(script).not.toContain('Reason for the whole request');
+  });
+
+  it('a single name (total 1, or no progress) keeps the original unlabelled wording and title', () => {
+    expect(buildHiddenAnswerScript('A', 'why', { index: 1, total: 1 })).toBe(buildHiddenAnswerScript('A', 'why'));
+    expect(buildHiddenAnswerScript('A', 'why')).toContain('Enter value for A (why):');
+    expect(buildHiddenAnswerScript('A', 'why')).toContain('with title "Enigma"');
+  });
+
+  it('escapes a hostile name and reason in the multi-name prompt, and still produces exactly two statements', () => {
+    const hostileName = 'FOO" & (do shell script "touch pwned") & "BAR\\';
+    const script = buildHiddenAnswerScript(hostileName, 'say "hi" \\ done\nline2', { index: 2, total: 3 });
+    expect(script).not.toContain('FOO" &');
+    expect(script).not.toContain('say "hi"');
+    expect(script.split('\n')).toHaveLength(2);
+  });
+});
+
