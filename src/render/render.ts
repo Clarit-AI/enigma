@@ -69,6 +69,11 @@
  *  - A failed resolve keeps the name's previous line when there is one
  *    (reported under Failed, "kept previous line"), else the name is
  *    simply absent. Other names still render.
+ *  - Rule A (Issue #108): each resolved name's index commit identity
+ *    (`updatedAt`, `ref`, `depository`) is captured BEFORE it is resolved and
+ *    re-checked under the lock. A name whose entry has moved on is not written:
+ *    its existing line stays (or it stays absent) and it is reported under
+ *    Failed as `E_SUPERSEDED`. Nothing is ever re-resolved under the lock.
  *  - Failure reasons are STATIC: an error's `message` is never copied
  *    into the outcome, stdout, stderr or the audit log.
  *  - Nothing to write and no existing block: the file is not touched. An

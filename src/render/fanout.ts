@@ -7,14 +7,14 @@
  * and outside the index lock (ADR-003), one target at a time, each under that
  * target's own per-file lock (`renderLockPath`, Issue #106).
  *
- * Three operations, all on ONE name:
+ * Two operations, both on ONE name:
  *
- *  - `set`    — write `NAME=<value>` into the target's render block.
- *  - `strip`  — remove NAME's line (the secret was deleted, or moved to a
- *               prompting store, which is never auto-rendered).
- *  - `dedupe` — remove NAME's line only if THIS file's env-depository block now
- *               holds NAME (a `move --to env` wrote it there; AC #3 of #107:
- *               a name is never in both blocks).
+ *  - `set`   — write `NAME=<value>` into the target's render block. If THIS
+ *              file's env-depository block holds NAME, the render line is
+ *              dropped instead (#107 AC #3: a name is never in both blocks),
+ *              which is also what a `move --to env` needs.
+ *  - `strip` — remove NAME's line (the secret was deleted, or moved to a
+ *              prompting store, which is never auto-rendered).
  *
  * Value in hand only. `set` receives the value as an argument and encodes it
  * into one line; nothing here resolves a value, prompts a store, or reads
@@ -22,16 +22,23 @@
  * an in-block comment is kept too (the renderer rewrites it on a full render,
  * the fan-out does not).
  *
- * "Last committed rotate wins": two rotates commit in index order but their
- * fan-outs can run in either order. Each `set` therefore carries the identity
- * of ITS index commit (`updatedAt`, `ref`, `depository` — `setSecret` makes
- * `updatedAt` strictly increase per entry), and under the target's lock,
- * immediately before writing, re-reads the index (lock-free; atomic rename)
- * and writes only if the entry is still that commit. A stale fan-out skips;
- * the newer commit's own fan-out writes its value. Check and write share one
- * lock hold, so no write can slip between them. `strip` is the mirror: it
- * skips when a render-eligible entry for NAME exists again (the re-created
- * secret owns the line).
+ * Two rules close every interleaving (PR #124 review):
+ *
+ *  Rule A — never write a superseded value. Each `set` carries the identity of
+ *  ITS index commit (`updatedAt`, `ref`, `depository`; `setSecret` makes
+ *  `updatedAt` strictly increase per entry). Under the target's file lock,
+ *  immediately before writing, the index is re-read (lock-free; atomic
+ *  rename) and NAME is written only if the entry is still that commit.
+ *  `strip` is the mirror: it skips when a render-eligible entry for NAME
+ *  exists again. Plain `enigma render` applies the same rule (render.ts).
+ *
+ *  Rule B — fan-outs for one NAME are serialized by a per-NAME lock
+ *  (`nameLockPath`). Inside it: FIRST check the commit is still current (else
+ *  skip entirely), THEN snapshot the holders from the ledger, then write each
+ *  target under its own file lock. The NAME lock is always taken before any
+ *  target lock. So the last committed operation's fan-out runs after every
+ *  earlier one has finished, and its snapshot includes any target they added.
+ *  Plain `enigma render` takes no NAME lock; Rule A protects it.
  *
  * Per-target outcomes (the originating operation always succeeds):
  *  - silent skip: `render.enabled:false`; `render.names` excludes NAME (`set`);

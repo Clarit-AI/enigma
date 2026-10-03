@@ -2010,7 +2010,9 @@ async function detectAll() {
 }
 
 // src/render/fanout.ts
+import { createHash as createHash3 } from "node:crypto";
 import { chmodSync as chmodSync4, existsSync as existsSync10, readFileSync as readFileSync6, statSync as statSync4 } from "node:fs";
+import { join as join6 } from "node:path";
 
 // src/render/ledger.ts
 var RENDER_LEDGER_VERSION = 1;
@@ -2264,9 +2266,11 @@ var STATIC_REASONS = {
 };
 var UNKNOWN_ERROR_CODE = "E_UNKNOWN";
 var TARGET_CHANGED_CODE = "E_TARGET_CHANGED";
+var SUPERSEDED_CODE = "E_SUPERSEDED";
 function staticReasonFor(code) {
   if (code === UNKNOWN_ERROR_CODE) return "failed to resolve: unknown error";
   if (code === TARGET_CHANGED_CODE) return "not resolved: the target file changed while rendering; run enigma render again";
+  if (code === SUPERSEDED_CODE) return "not written: changed concurrently; run enigma render again";
   return STATIC_REASONS[code] ?? `failed to resolve (${code})`;
 }
 function staticWriteError(message) {
@@ -2281,6 +2285,10 @@ function stripRenderBlock(content, block) {
     remaining[remaining.length - 1] = { raw: last.raw + (dominantEol(lines) === "\r\n" ? "\r" : ""), term: "\n", text: last.text };
   }
   return joinPhysicalLines(remaining);
+}
+function commitIdentityOf(name, projectId2) {
+  const entry = findIndexEntry(readIndex(), name, "project", projectId2);
+  return entry === void 0 ? void 0 : `${entry.updatedAt}|${entry.ref}|${entry.depository}`;
 }
 function readRenderBlock(content, file) {
   const lines = splitPhysicalLines(content);
@@ -2313,8 +2321,10 @@ async function executeRender(plan, opts) {
   readRenderBlock(peek, plan.file);
   const peekEnvNames = envBlockNamesOf(peek);
   const resolved = /* @__PURE__ */ new Map();
+  const identities = /* @__PURE__ */ new Map();
   for (const item of plan.toResolve) {
     if (peekEnvNames.has(item.name)) continue;
+    identities.set(item.name, commitIdentityOf(item.name, opts.projectId));
     try {
       resolved.set(item.name, { ok: true, value: await opts.resolveValue(item.name, item.depository) });
     } catch (err) {
@@ -2370,7 +2380,10 @@ async function executeRender(plan, opts) {
     }
     for (const item of plan.toResolve) {
       if (envBlockNames.has(item.name)) continue;
-      const result = resolved.get(item.name) ?? { ok: false, code: TARGET_CHANGED_CODE };
+      let result = resolved.get(item.name) ?? { ok: false, code: TARGET_CHANGED_CODE };
+      if (result.ok && commitIdentityOf(item.name, opts.projectId) !== identities.get(item.name)) {
+        result = { ok: false, code: SUPERSEDED_CODE };
+      }
       if (result.ok) {
         finalLines.set(item.name, `${item.name}=${encodeValue(result.value)}`);
         freshNames.add(item.name);
@@ -2455,6 +2468,7 @@ async function executeRender(plan, opts) {
 
 // src/render/fanout.ts
 var gate;
+var hooks = {};
 var PROMPT_PROFILE = new Map(DEPOSITORY_MODULES.map((m) => [m.id, m.promptProfile]));
 function isAutoRenderable(depository) {
   return PROMPT_PROFILE.get(depository) === "none";
@@ -2560,7 +2574,7 @@ function loadManifest(worktree) {
 }
 function updateTarget(input) {
   const { name, projectId: projectId2, worktree, op } = input;
-  let removes = op.kind !== "set";
+  let removes = op.kind === "strip";
   const audit = (ok, error) => appendAuditEvent({
     op: removes ? "unrender" : "render",
     name,
@@ -2579,12 +2593,15 @@ function updateTarget(input) {
     const lexicalFile = resolveRenderTarget(worktree, renderPath);
     const peekPath = validateTargetFile(worktree, lexicalFile);
     if (input.ledgerFile !== void 0 && input.ledgerFile !== peekPath) throw new Skip("render-path-changed");
+    hooks.beforeTargetLock?.(peekPath);
     const lock = acquireFileLock(renderLockPath(peekPath));
     try {
+      hooks.afterTargetLock?.(peekPath);
       const target = validateTargetFile(worktree, lexicalFile);
       if (target !== peekPath) throw new Skip("target-refused");
       if (op.kind === "set" && !isCurrentCommit(name, projectId2, op.commit)) return { status: "silent" };
       if (op.kind === "strip" && eligibleEntryExists(name, projectId2)) return { status: "silent" };
+      hooks.afterGuard?.(peekPath);
       const current = existsSync10(target) ? readFileSync6(target, "utf8") : "";
       try {
         readRenderBlock(current, lexicalFile);
@@ -2592,9 +2609,8 @@ function updateTarget(input) {
         throw new Skip("damaged-render-block");
       }
       const inEnvBlock = envBlockNamesOf(current).has(name);
-      if (op.kind === "dedupe" && !inEnvBlock) return { status: "silent" };
-      removes = op.kind !== "set" || inEnvBlock;
-      const result = removes ? applyStrip(current, name) : applySet(current, name, op.value);
+      removes = op.kind === "strip" || inEnvBlock;
+      const result = op.kind === "set" && !inEnvBlock ? applySet(current, name, op.value) : applyStrip(current, name);
       const ledgerRow = targetsFor({ projectId: projectId2 }).find((t) => t.worktree === worktree && t.file === target);
       if (result.next === current) {
         syncLedger(projectId2, worktree, target, result.names, ledgerRow?.names);
@@ -2645,30 +2661,74 @@ function runTargets(targets, base) {
   }
   return warnings;
 }
+var NAME_LOCK_RETRIES = 20;
+function nameLockPath(projectId2, name) {
+  const key = createHash3("sha256").update(`${projectId2}\0${name}`).digest("hex").slice(0, 32);
+  return join6(enigmaHome(), "locks", `fanout-${key}.lock`);
+}
+function acquireNameLock(projectId2, name) {
+  const retries = hooks.nameLockRetries ?? NAME_LOCK_RETRIES;
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return acquireFileLock(nameLockPath(projectId2, name), "the render fan-out lock");
+    } catch (err) {
+      if (!(err instanceof EnigmaError && err.code === "E_LOCK_TIMEOUT") || attempt >= retries) throw err;
+    }
+  }
+}
+async function withNameLock(projectId2, name, run, isCurrent, supersededNote, commit) {
+  if (hooks.disabled) return [];
+  if (gate) await gate(commit);
+  const lock = acquireNameLock(projectId2, name);
+  try {
+    hooks.afterNameLock?.(name);
+    if (!isCurrent()) return supersededNote ? [supersededNote] : [];
+    return run();
+  } finally {
+    lock.release();
+  }
+}
 async function fanOutSet(input) {
   try {
-    if (gate) await gate(input.commit);
-    const holders = targetsFor({ projectId: input.projectId, name: input.name });
-    const targets = holders.map((h) => ({ worktree: h.worktree, ledgerFile: h.file }));
-    if (input.addWorktree && !holders.some((h) => h.worktree === input.worktree)) targets.push({ worktree: input.worktree, isNew: true });
-    return runTargets(targets, {
-      name: input.name,
-      projectId: input.projectId,
-      depository: input.commit.depository,
-      actor: input.actor,
-      op: { kind: "set", value: input.value, commit: input.commit }
-    });
+    const note = input.addWorktree ? `render target ${input.worktree} was not updated for ${input.name} (changed concurrently; run \`enigma render\` again)` : void 0;
+    return await withNameLock(
+      input.projectId,
+      input.name,
+      () => {
+        const holders = targetsFor({ projectId: input.projectId, name: input.name });
+        const targets = holders.map((h) => ({ worktree: h.worktree, ledgerFile: h.file }));
+        if (input.addWorktree && !holders.some((h) => h.worktree === input.worktree)) targets.push({ worktree: input.worktree, isNew: true });
+        return runTargets(targets, {
+          name: input.name,
+          projectId: input.projectId,
+          depository: input.commit.depository,
+          actor: input.actor,
+          op: { kind: "set", value: input.value, commit: input.commit }
+        });
+      },
+      () => isCurrentCommit(input.name, input.projectId, input.commit),
+      note,
+      input.commit
+    );
   } catch (err) {
     return [`render fan-out skipped for ${input.name} (${reasonFor(err)})`];
   }
 }
 async function fanOutRemove(input) {
   try {
-    if (gate) await gate();
-    const holders = targetsFor({ projectId: input.projectId, name: input.name });
-    return runTargets(
-      holders.map((h) => ({ worktree: h.worktree, ledgerFile: h.file })),
-      { name: input.name, projectId: input.projectId, depository: input.depository, actor: input.actor, op: { kind: input.mode } }
+    return await withNameLock(
+      input.projectId,
+      input.name,
+      () => {
+        const holders = targetsFor({ projectId: input.projectId, name: input.name });
+        return runTargets(
+          holders.map((h) => ({ worktree: h.worktree, ledgerFile: h.file })),
+          { name: input.name, projectId: input.projectId, depository: input.depository, actor: input.actor, op: { kind: "strip" } }
+        );
+      },
+      // A removal is stale only when a render-eligible entry for NAME exists again.
+      () => !eligibleEntryExists(input.name, input.projectId),
+      void 0
     );
   } catch (err) {
     return [`render fan-out skipped for ${input.name} (${reasonFor(err)})`];
@@ -2821,32 +2881,27 @@ async function setSecret(opts) {
       }
     }
   }
-  if (opts.scope === "project" && pid !== void 0 && projectPath !== void 0) {
+  const commit = { updatedAt: committed.updatedAt, ref: committed.ref, depository: committed.depository };
+  if (!opts.skipRenderFanout && opts.scope === "project" && pid !== void 0 && projectPath !== void 0) {
     const isNew = displaced === void 0;
-    const commit = { updatedAt: committed.updatedAt, ref: committed.ref, depository: committed.depository };
-    let fanned;
-    if (opts.auditOp === "move") {
-      if (!isAutoRenderable(opts.depository)) {
-        fanned = await fanOutRemove({ name: opts.name, projectId: pid, depository: opts.depository, actor: opts.actor, mode: "strip" });
-      } else if (opts.depository === "env") {
-        fanned = await fanOutRemove({ name: opts.name, projectId: pid, depository: opts.depository, actor: opts.actor, mode: "dedupe" });
-      } else {
-        fanned = [];
-      }
-    } else {
+    const autoRenderable = isAutoRenderable(opts.depository);
+    let fanned = [];
+    if (opts.auditOp === "move" && !autoRenderable) {
+      fanned = await fanOutRemove({ name: opts.name, projectId: pid, depository: opts.depository, actor: opts.actor });
+    } else if (autoRenderable || !isNew) {
       fanned = await fanOutSet({
         name: opts.name,
         value: opts.value,
         projectId: pid,
         worktree: projectPath,
-        addWorktree: isNew && isAutoRenderable(opts.depository),
+        addWorktree: isNew && autoRenderable,
         commit,
         actor: opts.actor
       });
     }
     for (const w of fanned) if (!warnings.includes(w)) warnings.push(w);
   }
-  return { rotated: Boolean(existing), warnings };
+  return { rotated: Boolean(existing), warnings, commit };
 }
 function listSecrets(opts = {}) {
   const index = readIndex();
@@ -2877,7 +2932,7 @@ async function deleteSecret(name, opts) {
     throw err;
   }
   appendAuditEvent({ op: "remove", name, depository: removed.depository, actor: opts.actor, ok: true, error: null, ...auditScopeFields(removed) });
-  const warnings = removed.scope === "project" && removed.projectId !== void 0 ? await fanOutRemove({ name, projectId: removed.projectId, depository: removed.depository, actor: opts.actor, mode: "strip" }) : [];
+  const warnings = removed.scope === "project" && removed.projectId !== void 0 ? await fanOutRemove({ name, projectId: removed.projectId, depository: removed.depository, actor: opts.actor }) : [];
   return { warnings };
 }
 async function resolveSecret(name, opts) {
@@ -2982,7 +3037,7 @@ import {
   statSync as statSync5,
   symlinkSync
 } from "node:fs";
-import { basename as basename6, delimiter, dirname as dirname7, isAbsolute as isAbsolute3, join as join6, resolve as resolve6 } from "node:path";
+import { basename as basename6, delimiter, dirname as dirname7, isAbsolute as isAbsolute3, join as join7, resolve as resolve6 } from "node:path";
 import { fileURLToPath as fileURLToPath2 } from "node:url";
 
 // src/core/version.ts
@@ -3016,7 +3071,7 @@ function readBundleManifest(cli) {
     const dist = dirname7(cli);
     if (basename6(dist) !== "dist") return null;
     const root = dirname7(dist);
-    const manifest = JSON.parse(readFileSync7(join6(root, ".claude-plugin", "plugin.json"), "utf8"));
+    const manifest = JSON.parse(readFileSync7(join7(root, ".claude-plugin", "plugin.json"), "utf8"));
     if (typeof manifest !== "object" || manifest === null) return null;
     const { name, version } = manifest;
     return { name: typeof name === "string" ? name : null, version: typeof version === "string" ? version : null, root };
@@ -3143,7 +3198,7 @@ function ensureCliShim(options = {}) {
     const write = options.write !== false;
     let firstFree = null;
     for (const dir of dirs) {
-      const dest = join6(dir, "enigma");
+      const dest = join7(dir, "enigma");
       const { slot, link, detail: slotDetail } = classify(dest, cli);
       if (slot === "ours") return { status: "present", target: dest, cli, link, detail: null };
       if (slot === "foreign") {
@@ -3295,7 +3350,7 @@ async function cmdGet(argv) {
 
 // src/cli/commands/import.ts
 import { existsSync as existsSync14, readFileSync as readFileSync9 } from "node:fs";
-import { isAbsolute as isAbsolute4, join as join7 } from "node:path";
+import { isAbsolute as isAbsolute4, join as join8 } from "node:path";
 
 // src/request/store.ts
 import { randomBytes as randomBytes3 } from "node:crypto";
@@ -3652,6 +3707,29 @@ function renderOutcome(results, cwd) {
 // src/storage/import-commit.ts
 import { existsSync as existsSync13, readFileSync as readFileSync8 } from "node:fs";
 var FILE_MODE5 = 384;
+function rendersAfterImport(opts) {
+  return opts.scope === "project" && opts.depository !== "env" && isAutoRenderable(opts.depository);
+}
+function notRenderedNote(opts, names) {
+  if (names.length === 0 || !rendersAfterImport(opts)) return void 0;
+  return `${names.join(", ")} ${names.length === 1 ? "was" : "were"} stored but not rendered into this worktree's render block because the import did not complete; run \`enigma render\` once the issue is fixed.`;
+}
+async function renderCommitted(opts, stored, warnings) {
+  if (opts.scope !== "project") return;
+  const projectId2 = projectId(opts.cwd);
+  for (const entry of stored) {
+    const fanned = await fanOutSet({
+      name: entry.name,
+      value: entry.value,
+      projectId: projectId2,
+      worktree: opts.projectPath,
+      addWorktree: entry.isNew && isAutoRenderable(opts.depository),
+      commit: entry.commit,
+      actor: opts.actor
+    });
+    for (const w of fanned) if (!warnings.includes(w)) warnings.push(w);
+  }
+}
 function ambiguousValueError(entry, envFilePath) {
   return new EnigmaError({
     code: "E_VALUE_AMBIGUOUS",
@@ -3660,6 +3738,7 @@ function ambiguousValueError(entry, envFilePath) {
   });
 }
 async function commitImport(opts) {
+  const stored = [];
   const succeeded = [];
   const failed = [];
   for (const entry of opts.entries) {
@@ -3681,7 +3760,7 @@ async function commitImport(opts) {
         });
         throw err;
       }
-      await setSecret({
+      const result = await setSecret({
         name: entry.name,
         value: entry.value,
         scope: opts.scope,
@@ -3690,8 +3769,10 @@ async function commitImport(opts) {
         actor: opts.actor,
         rotate: opts.rotate,
         createVault: opts.createVault,
-        auditOp: "import"
+        auditOp: "import",
+        skipRenderFanout: true
       });
+      stored.push({ name: entry.name, value: entry.value, commit: result.commit, isNew: !result.rotated });
       succeeded.push(entry.name);
     } catch (err) {
       failed.push({
@@ -3712,6 +3793,8 @@ async function commitImport(opts) {
         opts.depository === "env" ? `${succeeded.length} secret(s) (${names}) were already written into the .env managed block before the failure on ${failed[0].name}; the original plaintext line(s) were deliberately left in place. Fix the issue and rerun import with rotate enabled to overwrite them, or remove them from .env manually.` : `${succeeded.length} secret(s) (${names}) are already stored in ${opts.depository} before the failure on ${failed[0].name}; .env was left untouched. Fix the issue and rerun import with rotate enabled to overwrite them, or remove them from ${opts.depository} manually.`
       );
     }
+    const note = notRenderedNote(opts, succeeded);
+    if (note) warnings.push(note);
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
   const currentContent = existsSync13(opts.envFilePath) ? readFileSync8(opts.envFilePath, "utf8") : "";
@@ -3734,6 +3817,7 @@ async function commitImport(opts) {
   const rewritten = toRemove.length > 0 ? removeDotEnvEntries(currentContent, toRemove, { comment: movedComment }) : currentContent;
   const needsWrite = rewritten !== currentContent;
   if (!needsWrite) {
+    await renderCommitted(opts, stored, warnings);
     return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: false, warnings };
   }
   const writeResult = writeFileAtomic(opts.envFilePath, rewritten, FILE_MODE5);
@@ -3746,8 +3830,11 @@ async function commitImport(opts) {
         `A temporary file containing the full rewritten .env content was left behind at ${writeResult.leftoverPath} and could not be removed automatically \u2014 delete it manually as soon as possible.`
       );
     }
+    const note = notRenderedNote(opts, succeeded);
+    if (note) warnings.push(note);
     return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: false, warnings };
   }
+  await renderCommitted(opts, stored, warnings);
   return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: true, warnings };
 }
 
@@ -6706,7 +6793,7 @@ async function cmdImport(argv) {
   if (positionals.length > 1) throw new UsageError(USAGE3);
   const cwd = process.cwd();
   const projectPath = findProjectPath(cwd);
-  const absPath = isAbsolute4(pathArg) ? pathArg : join7(cwd, pathArg);
+  const absPath = isAbsolute4(pathArg) ? pathArg : join8(cwd, pathArg);
   if (!existsSync14(absPath)) {
     throw new EnigmaError({ code: "E_NOT_FOUND", message: `${pathArg} not found` });
   }
@@ -6760,13 +6847,13 @@ async function cmdImport(argv) {
 // src/cli/commands/install.ts
 import { existsSync as existsSync15, mkdirSync as mkdirSync3, readFileSync as readFileSync10, renameSync as renameSync3, writeFileSync as writeFileSync4 } from "node:fs";
 import { homedir as homedir2 } from "node:os";
-import { dirname as dirname8, join as join8 } from "node:path";
+import { dirname as dirname8, join as join9 } from "node:path";
 var MARKETPLACE_NAME = "clarit-enigma";
 var REPO = "Clarit-AI/enigma";
 var PLUGIN_ENTRY = `enigma@${MARKETPLACE_NAME}`;
 function claudeSettingsPath() {
-  const configDir = process.env.CLAUDE_CONFIG_DIR || join8(homedir2(), ".claude");
-  return join8(configDir, "settings.json");
+  const configDir = process.env.CLAUDE_CONFIG_DIR || join9(homedir2(), ".claude");
+  return join9(configDir, "settings.json");
 }
 var DEFAULT_STYLE = { indent: "  ", trailingNewline: true, eol: "\n" };
 function detectStyle(raw) {
