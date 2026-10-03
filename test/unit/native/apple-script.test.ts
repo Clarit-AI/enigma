@@ -93,6 +93,23 @@ describe('buildHiddenAnswerScript with several names (Issue #117)', () => {
     expect(script).not.toContain(`Enter value for R2_ACCESS_KEY_ID (${REASON}`);
   });
 
+  it('the last dialog says it is the last instead of promising more dialogs', () => {
+    const last = buildHiddenAnswerScript('R2_ENDPOINT', REASON, { index: 3, total: 3 });
+    expect(last).toContain('Enter only this one value; this is the last dialog.');
+    expect(last).not.toContain('requested in separate dialogs');
+    const middle = buildHiddenAnswerScript('R2_ENDPOINT', REASON, { index: 2, total: 3 });
+    expect(middle).toContain('the other credentials are requested in separate dialogs.');
+    expect(middle).not.toContain('this is the last dialog');
+  });
+
+  it('escapes the title too, so a non-integer progress can never break out of the literal', () => {
+    const hostile = { index: '1" & (do shell script "touch pwned") & "', total: 3 } as unknown as { index: number; total: number };
+    const script = buildHiddenAnswerScript('A', 'r', hostile);
+    expect(script).not.toContain('with title "Enigma (1" &');
+    expect(script).toContain('with title "Enigma (1\\" & (do shell script \\"touch pwned\\") & \\" of 3)"');
+    expect(script.split('\n')).toHaveLength(2);
+  });
+
   it('omits the reason section when the reason is empty', () => {
     const script = buildHiddenAnswerScript('A', '', { index: 1, total: 2 });
     expect(script).not.toContain('Reason for the whole request');

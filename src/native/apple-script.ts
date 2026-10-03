@@ -26,7 +26,8 @@ export interface DialogProgress {
  *
  * With more than one name (`progress.total > 1`) each dialog says which one
  * it is for ("2 of 3", in the prompt and the title), asks for only that one
- * value, and says the others follow in separate dialogs. The request's single
+ * value, and says the others follow in separate dialogs (the last one says it
+ * is the last instead of promising more). The request's single
  * `reason` is shown after that, labelled as covering the whole request, so a
  * reason that describes several credentials cannot make one dialog look like
  * it is asking for all of them (Issue #117). A single name keeps the original,
@@ -34,12 +35,13 @@ export interface DialogProgress {
  */
 export function buildHiddenAnswerScript(name: string, reason: string, progress?: DialogProgress): string {
   const multi = progress !== undefined && progress.total > 1;
+  const closing = multi && progress.index >= progress.total ? 'this is the last dialog.' : 'the other credentials are requested in separate dialogs.';
   const prompt = multi
-    ? `Enter value for ${name} (${progress.index} of ${progress.total}). Enter only this one value; the other credentials are requested in separate dialogs.${reason ? `\n\nReason for the whole request: ${reason}` : ''}`
+    ? `Enter value for ${name} (${progress.index} of ${progress.total}). Enter only this one value; ${closing}${reason ? `\n\nReason for the whole request: ${reason}` : ''}`
     : reason
       ? `Enter value for ${name} (${reason}):`
       : `Enter value for ${name}:`;
-  const title = multi ? `Enigma (${progress.index} of ${progress.total})` : 'Enigma';
+  const title = escapeAppleScriptString(multi ? `Enigma (${progress.index} of ${progress.total})` : 'Enigma');
   const escapedPrompt = escapeAppleScriptString(prompt);
   return [
     `set dialogResult to display dialog "${escapedPrompt}" default answer "" with hidden answer with title "${title}"`,
