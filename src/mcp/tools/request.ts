@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { Scope } from '../../core/index-store.js';
 import { loadConfig } from '../../core/config.js';
@@ -12,7 +13,7 @@ import type { RemoteAttempt } from '../../remote/index.js';
 import { hasSecret } from '../../storage/manager.js';
 import type { DepositoryId } from '../../storage/interfaces.js';
 import { startServer } from '../../web/server.js';
-import { elicitUrl, sendElicitationComplete, supportsFormElicitation, supportsUrlElicitation } from '../elicit.js';
+import { elicitUrl, sendElicitationComplete, supportsFormElicitation, supportsUrlElicitation, URL_ELICITATION_ACK_TIMEOUT_MS } from '../elicit.js';
 import { resolveRequestOutcome } from '../request-outcome.js';
 import { errorResult, renderOutcome, textResult } from '../result-text.js';
 import { DEPOSITORY_ID_SCHEMA, SCOPE_SCHEMA } from '../schemas.js';
@@ -256,31 +257,40 @@ export function registerRequestTool(server: McpServer): void {
       // form, so this is NOT a user cancel and the request must not be thrown
       // away with its link (Issue #118): fall back to the local link.
       let outcomeLead: string | undefined;
+      /** The client may simply be slow (a human reading the prompt), not absent. */
+      let timedOut = false;
       try {
-        const result = await elicitUrl(server.server, {
-          elicitationId: record.id,
-          url,
-          message: `Enter ${args.names.join(', ')} (${args.reason})`,
-        });
+        const result = await elicitUrl(
+          server.server,
+          { elicitationId: record.id, url, message: `Enter ${args.names.join(', ')} (${args.reason})` },
+          { timeout: URL_ELICITATION_ACK_TIMEOUT_MS },
+        );
         if (result.action !== 'accept') outcomeLead = `The client ${result.action === 'cancel' ? 'cancelled' : 'declined'} the URL elicitation`;
-      } catch {
+      } catch (err) {
         // Never echo the client's error text: it is not ours to relay. Method
-        // not found, unsupported mode, a timeout and a dropped transport all
-        // mean the same thing here: the form was not delivered.
-        outcomeLead = 'The client could not deliver the URL elicitation (error or no answer)';
+        // not found, unsupported mode and a dropped transport mean the form
+        // was not delivered; a timeout means we do not know.
+        timedOut = err instanceof McpError && err.code === ErrorCode.RequestTimeout;
+        outcomeLead = timedOut
+          ? 'The client did not acknowledge the URL elicitation in time'
+          : 'The client could not deliver the URL elicitation (error)';
       }
 
       if (outcomeLead !== undefined) {
-        // The tunnel's public link was meant for the out-of-band channel only
-        // and must never reach the model's context, so it is stopped rather
-        // than offered; the local link below is what the agent may hand over.
-        if (remoteAttempt?.tunnel) {
+        // On a definite non-delivery (decline, cancel, error) the tunnel's
+        // public link can no longer reach the human and must never reach the
+        // model's context, so it is stopped rather than offered. On a timeout
+        // an interactive user may be looking at that link right now: leave the
+        // tunnel to its normal lifecycle (it stops when the request is
+        // fulfilled or expires) rather than turn it into a link that lies.
+        const stopTunnel = Boolean(remoteAttempt?.tunnel) && !timedOut;
+        if (stopTunnel) {
           discardActiveTunnel(record.id, 'Remote access was not used: the URL elicitation that would have carried the public link was not delivered.');
         }
         return fallbackResult(
           record,
           `${handle.origin}/r/${record.id}`,
-          remoteAttempt?.tunnel ? 'Remote access was stopped for this request; the link above is local only.' : undefined,
+          stopTunnel ? 'Remote access was stopped for this request; the link above is local only.' : undefined,
           `${outcomeLead}, so the user was probably never shown the web form (non-interactive hosts decline automatically). The request is still open. Ask the user to open this URL in their browser, then call enigma_await with this request_id once they have submitted the form. Or call enigma_request again with ui:"native" for a system dialog (macOS).`,
         );
       }

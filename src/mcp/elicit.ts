@@ -6,6 +6,7 @@
 // (a yes/no confirmation is not a credential).
 import type { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { getSupportedElicitationModes } from '@modelcontextprotocol/sdk/client/index.js';
+import type { RequestOptions } from '@modelcontextprotocol/sdk/shared/protocol.js';
 import type { ElicitResult } from '@modelcontextprotocol/sdk/types.js';
 
 export function supportsUrlElicitation(server: Server): boolean {
@@ -29,21 +30,19 @@ export interface ElicitUrlOptions {
  * finish the out-of-band flow. Callers that need to know the outcome (e.g.
  * enigma_request) separately await the request store's fulfilment waiter.
  */
-export async function elicitUrl(server: Server, opts: ElicitUrlOptions): Promise<ElicitResult> {
-  return server.elicitInput(
-    { mode: 'url', elicitationId: opts.elicitationId, url: opts.url, message: opts.message },
-    { timeout: URL_ELICITATION_ACK_TIMEOUT_MS },
-  );
+export async function elicitUrl(server: Server, opts: ElicitUrlOptions, requestOptions?: RequestOptions): Promise<ElicitResult> {
+  return server.elicitInput({ mode: 'url', elicitationId: opts.elicitationId, url: opts.url, message: opts.message }, requestOptions);
 }
 
 /**
- * How long to wait for the client to acknowledge a URL-mode elicitation (not
- * for the human to finish the form). It stays under the 60 s default tool-call
- * timeout of SDK-based MCP clients, so the fallback below can still be
- * delivered. A headless host answers at once (it declines) or never; an
+ * How long `enigma_request` waits for the client to acknowledge a URL-mode
+ * elicitation (not for the human to finish the form). It stays under the 60 s
+ * default tool-call timeout of SDK-based MCP clients, so the fallback can still
+ * be delivered. A headless host answers at once (it declines) or never; an
  * interactive client acknowledges once the human has seen the prompt. On
- * expiry the caller falls back to handing the agent the local request link
- * (Issue #118).
+ * expiry `enigma_request` falls back to handing the agent the local request
+ * link (Issue #118). Passed explicitly by that one caller; `enigma_reveal` and
+ * `enigma_import` keep the SDK default.
  */
 export const URL_ELICITATION_ACK_TIMEOUT_MS = 30_000;
 

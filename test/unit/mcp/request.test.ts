@@ -258,7 +258,7 @@ describe('enigma_request', () => {
 
         expect(result.isError).toBeFalsy();
         expect(parseFallback(textOf(result)).url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/r\//);
-        expect(textOf(result)).toContain('could not deliver the URL elicitation');
+        expect(textOf(result)).toContain('did not acknowledge the URL elicitation in time');
         await pair.close();
       } finally {
         vi.useRealTimers();
@@ -508,6 +508,33 @@ describe('enigma_request remote access (Issue #12)', () => {
     expect(text).toContain('Remote access was stopped for this request');
     expect(tunnelChild.kill).toHaveBeenCalled();
     await pair.close();
+  });
+
+  it('Issue #118 (review): remote:true + the client is merely SLOW (acknowledgement timeout): the tunnel is NOT stopped, since a human may be looking at its link, and the public link still never reaches the tool result', async () => {
+    const tunnelChild = stubCloudflaredAvailable();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+      pair.client.setRequestHandler(ElicitRequestSchema, () => new Promise(() => {}));
+
+      const resultPromise = pair.client.callTool({
+        name: 'enigma_request',
+        arguments: { names: ['OPENAI_API_KEY'], reason: 'test', usage: 'interactive', scope: 'global', depository: 'encrypted', remote: true },
+      });
+      await vi.advanceTimersByTimeAsync(URL_ELICITATION_ACK_TIMEOUT_MS + 1_000);
+      const result = await resultPromise;
+
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+      expect(result.isError).toBeFalsy();
+      expect(text).toContain('did not acknowledge the URL elicitation in time');
+      expect(text).not.toContain('trycloudflare.com');
+      expect(text).not.toContain('Remote access was stopped');
+      expect(JSON.parse(text.split('\n')[0]!).url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/r\//);
+      expect(tunnelChild.kill).not.toHaveBeenCalled();
+      await pair.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('remote:true + cloudflared available: elicits the tunnel URL, and the final text reports remote access was used', async () => {
