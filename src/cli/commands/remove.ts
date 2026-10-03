@@ -9,8 +9,9 @@ export async function cmdRemove(argv: string[]): Promise<number> {
   if (!name) throw new UsageError(USAGE);
 
   const scope = parseScope(flags.scope);
-  await deleteSecret(name, { scope, cwd: process.cwd(), actor: 'cli' });
+  const result = await deleteSecret(name, { scope, cwd: process.cwd(), actor: 'cli' });
 
   process.stdout.write(`Removed ${name}${scope ? ` (${scope})` : ''}\n`);
+  for (const warning of result.warnings) process.stderr.write(`warning: ${warning}\n`);
   return 0;
 }

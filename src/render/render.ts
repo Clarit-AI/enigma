@@ -59,6 +59,10 @@
  *    in a prompting store is rendered only explicitly
  *    (`enigma render NAME`); once its line is in the block, a plain
  *    render keeps that line as bytes and never re-resolves it.
+ *  - Plain render reconciles removals with the CURRENT index (Issue #108): a line
+ *    for a name the plan never covered stays verbatim if that name now has a
+ *    render-eligible entry (a fan-out wrote it since the plan; it is never
+ *    re-resolved), and is dropped only when it has none.
  *  - Lines already in the block are copied as bytes from the file read
  *    under the lock; the plan never holds them. Existing lines keep their
  *    order; new names are appended sorted. Explicit `enigma render NAME`
@@ -69,6 +73,15 @@
  *  - A failed resolve keeps the name's previous line when there is one
  *    (reported under Failed, "kept previous line"), else the name is
  *    simply absent. Other names still render.
+ *  - Rules A and C (Issue #108): each name carries the index commit identity
+ *    (`updatedAt`, `ref`, `depository`) the PLAN selected. It is compared with
+ *    the live index before the name is resolved (a moved or rotated entry is not
+ *    resolved at all: no store prompt) and again under the lock. A name whose
+ *    entry has moved on is not written: its existing line stays (or it stays
+ *    absent) and it is reported under Failed as `E_SUPERSEDED`. Nothing is ever
+ *    re-resolved under the lock. This keeps a superseded VALUE out of the file; it
+ *    does not order a plain render against a concurrent strip of the same name
+ *    (docs/api-contracts.md, "Render fan-out: guarantees and limits"; #126).
  *  - Failure reasons are STATIC: an error's `message` is never copied
  *    into the outcome, stdout, stderr or the audit log.
  *  - Nothing to write and no existing block: the file is not touched. An
@@ -91,6 +104,7 @@ import { acquireFileLock } from '../core/file-lock.js';
 import { EnigmaError, type EnigmaErrorCode } from '../core/errors.js';
 import { renderLockPath } from '../core/paths.js';
 import { writeFileAtomic } from '../core/secure-file.js';
+import { findIndexEntry, readIndex } from '../core/index-store.js';
 import type { IndexFile } from '../core/index-store.js';
 import type { ProjectManifest } from '../core/config.js';
 import type { DepositoryId, PromptProfile } from '../storage/interfaces.js';
@@ -109,8 +123,8 @@ import {
 } from '../storage/dotenv-file.js';
 import type { PhysicalLine, RenderMarkerScan } from '../storage/dotenv-file.js';
 
-const FILE_MODE = 0o600;
-const DEFAULT_RENDER_PATH = '.env';
+export const FILE_MODE = 0o600;
+export const DEFAULT_RENDER_PATH = '.env';
 const PATH_TRAVERSAL_SEGMENT_RE = /(^|[/\\])\.\.([/\\]|$)/;
 
 /* ----------------------------- types ------------------------------- */
@@ -119,6 +133,11 @@ const PATH_TRAVERSAL_SEGMENT_RE = /(^|[/\\])\.\.([/\\]|$)/;
 export interface RenderEntryRef {
   name: string;
   depository: DepositoryId;
+  /**
+   * Identity of the index commit the plan selected (`updatedAt|ref|depository`; Issue #108, Rule C). Names and
+   * timestamps only. The executor resolves and writes the name only while the index entry is still this one.
+   */
+  identity: string;
 }
 
 /**
@@ -140,6 +159,8 @@ export interface RenderPlan {
   promptingStore: RenderEntryRef[];
   /** Plain mode only: project entries excluded by `.enigma.json` `render.names`. */
   narrowedOut: string[];
+  /** `.enigma.json` `render.names` as configured (undefined: no narrowing). Used to tell a name created AFTER the plan that is excluded from one the plan simply never saw. */
+  narrowing?: string[];
 }
 
 export interface RenderFailure {
@@ -193,7 +214,7 @@ const PROMPT_PROFILE_BY_DEPOSITORY = new Map<DepositoryId, PromptProfile>(
 );
 
 /** Bare name of a `NAME=…` block line, or undefined when it is not an assignment. */
-function nameFromLine(line: string): string | undefined {
+export function nameFromLine(line: string): string | undefined {
   const eq = line.indexOf('=');
   return eq > 0 ? line.slice(0, eq) : undefined;
 }
@@ -205,7 +226,7 @@ function nameFromLine(line: string): string | undefined {
  * merge lines. A name counts as "already in the env block" if it is in any of
  * them.
  */
-function envBlockNamesOf(content: string): Set<string> {
+export function envBlockNamesOf(content: string): Set<string> {
   const texts = splitPhysicalLines(content).map((l) => l.text);
   const names = new Set<string>();
   for (const range of envBlockRanges(texts)) {
@@ -235,7 +256,7 @@ function writeRefusal(message: string): EnigmaError {
  * lock, immediately before the read and write, because resolving a value
  * can take arbitrarily long. Messages name the problem only.
  */
-function validateTargetFile(worktree: string, file: string): string {
+export function validateTargetFile(worktree: string, file: string): string {
   const parentDir = dirname(file);
   if (!existsSync(parentDir)) {
     throw writeRefusal("render.path target parent directory does not exist; Enigma never creates directories in the user's worktree");
@@ -269,7 +290,7 @@ function validateTargetFile(worktree: string, file: string): string {
  * Validate `renderPath` against the worktree and return the absolute
  * target. Runs before anything is read or resolved.
  */
-function resolveRenderTarget(worktree: string, renderPath: string): string {
+export function resolveRenderTarget(worktree: string, renderPath: string): string {
   if (isAbsolute(renderPath)) {
     throw writeRefusal('render.path must be relative to the worktree; absolute paths are refused');
   }
@@ -316,6 +337,7 @@ export function buildRenderPlan(opts: {
     toResolve: [],
     promptingStore: [],
     narrowedOut: [],
+    narrowing: renderOverride?.names,
   };
   if (!enabled) return plan;
 
@@ -330,7 +352,7 @@ export function buildRenderPlan(opts: {
         secretName: explicitName,
       });
     }
-    plan.toResolve.push({ name: entry.name, depository: entry.depository });
+    plan.toResolve.push({ name: entry.name, depository: entry.depository, identity: entryIdentity(entry) });
     return plan;
   }
 
@@ -342,7 +364,7 @@ export function buildRenderPlan(opts: {
     }
     const profile = PROMPT_PROFILE_BY_DEPOSITORY.get(entry.depository);
     if (profile === undefined) continue;
-    const ref = { name: entry.name, depository: entry.depository };
+    const ref = { name: entry.name, depository: entry.depository, identity: entryIdentity(entry) };
     if (profile === 'none') plan.toResolve.push(ref);
     else plan.promptingStore.push(ref);
   }
@@ -367,15 +389,21 @@ const STATIC_REASONS: Partial<Record<EnigmaErrorCode, string>> = {
 };
 const UNKNOWN_ERROR_CODE = 'E_UNKNOWN';
 const TARGET_CHANGED_CODE = 'E_TARGET_CHANGED';
+const SUPERSEDED_CODE = 'E_SUPERSEDED';
 
-function staticReasonFor(code: string): string {
+function staticReasonFor(code: string, subject?: { name: string; depository: DepositoryId | undefined }): string {
   if (code === UNKNOWN_ERROR_CODE) return 'failed to resolve: unknown error';
   if (code === TARGET_CHANGED_CODE) return 'not resolved: the target file changed while rendering; run enigma render again';
+  if (code === SUPERSEDED_CODE) {
+    // A prompting-store name is never rendered by a plain `enigma render`, so point it at the explicit form.
+    const prompting = subject?.depository !== undefined && PROMPT_PROFILE_BY_DEPOSITORY.get(subject.depository) !== 'none';
+    return `not written: changed concurrently; run enigma render${prompting ? ` ${subject!.name}` : ''} again`;
+  }
   return STATIC_REASONS[code as EnigmaErrorCode] ?? `failed to resolve (${code})`;
 }
 
 /** Static text for a failed atomic write: the errno code when the message carries one, never the message. */
-function staticWriteError(message: string | undefined): string {
+export function staticWriteError(message: string | undefined): string {
   const code = message?.match(/^(E[A-Z0-9]+):/)?.[1];
   return code ? `failed to rewrite the target file (${code})` : 'failed to rewrite the target file';
 }
@@ -388,7 +416,7 @@ function staticWriteError(message: string | undefined): string {
  * remains has no terminator, it gets one in the file's dominant EOL so a
  * later `echo X >> file` cannot glue onto it; an emptied file stays empty.
  */
-function stripRenderBlock(content: string, block: { beginIdx: number; endIdx: number }): string {
+export function stripRenderBlock(content: string, block: { beginIdx: number; endIdx: number }): string {
   const lines = splitPhysicalLines(content);
   const remaining = [...lines.slice(0, block.beginIdx), ...lines.slice(block.endIdx + 1)];
   const last = remaining[remaining.length - 1];
@@ -401,13 +429,28 @@ function stripRenderBlock(content: string, block: { beginIdx: number; endIdx: nu
 type ResolveResult = { ok: true; value: string } | { ok: false; code: string };
 
 /**
+ * Rule C (Issue #108): identity of the index commit a plan selected, `updatedAt|ref|depository`. It is fixed at PLAN
+ * time and compared with the live index twice: just before a name is resolved (a moved or rotated entry is not
+ * resolved at all, so a store never prompts for an entry the plan did not select) and under the target lock (a
+ * value resolved from an older commit is never written).
+ */
+function entryIdentity(entry: { updatedAt: string; ref: string; depository: DepositoryId }): string {
+  return `${entry.updatedAt}|${entry.ref}|${entry.depository}`;
+}
+
+function commitIdentityOf(name: string, projectId: string): string | undefined {
+  const entry = findIndexEntry(readIndex(), name, 'project', projectId);
+  return entry === undefined ? undefined : entryIdentity(entry);
+}
+
+/**
  * The render-marker rule of `scanRenderMarkers`: the renderer accepts only a
  * file with zero render markers or exactly one well-formed render block (no
  * nesting, no repeats, no env-depository markers inside it) and refuses
  * anything else, so nothing is resolved or written on top of a damaged file.
  * Returns the scan (its `block` is the existing render block, if any).
  */
-function readRenderBlock(content: string, file: string): { scan: RenderMarkerScan; lines: PhysicalLine[] } {
+export function readRenderBlock(content: string, file: string): { scan: RenderMarkerScan; lines: PhysicalLine[] } {
   const lines = splitPhysicalLines(content);
   const scan = scanRenderMarkers(lines.map((l) => l.text));
   if (scan.damaged) {
@@ -454,6 +497,11 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
   const resolved = new Map<string, ResolveResult>();
   for (const item of plan.toResolve) {
     if (peekEnvNames.has(item.name)) continue;
+    // Rule C: only resolve the entry the plan selected. A rotated or moved entry belongs to a newer operation.
+    if (commitIdentityOf(item.name, opts.projectId) !== item.identity) {
+      resolved.set(item.name, { ok: false, code: SUPERSEDED_CODE });
+      continue;
+    }
     try {
       resolved.set(item.name, { ok: true, value: await opts.resolveValue(item.name, item.depository) });
     } catch (err) {
@@ -527,11 +575,28 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
         if (line !== undefined) finalLines.set(ref.name, line);
         else outcome.skipped.push({ name: ref.name, reason: 'prompting-store' });
       }
+      // Reconcile removals against the CURRENT index, not only the plan (Issue #108): a line for a name the plan
+      // never covered (created after the plan, its fan-out has written it) stays verbatim if that name now has a
+      // render-eligible entry and `render.names` does not exclude it; it is dropped only when it has none.
+      // A kept line is never re-resolved.
+      const covered = new Set([...plan.toResolve, ...plan.promptingStore].map((r) => r.name).concat(plan.narrowedOut));
+      const liveIndex = readIndex();
+      for (const [name, line] of existing) {
+        if (covered.has(name)) continue;
+        if (plan.narrowing !== undefined && !plan.narrowing.includes(name)) continue;
+        const live = findIndexEntry(liveIndex, name, 'project', opts.projectId);
+        if (live !== undefined && PROMPT_PROFILE_BY_DEPOSITORY.get(live.depository) === 'none') finalLines.set(name, line);
+      }
     }
     for (const item of plan.toResolve) {
       if (envBlockNames.has(item.name)) continue; // AC #3, handled below
       // Skipped before the lock as an env-block name, but not one on the locked read: the file changed in between.
-      const result = resolved.get(item.name) ?? { ok: false as const, code: TARGET_CHANGED_CODE };
+      let result = resolved.get(item.name) ?? { ok: false as const, code: TARGET_CHANGED_CODE };
+      // Rule A (Issue #108): a value resolved before the lock is written only if the index is still at the
+      // commit it was resolved at. A newer commit (and its fan-out) owns the line: keep it, or leave the name absent.
+      if (result.ok && commitIdentityOf(item.name, opts.projectId) !== item.identity) {
+        result = { ok: false as const, code: SUPERSEDED_CODE };
+      }
       if (result.ok) {
         finalLines.set(item.name, `${item.name}=${encodeValue(result.value)}`);
         freshNames.add(item.name);
@@ -597,7 +662,7 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
       for (const item of plan.toResolve) {
         if (envBlockNames.has(item.name)) continue;
         const code = resolveCodes.get(item.name) ?? 'E_WRITE_FAILED';
-        const reason = staticReasonFor(code);
+        const reason = staticReasonFor(code, { name: item.name, depository: item.depository });
         audit(item.name, false, reason);
         // The file is unchanged, so an old line for this name is still in it.
         outcome.failed.push({ name: item.name, errorCode: code, reason, keptPreviousLine: existing.has(item.name) });
@@ -612,7 +677,7 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
       outcome.rendered.push(name);
     }
     for (const f of resolveFailures) {
-      const reason = staticReasonFor(f.code);
+      const reason = staticReasonFor(f.code, { name: f.name, depository: depositoryOf.get(f.name) });
       audit(f.name, false, reason);
       outcome.failed.push({ name: f.name, errorCode: f.code, reason, keptPreviousLine: finalLines.has(f.name) });
     }

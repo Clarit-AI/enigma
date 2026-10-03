@@ -3,6 +3,8 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { __setFanoutHooksForTesting } from '../../../../src/render/fanout.js';
+
 
 /** Mirrors request-form.test.ts: keeps `1password` availability deterministic regardless of the host machine. */
 vi.mock('node:child_process', () => ({
@@ -46,6 +48,7 @@ describe('GET/POST /i/:id', () => {
   });
 
   afterEach(async () => {
+    __setFanoutHooksForTesting(undefined);
     await stopServer();
     RequestStore.__resetForTests();
     process.chdir(originalCwd);
@@ -129,6 +132,9 @@ describe('GET/POST /i/:id', () => {
   });
 
   it('POST with a valid depository commits the import, rewrites .env, never leaks the value, and consumes the id', async () => {
+    // Issue #108: this test pins the raw rewrite of the imported file; the render fan-out (covered in
+    // test/unit/render/fanout-import.test.ts) would legitimately add a render block, so it is off here.
+    __setFanoutHooksForTesting({ disabled: true });
     writeFileSync(envPath(), `KEEP=me\nOPENAI_API_KEY=${SENTINEL}\n`);
     const record = RequestStore.create({
       kind: 'import',

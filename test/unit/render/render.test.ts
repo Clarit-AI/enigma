@@ -12,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { acquireFileLock } from '../../../src/core/file-lock.js';
 import { EnigmaError } from '../../../src/core/errors.js';
 import { auditLogPath, renderLockPath } from '../../../src/core/paths.js';
+import { mutateIndex } from '../../../src/core/index-store.js';
 import type { IndexFile } from '../../../src/core/index-store.js';
 import type { ProjectManifest } from '../../../src/core/config.js';
 import { buildRenderPlan, executeRender } from '../../../src/render/render.js';
@@ -66,7 +67,14 @@ function entry(name: string, depository: DepositoryId = 'encrypted', over: Recor
   } as IndexFile['entries'][number];
 }
 
-const indexOf = (...entries: IndexFile['entries']): IndexFile => ({ version: 1, entries });
+// Issue #108 (Rule C): a plan carries the identity of the index entry it selected, and the renderer compares it with
+// the LIVE index before resolving. These tests plan from a hand-built index, so it is also written to the (temp)
+// ENIGMA_HOME index: plan and live index agree, as they do when `enigma render` reads the index it plans from.
+const indexOf = (...entries: IndexFile['entries']): IndexFile => {
+  const built: IndexFile = { version: 1, entries };
+  mutateIndex(() => built);
+  return built;
+};
 const manifestOf = (over: Partial<ProjectManifest> = {}): ProjectManifest => ({ secrets: {}, ...over });
 
 type Resolver = (name: string, depository: DepositoryId) => Promise<string>;
@@ -148,7 +156,8 @@ describe('buildRenderPlan', () => {
     );
     const plan = buildRenderPlan({ cwd: project, projectId: PID, worktree: project, index, manifest: manifestOf(), explicitName: 'B' });
     expect(plan.explicit).toBe(true);
-    expect(plan.toResolve).toEqual([{ name: 'B', depository: 'encrypted' }]);
+    // Issue #108: the plan also carries the identity of the entry it selected (updatedAt|ref|depository).
+    expect(plan.toResolve).toEqual([{ name: 'B', depository: 'encrypted', identity: '2026-01-01T00:00:00Z|pid-render-test/B|encrypted' }]);
   });
 
   describe('render.path validation (before any read)', () => {

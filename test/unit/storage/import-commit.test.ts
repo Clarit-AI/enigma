@@ -2,6 +2,8 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { __setFanoutHooksForTesting } from '../../../src/render/fanout.js';
+
 import { auditLogPath } from '../../../src/core/paths.js';
 import { commitImport } from '../../../src/storage/import-commit.js';
 import { listSecrets } from '../../../src/storage/manager.js';
@@ -37,6 +39,7 @@ describe('commitImport', () => {
   });
 
   afterEach(() => {
+    __setFanoutHooksForTesting(undefined);
     if (originalHome === undefined) delete process.env.ENIGMA_HOME;
     else process.env.ENIGMA_HOME = originalHome;
     rmSync(tmpHome, { recursive: true, force: true });
@@ -45,6 +48,9 @@ describe('commitImport', () => {
   });
 
   it('AC1: on full success into a non-env depository, every entry is stored, the file is rewritten with those lines removed and one summary comment, and unrelated lines survive byte-identical', async () => {
+    // Issue #108: this test pins the raw rewrite of the imported file; the render fan-out (covered in
+    // test/unit/render/fanout-import.test.ts) would legitimately add a render block, so it is off here.
+    __setFanoutHooksForTesting({ disabled: true });
     writeFileSync(envFilePath, '# header\nKEEP_ME=1\nOPENAI_API_KEY=sk-abc\nGITHUB_TOKEN=ghp-xyz\nALSO_KEEP=2\n');
 
     const result = await commitImport({
@@ -355,6 +361,9 @@ describe('commitImport', () => {
     });
 
     it('a skipped-mismatch outcome and a missing-.gitignore warning produce no audit line of their own — a successful import audits only the stored names', async () => {
+    // Issue #108: this test pins the raw rewrite of the imported file; the render fan-out (covered in
+    // test/unit/render/fanout-import.test.ts) would legitimately add a render block, so it is off here.
+    __setFanoutHooksForTesting({ disabled: true });
       writeFileSync(envFilePath, 'OPENAI_API_KEY=sk-abc\n');
 
       const result = await commitImport({
@@ -437,6 +446,9 @@ describe('commitImport', () => {
     });
 
     it('a quoted value containing "#" migrates intact, unaffected by the ambiguity check', async () => {
+    // Issue #108: this test pins the raw rewrite of the imported file; the render fan-out (covered in
+    // test/unit/render/fanout-import.test.ts) would legitimately add a render block, so it is off here.
+    __setFanoutHooksForTesting({ disabled: true });
       writeFileSync(envFilePath, 'TOKEN="abc#def"\n');
 
       const result = await commitImport({
