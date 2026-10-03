@@ -7,6 +7,8 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { __setFanoutHooksForTesting } from '../../../src/render/fanout.js';
+
 import type { ParsedDotEnvEntry } from '../../../src/storage/dotenv-file.js';
 
 let readFileOverride: ((path: unknown) => string | undefined) | undefined;
@@ -91,6 +93,7 @@ describe('commitImport (fs-mocked edge cases, Issue #13 review round 2)', () => 
   });
 
   afterEach(() => {
+    __setFanoutHooksForTesting(undefined);
     if (originalHome === undefined) delete process.env.ENIGMA_HOME;
     else process.env.ENIGMA_HOME = originalHome;
     rmSync(tmpHome, { recursive: true, force: true });
@@ -103,6 +106,9 @@ describe('commitImport (fs-mocked edge cases, Issue #13 review round 2)', () => 
 
   describe('B1: parse/rewrite interleaving', () => {
     it('a value edited on disk between parse and rewrite is never lost — left in place and reported, not removed', async () => {
+    // Issue #108: this test pins the raw rewrite of the imported file; the render fan-out (covered in
+    // test/unit/render/fanout-import.test.ts) would legitimately add a render block, so it is off here.
+    __setFanoutHooksForTesting({ disabled: true });
       writeFileSync(envFilePath, 'DB_PASSWORD=original-value\nUNRELATED=1\n');
 
       let rewriteTimeReadSeen = false;
@@ -269,6 +275,11 @@ describe('commitImport (fs-mocked edge cases, Issue #13 review round 2)', () => 
     });
 
     it('renames a sibling temp file onto the target rather than truncating it in place', async () => {
+      // Issue #108: the deferred render fan-out also rewrites this same file atomically (a second rename onto it). This
+      // test is about the IMPORT's rewrite of the imported file, so the fan-out is off here. (On macOS tmpdir() is a
+      // symlink, so the fan-out renames onto the canonical /private/... spelling and the strict `to === envFilePath`
+      // filter below happened to miss it; on Linux the two spellings are identical and the filter counts both.)
+      __setFanoutHooksForTesting({ disabled: true });
       writeFileSync(envFilePath, 'OPENAI_API_KEY=sk-abc\n');
 
       await commitImport({

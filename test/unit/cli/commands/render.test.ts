@@ -10,6 +10,16 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+// Issue #108: `setSecret` now also renders into the worktree's `.env`. These tests use `setSecret`
+// as fixture setup and assert on the file or audit log WITHOUT that step, so they opt out of the
+// fan-out; the fan-out itself is covered by test/unit/render/fanout*.test.ts.
+vi.mock('../../../../src/render/fanout.js', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../../../../src/render/fanout.js')>()),
+  fanOutSet: async () => [],
+  reconcileAfterCommit: async () => [],
+  fanOutRemove: async () => [],
+}));
+
 const SENTINEL = 'sk-sentinel-value-should-never-appear-7c3a';
 
 const storedValues = new Map<string, string>();

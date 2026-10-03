@@ -131,3 +131,38 @@ Rules for this step:
 - **Push under the KHAEntertainment identity** (credential routing by URL
   path; never `gh auth switch` globally), and only with explicit user
   confirmation — it is a PR against a repo this repo does not control.
+
+### Authenticating for the two repos
+
+Cross-listing spans two repos under two identities, and the credentials are
+not interchangeable:
+
+| Repo | Identity | Access |
+|---|---|---|
+| `Clarit-AI/enigma` (this repo) | `Clarit-AI` | write — releases, labels, docs |
+| `KHAEntertainment/marketplace` (cross-list target) | `KHAEntertainment` | write |
+
+`KHAEntertainment` holds **read-only** access here: `triage`, `push` and
+`admin` are all false (`GET /repos/Clarit-AI/enigma` → `permissions`). Read
+access still permits opening issues, which is why a cross-listing issue can be
+filed from either identity — but anything that writes to this repo (labels,
+releases, a docs PR like this one) fails under it with
+`Must have admin rights to Repository`.
+
+When the active account is `KHAEntertainment` and you need to administer this
+repo, scope the owner credential to the single command:
+
+```sh
+GH_TOKEN="$(gh auth token --user Clarit-AI)" gh api \
+  -X POST repos/Clarit-AI/enigma/issues/123/labels \
+  -f 'labels[]=documentation'
+```
+
+Scope it with `GH_TOKEN` rather than `gh auth switch`, for the reason in the
+rule above: a global switch would also redirect the
+`KHAEntertainment/marketplace` push, so the cross-list commit would land under
+the wrong identity. Both credentials stay logged in; nothing global changes.
+
+Flag support is uneven — `gh auth token` takes `--user` but not `--account`,
+and some subcommands (`gh issue edit` among them) accept neither. Scoping
+`GH_TOKEN` inline is the form that works everywhere.

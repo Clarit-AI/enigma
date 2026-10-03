@@ -23,6 +23,8 @@ import {
 import type { IndexEntry, IndexEntryView, Scope } from '../core/index-store.js';
 import { DEPOSITORY_MODULES } from './detect.js';
 import { checkEnvGitignore } from './depositories/env.js';
+import { fanOutRemove, reconcileAfterCommit } from '../render/fanout.js';
+import type { CommitIdentity } from '../render/fanout.js';
 import type { Depository, DepositoryContext, DepositoryId } from './interfaces.js';
 
 function getDepositoryModule(id: DepositoryId) {
@@ -74,13 +76,20 @@ function canonicalPath(p: string | undefined): string | undefined {
  * fully committed state, and no index state could make the delete safe
  * that a later commit couldn't invalidate anyway.
  */
-function locationReclaimed(displaced: IndexEntry): boolean {
+export function locationReclaimed(displaced: Pick<IndexEntry, 'depository' | 'ref' | 'projectPath'>): boolean {
   return readIndex().entries.some(
     (e) =>
       e.depository === displaced.depository &&
       e.ref === displaced.ref &&
       (displaced.depository !== 'env' || canonicalPath(e.projectPath) === canonicalPath(displaced.projectPath)),
   );
+}
+
+/** `stamp`, or one millisecond after `previous` when `previous` is not earlier (Issue #108). */
+function strictlyAfter(stamp: string, previous: string | undefined): string {
+  if (previous === undefined) return stamp;
+  const prev = Date.parse(previous);
+  return prev >= Date.parse(stamp) ? new Date(prev + 1).toISOString() : stamp;
 }
 
 export interface SetSecretOptions {
@@ -98,11 +107,15 @@ export interface SetSecretOptions {
   createVault?: boolean;
   /** Overrides the default audit op ('set'/'rotated'); mirrors resolveSecret's auditOp (Issue #7). `enigma import` passes 'import'. */
   auditOp?: AuditEvent['op'];
+  /** Issue #108: do not fan out to rendered copies; the caller will, after its own batch commits (`enigma import`). */
+  skipRenderFanout?: boolean;
 }
 
 export interface SetSecretResult {
   rotated: boolean;
   warnings: string[];
+  /** Identity of the index entry this call committed (Issue #108): what a render fan-out is checked against. Never a value. */
+  commit: CommitIdentity;
 }
 
 export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult> {
@@ -208,6 +221,8 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
   // inside the lock, where the delta sees the post-acquire index. Captured
   // for the post-commit cleanup below; the pre-lock `existing` may be stale.
   let displaced: IndexEntry | undefined;
+  // Issue #108: the entry as actually committed — identity of THIS commit for the render fan-out.
+  let committed: IndexEntry = entry;
   try {
     mutateIndex((current) => {
       // Issue #66, AC #4/#5: re-read inside the lock so the delta sees the
@@ -228,7 +243,12 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
         });
       }
       displaced = currentExisting;
-      return upsertIndexEntry(current, entry);
+      // Issue #108: `updatedAt` strictly increases per entry (+1 ms when the clock has not moved), so
+      // two commits never share an identity and a stale render fan-out can tell it was superseded.
+      // Other readers keep their meaning: `mcp/result-text.ts` picks the latest entry by `updatedAt`
+      // (still the later one), and `list` only displays it.
+      committed = { ...entry, updatedAt: strictlyAfter(entry.updatedAt, currentExisting?.updatedAt) };
+      return upsertIndexEntry(current, committed);
     });
   } catch (err) {
     auditRefusal(err, op);
@@ -282,7 +302,31 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
     }
   }
 
-  return { rotated: Boolean(existing), warnings };
+  // Issue #108: keep rendered copies current. After the index commit and the cleanup above, outside
+  // the index lock; best-effort — warnings only, never a failure of the set/rotate/move itself. Callers
+  // that batch their own commit (`enigma import`) pass `skipRenderFanout` and run `fanOutSet` themselves
+  // once the whole batch has committed.
+  const commit: CommitIdentity = { updatedAt: committed.updatedAt, ref: committed.ref, depository: committed.depository };
+  if (!opts.skipRenderFanout && opts.scope === 'project' && pid !== undefined && projectPath !== undefined) {
+    // Reconcile the holders of NAME to the state this commit made current (see `fanOutPolicy`; guarantees and
+    // limits: docs/api-contracts.md, "Render fan-out: guarantees and limits"): a value is
+    // written for a no-prompt store (and for a rotate in a prompting store, holders only); a NEW prompting-store
+    // secret, or one moved into a prompting store, strips.
+    const fanned = await reconcileAfterCommit({
+      name: opts.name,
+      value: opts.value,
+      projectId: pid,
+      worktree: projectPath,
+      depository: opts.depository,
+      commit,
+      actor: opts.actor,
+      isNew: displaced === undefined,
+      moved: opts.auditOp === 'move',
+    });
+    for (const w of fanned) if (!warnings.includes(w)) warnings.push(w);
+  }
+
+  return { rotated: Boolean(existing), warnings, commit };
 }
 
 export async function hasSecret(name: string, opts: { scope?: Scope | 'all'; cwd?: string } = {}): Promise<boolean> {
@@ -306,7 +350,12 @@ export interface DeleteSecretOptions {
   actor: AuditActor;
 }
 
-export async function deleteSecret(name: string, opts: DeleteSecretOptions): Promise<void> {
+export interface DeleteSecretResult {
+  /** Names/paths-only notes about render targets that could not be updated (Issue #108); never a value. */
+  warnings: string[];
+}
+
+export async function deleteSecret(name: string, opts: DeleteSecretOptions): Promise<DeleteSecretResult> {
   const pid = opts.cwd ? computeProjectId(opts.cwd) : undefined;
   const index = readIndex();
   const { removed } = removeIndexEntry(index, name, opts.scope, pid);
@@ -343,6 +392,13 @@ export async function deleteSecret(name: string, opts: DeleteSecretOptions): Pro
     throw err;
   }
   appendAuditEvent({ op: 'remove', name, depository: removed.depository, actor: opts.actor, ok: true, error: null, ...auditScopeFields(removed) });
+
+  // Issue #108: strip NAME from every rendered copy of this project (best-effort, outside the index lock).
+  const warnings =
+    removed.scope === 'project' && removed.projectId !== undefined
+      ? await fanOutRemove({ name, projectId: removed.projectId, depository: removed.depository, actor: opts.actor, expect: { kind: 'deleted' } })
+      : [];
+  return { warnings };
 }
 
 export interface ResolveSecretOptions {
