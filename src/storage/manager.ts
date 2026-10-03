@@ -23,7 +23,7 @@ import {
 import type { IndexEntry, IndexEntryView, Scope } from '../core/index-store.js';
 import { DEPOSITORY_MODULES } from './detect.js';
 import { checkEnvGitignore } from './depositories/env.js';
-import { fanOutRemove, fanOutSet, isAutoRenderable } from '../render/fanout.js';
+import { fanOutPolicy, fanOutRemove, fanOutSet } from '../render/fanout.js';
 import type { CommitIdentity } from '../render/fanout.js';
 import type { Depository, DepositoryContext, DepositoryId } from './interfaces.js';
 
@@ -308,23 +308,19 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
   // once the whole batch has committed.
   const commit: CommitIdentity = { updatedAt: committed.updatedAt, ref: committed.ref, depository: committed.depository };
   if (!opts.skipRenderFanout && opts.scope === 'project' && pid !== undefined && projectPath !== undefined) {
-    const isNew = displaced === undefined;
-    const autoRenderable = isAutoRenderable(opts.depository);
+    const policy = fanOutPolicy({ moved: opts.auditOp === 'move', isNew: displaced === undefined, depository: opts.depository });
     let fanned: string[] = [];
-    if (opts.auditOp === 'move' && !autoRenderable) {
-      // A prompting store is never auto-rendered: strip every holder.
-      fanned = await fanOutRemove({ name: opts.name, projectId: pid, depository: opts.depository, actor: opts.actor });
-    } else if (autoRenderable || !isNew) {
-      // A move to a no-prompt store, a rotate, or a create: write the value in hand to every holder. A holder
-      // whose file's env block now holds NAME drops its render line instead (what `move --to env` needs).
-      // A NEW secret in a prompting store never fans out, not even to a holder left over from a deleted
-      // predecessor: nothing about it is auto-rendered.
+    if (policy.action === 'strip') {
+      // A move to a prompting store: never auto-rendered. The strip proceeds only while the entry is still this moved one.
+      fanned = await fanOutRemove({ name: opts.name, projectId: pid, depository: opts.depository, actor: opts.actor, expect: { kind: 'moved', commit } });
+    } else if (policy.action === 'set') {
+      // Write the value in hand to every holder (a holder whose env block now holds NAME drops its render line instead).
       fanned = await fanOutSet({
         name: opts.name,
         value: opts.value,
         projectId: pid,
         worktree: projectPath,
-        addWorktree: isNew && autoRenderable,
+        addWorktree: policy.addWorktree,
         commit,
         actor: opts.actor,
       });
@@ -402,7 +398,7 @@ export async function deleteSecret(name: string, opts: DeleteSecretOptions): Pro
   // Issue #108: strip NAME from every rendered copy of this project (best-effort, outside the index lock).
   const warnings =
     removed.scope === 'project' && removed.projectId !== undefined
-      ? await fanOutRemove({ name, projectId: removed.projectId, depository: removed.depository, actor: opts.actor })
+      ? await fanOutRemove({ name, projectId: removed.projectId, depository: removed.depository, actor: opts.actor, expect: { kind: 'deleted' } })
       : [];
   return { warnings };
 }

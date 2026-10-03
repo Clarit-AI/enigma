@@ -114,15 +114,23 @@ export interface FanOutSetInput {
 }
 
 /** Remove NAME from every holder: the secret was deleted, or moved to a prompting store (never auto-rendered). */
+/**
+ * What a strip acted on (Rule C). It proceeds only while the index still says exactly that:
+ *  - `deleted`: there is NO entry for NAME;
+ *  - `moved`: the entry for NAME is the moved (prompting-store) entry, identified by its commit.
+ */
+export type StripExpectation = { kind: 'deleted' } | { kind: 'moved'; commit: CommitIdentity };
+
 export interface FanOutRemoveInput {
   name: string;
   projectId: string;
   /** Depository of the entry that was removed or moved (audit only). */
   depository: DepositoryId;
   actor: AuditActor;
+  expect: StripExpectation;
 }
 
-type Operation = { kind: 'set'; value: string; commit: CommitIdentity } | { kind: 'strip' };
+type Operation = { kind: 'set'; value: string; commit: CommitIdentity } | { kind: 'strip'; expect: StripExpectation };
 
 interface TargetInput {
   name: string;
@@ -213,15 +221,23 @@ function warningFor(worktree: string, name: string, reason: string): string {
   return `render target ${worktree} was not updated for ${name} (${reason})`;
 }
 
-/** The index entry for `name` in this project is auto-renderable right now. */
-function eligibleEntryExists(name: string, projectId: string): boolean {
-  const entry = findIndexEntry(readIndex(), name, 'project', projectId);
-  return entry !== undefined && isAutoRenderable(entry.depository);
+function currentEntry(name: string, projectId: string) {
+  return findIndexEntry(readIndex(), name, 'project', projectId);
 }
 
-function isCurrentCommit(name: string, projectId: string, commit: CommitIdentity): boolean {
-  const entry = findIndexEntry(readIndex(), name, 'project', projectId);
+function matchesCommit(entry: { updatedAt: string; ref: string; depository: DepositoryId } | undefined, commit: CommitIdentity): boolean {
   return entry !== undefined && entry.updatedAt === commit.updatedAt && entry.ref === commit.ref && entry.depository === commit.depository;
+}
+
+/**
+ * Rule C: an operation's notion of "current" was fixed when it committed. It is still current only if the
+ * index entry for NAME is exactly what it acted on: the same commit for a set or a move strip, no entry at all
+ * for a delete strip. Anything else (a later rotate, a re-create, a move) belongs to a newer operation.
+ */
+function operationIsCurrent(name: string, projectId: string, op: Operation): boolean {
+  const entry = currentEntry(name, projectId);
+  if (op.kind === 'set') return matchesCommit(entry, op.commit);
+  return op.expect.kind === 'deleted' ? entry === undefined : matchesCommit(entry, op.expect.commit);
 }
 
 /** Terminate an unterminated last line (the end marker at EOF) in the file's dominant EOL, as `writeRenderBlock` does. */
@@ -344,8 +360,7 @@ function updateTarget(input: TargetInput): TargetResult {
       if (target !== peekPath) throw new Skip('target-refused');
 
       // Guard, in the same lock hold as the write (see the header).
-      if (op.kind === 'set' && !isCurrentCommit(name, projectId, op.commit)) return { status: 'silent' };
-      if (op.kind === 'strip' && eligibleEntryExists(name, projectId)) return { status: 'silent' };
+      if (!operationIsCurrent(name, projectId, op)) return { status: 'silent' };
       hooks.afterGuard?.(peekPath);
 
       const current = existsSync(target) ? readFileSync(target, 'utf8') : '';
@@ -434,7 +449,7 @@ export function nameLockPath(projectId: string, name: string): string {
   return join(enigmaHome(), 'locks', `fanout-${key}.lock`);
 }
 
-/** Take the NAME lock, retrying past the lock helper's short budget: a fan-out that waits is correct, one that gives up leaves copies stale. */
+/** Take the NAME lock, retrying past the lock helper's short budget (about 10 s in all); then it throws `E_LOCK_TIMEOUT`. */
 function acquireNameLock(projectId: string, name: string): Lock {
   const retries = hooks.nameLockRetries ?? NAME_LOCK_RETRIES;
   for (let attempt = 0; ; attempt++) {
@@ -447,24 +462,68 @@ function acquireNameLock(projectId: string, name: string): Lock {
 }
 
 /**
- * Rule B: fan-outs for one NAME never overlap. Inside the lock, FIRST `isCurrent()` (is this operation's
- * commit still what the index says? else skip entirely), THEN the holder snapshot, then each target under its
- * own file lock (Rule A, per target). The NAME lock is always taken before any target lock.
+ * The NAME lock could not be taken within its budget, so this fan-out cannot be ordered against the one that
+ * holds it. Fail honestly instead of waiting forever: for EVERY holder (a read-only ledger snapshot, no NAME lock)
+ * and the worktree a create would have added, warn that its rendered copies of NAME may be stale and audit
+ * `ok:false` `lock-timeout`. The originating operation stays successful. "Last committed wins" therefore holds
+ * within the NAME-lock budget; beyond it every affected target is named, never silently left behind.
+ */
+function lockTimeoutReport(projectId: string, name: string, op: Operation['kind'], depository: DepositoryId, actor: AuditActor, extraWorktree: string | undefined): string[] {
+  const worktrees: string[] = [];
+  try {
+    for (const t of targetsFor({ projectId, name })) if (!worktrees.includes(t.worktree)) worktrees.push(t.worktree);
+  } catch {
+    // an unreadable ledger leaves only the generic warning below
+  }
+  if (extraWorktree !== undefined && !worktrees.includes(extraWorktree)) worktrees.push(extraWorktree);
+  const warnings: string[] = [];
+  for (const worktree of worktrees) {
+    warnings.push(
+      `render target ${worktree} was not updated for ${name} (lock-timeout: its rendered copies of ${name} may be stale; run \`enigma render\`)`,
+    );
+    try {
+      appendAuditEvent({
+        op: op === 'set' ? 'render' : 'unrender',
+        name,
+        depository,
+        actor,
+        ok: false,
+        error: 'lock-timeout',
+        ...auditScopeFields({ scope: 'project', projectId, projectPath: worktree }),
+      });
+    } catch {
+      // an audit failure must not turn a skipped target into a failed operation
+    }
+  }
+  if (worktrees.length === 0) warnings.push(`render fan-out skipped for ${name} (lock-timeout)`);
+  return warnings;
+}
+
+/**
+ * Rule B: fan-outs for one NAME never overlap. Inside the lock, FIRST `isCurrent()` (is this operation still what
+ * the index says? else skip entirely), THEN the holder snapshot, then each target under its own file lock. The NAME
+ * lock is always taken before any target lock.
  */
 async function withNameLock(
-  projectId: string,
-  name: string,
+  call: { projectId: string; name: string; op: Operation; depository: DepositoryId; actor: AuditActor; extraWorktree?: string },
   run: () => string[],
-  isCurrent: () => boolean,
-  supersededNote: string | undefined,
+  supersededNote: string,
   commit?: CommitIdentity,
 ): Promise<string[]> {
   if (hooks.disabled) return [];
   if (gate) await gate(commit);
-  const lock = acquireNameLock(projectId, name);
+  let lock: Lock;
   try {
-    hooks.afterNameLock?.(name);
-    if (!isCurrent()) return supersededNote ? [supersededNote] : [];
+    lock = acquireNameLock(call.projectId, call.name);
+  } catch (err) {
+    if (err instanceof EnigmaError && err.code === 'E_LOCK_TIMEOUT') {
+      return lockTimeoutReport(call.projectId, call.name, call.op.kind, call.depository, call.actor, call.extraWorktree);
+    }
+    throw err;
+  }
+  try {
+    hooks.afterNameLock?.(call.name);
+    if (!operationIsCurrent(call.name, call.projectId, call.op)) return [supersededNote];
     return run();
   } finally {
     lock.release();
@@ -477,26 +536,16 @@ async function withNameLock(
  */
 export async function fanOutSet(input: FanOutSetInput): Promise<string[]> {
   try {
-    // A superseded fan-out is silent (the newer commit's own fan-out writes every holder), except when it would
-    // have ADDED the originating worktree: nothing newer adds it, so it is told to run `enigma render`.
-    const note = input.addWorktree ? `render target ${input.worktree} was not updated for ${input.name} (changed concurrently; run \`enigma render\` again)` : undefined;
+    const op: Operation = { kind: 'set', value: input.value, commit: input.commit };
     return await withNameLock(
-      input.projectId,
-      input.name,
+      { projectId: input.projectId, name: input.name, op, depository: input.commit.depository, actor: input.actor, extraWorktree: input.addWorktree ? input.worktree : undefined },
       () => {
         const holders = targetsFor({ projectId: input.projectId, name: input.name });
         const targets: TargetSpec[] = holders.map((h) => ({ worktree: h.worktree, ledgerFile: h.file }));
         if (input.addWorktree && !holders.some((h) => h.worktree === input.worktree)) targets.push({ worktree: input.worktree, isNew: true });
-        return runTargets(targets, {
-          name: input.name,
-          projectId: input.projectId,
-          depository: input.commit.depository,
-          actor: input.actor,
-          op: { kind: 'set', value: input.value, commit: input.commit },
-        });
+        return runTargets(targets, { name: input.name, projectId: input.projectId, depository: input.commit.depository, actor: input.actor, op });
       },
-      () => isCurrentCommit(input.name, input.projectId, input.commit),
-      note,
+      `render fan-out skipped for ${input.name} (changed concurrently; run \`enigma render\` again)`,
       input.commit,
     );
   } catch (err) {
@@ -507,21 +556,35 @@ export async function fanOutSet(input: FanOutSetInput): Promise<string[]> {
 /** `strip` fan-out over every ledger target of this project that holds NAME (delete, or move to a prompting store). */
 export async function fanOutRemove(input: FanOutRemoveInput): Promise<string[]> {
   try {
+    const op: Operation = { kind: 'strip', expect: input.expect };
     return await withNameLock(
-      input.projectId,
-      input.name,
+      { projectId: input.projectId, name: input.name, op, depository: input.depository, actor: input.actor },
       () => {
         const holders = targetsFor({ projectId: input.projectId, name: input.name });
         return runTargets(
           holders.map((h) => ({ worktree: h.worktree, ledgerFile: h.file })),
-          { name: input.name, projectId: input.projectId, depository: input.depository, actor: input.actor, op: { kind: 'strip' } },
+          { name: input.name, projectId: input.projectId, depository: input.depository, actor: input.actor, op },
         );
       },
-      // A removal is stale only when a render-eligible entry for NAME exists again.
-      () => !eligibleEntryExists(input.name, input.projectId),
-      undefined,
+      `render fan-out skipped for ${input.name} (changed concurrently; run \`enigma render\` again)`,
     );
   } catch (err) {
     return [`render fan-out skipped for ${input.name} (${reasonFor(err)})`];
   }
+}
+
+/** What an operation does to rendered copies. One function, used by `setSecret` AND `enigma import`, so they can never disagree. */
+export type FanOutPolicy = { action: 'set'; addWorktree: boolean } | { action: 'strip' } | { action: 'none' };
+
+/**
+ *  - a move to a prompting store: strip (never auto-rendered);
+ *  - a no-prompt store (create, rotate, move, import): set, adding the originating worktree only for a NEW secret;
+ *  - a rotate in a prompting store: set, existing holders only (the value is in hand, nothing prompts, nothing is added);
+ *  - a NEW prompting-store secret: nothing at all, not even to a holder left over from a deleted predecessor.
+ */
+export function fanOutPolicy(input: { moved: boolean; isNew: boolean; depository: DepositoryId }): FanOutPolicy {
+  const autoRenderable = isAutoRenderable(input.depository);
+  if (input.moved && !autoRenderable) return { action: 'strip' };
+  if (autoRenderable || !input.isNew) return { action: 'set', addWorktree: input.isNew && autoRenderable };
+  return { action: 'none' };
 }

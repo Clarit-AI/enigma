@@ -43,7 +43,7 @@ export async function cmdMove(argv: string[]): Promise<number> {
   // ok:false and ok:true. Passing auditOp: 'move' makes that one line carry the right verb
   // and covers this whole step end to end — wrapping it in another catch here (as before)
   // would double-log the identical event under two labels (PR #52 review).
-  await setSecret({
+  const result = await setSecret({
     name,
     value,
     scope: entry.scope,
@@ -72,5 +72,6 @@ export async function cmdMove(argv: string[]): Promise<number> {
   }
 
   process.stdout.write(`Moved ${name} to ${target} (${entry.scope})\n`);
+  for (const warning of result.warnings) process.stderr.write(`warning: ${warning}\n`);
   return 0;
 }

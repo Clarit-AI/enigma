@@ -69,11 +69,13 @@
  *  - A failed resolve keeps the name's previous line when there is one
  *    (reported under Failed, "kept previous line"), else the name is
  *    simply absent. Other names still render.
- *  - Rule A (Issue #108): each resolved name's index commit identity
- *    (`updatedAt`, `ref`, `depository`) is captured BEFORE it is resolved and
- *    re-checked under the lock. A name whose entry has moved on is not written:
- *    its existing line stays (or it stays absent) and it is reported under
- *    Failed as `E_SUPERSEDED`. Nothing is ever re-resolved under the lock.
+ *  - Rules A and C (Issue #108): each name carries the index commit identity
+ *    (`updatedAt`, `ref`, `depository`) the PLAN selected. It is compared with
+ *    the live index before the name is resolved (a moved or rotated entry is not
+ *    resolved at all: no store prompt) and again under the lock. A name whose
+ *    entry has moved on is not written: its existing line stays (or it stays
+ *    absent) and it is reported under Failed as `E_SUPERSEDED`. Nothing is ever
+ *    re-resolved under the lock.
  *  - Failure reasons are STATIC: an error's `message` is never copied
  *    into the outcome, stdout, stderr or the audit log.
  *  - Nothing to write and no existing block: the file is not touched. An
@@ -125,6 +127,11 @@ const PATH_TRAVERSAL_SEGMENT_RE = /(^|[/\\])\.\.([/\\]|$)/;
 export interface RenderEntryRef {
   name: string;
   depository: DepositoryId;
+  /**
+   * Identity of the index commit the plan selected (`updatedAt|ref|depository`; Issue #108, Rule C). Names and
+   * timestamps only. The executor resolves and writes the name only while the index entry is still this one.
+   */
+  identity: string;
 }
 
 /**
@@ -336,7 +343,7 @@ export function buildRenderPlan(opts: {
         secretName: explicitName,
       });
     }
-    plan.toResolve.push({ name: entry.name, depository: entry.depository });
+    plan.toResolve.push({ name: entry.name, depository: entry.depository, identity: entryIdentity(entry) });
     return plan;
   }
 
@@ -348,7 +355,7 @@ export function buildRenderPlan(opts: {
     }
     const profile = PROMPT_PROFILE_BY_DEPOSITORY.get(entry.depository);
     if (profile === undefined) continue;
-    const ref = { name: entry.name, depository: entry.depository };
+    const ref = { name: entry.name, depository: entry.depository, identity: entryIdentity(entry) };
     if (profile === 'none') plan.toResolve.push(ref);
     else plan.promptingStore.push(ref);
   }
@@ -409,13 +416,18 @@ export function stripRenderBlock(content: string, block: { beginIdx: number; end
 type ResolveResult = { ok: true; value: string } | { ok: false; code: string };
 
 /**
- * Identity of the index commit a name's entry is at: `(updatedAt, ref, depository)`. Captured BEFORE a name is
- * resolved and compared under the target lock (Issue #108, Rule A): if it moved, the resolved value may be older
- * than the index, so it is never written.
+ * Rule C (Issue #108): identity of the index commit a plan selected, `updatedAt|ref|depository`. It is fixed at PLAN
+ * time and compared with the live index twice: just before a name is resolved (a moved or rotated entry is not
+ * resolved at all, so a store never prompts for an entry the plan did not select) and under the target lock (a
+ * value resolved from an older commit is never written).
  */
+function entryIdentity(entry: { updatedAt: string; ref: string; depository: DepositoryId }): string {
+  return `${entry.updatedAt}|${entry.ref}|${entry.depository}`;
+}
+
 function commitIdentityOf(name: string, projectId: string): string | undefined {
   const entry = findIndexEntry(readIndex(), name, 'project', projectId);
-  return entry === undefined ? undefined : `${entry.updatedAt}|${entry.ref}|${entry.depository}`;
+  return entry === undefined ? undefined : entryIdentity(entry);
 }
 
 /**
@@ -470,10 +482,13 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
   // 1. Resolve BEFORE the lock. Values live only in this local map: they
   //    are encoded into a block line below and never returned or stored.
   const resolved = new Map<string, ResolveResult>();
-  const identities = new Map<string, string | undefined>();
   for (const item of plan.toResolve) {
     if (peekEnvNames.has(item.name)) continue;
-    identities.set(item.name, commitIdentityOf(item.name, opts.projectId));
+    // Rule C: only resolve the entry the plan selected. A rotated or moved entry belongs to a newer operation.
+    if (commitIdentityOf(item.name, opts.projectId) !== item.identity) {
+      resolved.set(item.name, { ok: false, code: SUPERSEDED_CODE });
+      continue;
+    }
     try {
       resolved.set(item.name, { ok: true, value: await opts.resolveValue(item.name, item.depository) });
     } catch (err) {
@@ -554,7 +569,7 @@ export async function executeRender(plan: RenderPlan, opts: ExecuteRenderOptions
       let result = resolved.get(item.name) ?? { ok: false as const, code: TARGET_CHANGED_CODE };
       // Rule A (Issue #108): a value resolved before the lock is written only if the index is still at the
       // commit it was resolved at. A newer commit (and its fan-out) owns the line: keep it, or leave the name absent.
-      if (result.ok && commitIdentityOf(item.name, opts.projectId) !== identities.get(item.name)) {
+      if (result.ok && commitIdentityOf(item.name, opts.projectId) !== item.identity) {
         result = { ok: false as const, code: SUPERSEDED_CODE };
       }
       if (result.ok) {

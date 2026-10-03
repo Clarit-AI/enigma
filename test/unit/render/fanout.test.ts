@@ -339,8 +339,8 @@ describe('delete (AC 4)', () => {
     const { worktrees: [a], projectId } = makeRepo(sb);
     await add(a!, 'API_KEY', 'v1');
     seedTarget(a!, projectId, block('API_KEY=v1'), ['API_KEY']);
-    const warnings = await fanOutRemove({ name: 'API_KEY', projectId, depository: 'encrypted', actor: 'cli' });
-    expect(warnings).toEqual([]);
+    const warnings = await fanOutRemove({ name: 'API_KEY', projectId, depository: 'encrypted', actor: 'cli', expect: { kind: 'deleted' } });
+    expect(warnings).toEqual(['render fan-out skipped for API_KEY (changed concurrently; run `enigma render` again)']);
     expect(readEnv(a!)).toBe(block('API_KEY=v1'));
   });
 });
@@ -432,7 +432,7 @@ describe('ordering guard (AC 8)', () => {
       actor: 'cli',
     });
 
-    expect(warnings).toEqual([]);
+    expect(warnings).toEqual(['render fan-out skipped for API_KEY (changed concurrently; run `enigma render` again)']);
     expect(readEnv(w!)).toBe(block('API_KEY=v2'));
     const fresh = listSecrets({ scope: 'project', cwd: w! })[0]!;
     await fanOutSet({ name: 'API_KEY', value: 'v2-AGAIN', projectId, worktree: w!, addWorktree: false, commit: { updatedAt: fresh.updatedAt, ref: fresh.ref, depository: fresh.depository }, actor: 'cli' });

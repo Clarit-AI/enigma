@@ -183,7 +183,7 @@ describe('item 4: import fan-out is deferred until the batch commits', () => {
     expect(result.failed.map((f) => f.name)).toEqual(['SECOND']);
     expect(readEnv(w!)).toBe(original);
     expect(readLedger().targets).toEqual([]);
-    expect(result.warnings.join('\n')).toContain('FIRST was stored but not rendered into this worktree\'s render block because the import did not complete; run `enigma render` once the issue is fixed.');
+    expect(result.warnings.join('\n')).toContain('FIRST was stored but its rendered copies were not updated because the import did not complete; run `enigma render` once the issue is fixed.');
   });
 
   it('a batch that commits renders every stored name once the plaintext rewrite is done', async () => {

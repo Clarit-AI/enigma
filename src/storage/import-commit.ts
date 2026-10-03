@@ -14,7 +14,7 @@ import { parseDotEnv, removeDotEnvEntries } from './dotenv-file.js';
 import type { ParsedDotEnvEntry } from './dotenv-file.js';
 import type { DepositoryId } from './interfaces.js';
 import { setSecret } from './manager.js';
-import { fanOutSet, isAutoRenderable } from '../render/fanout.js';
+import { fanOutPolicy, fanOutSet } from '../render/fanout.js';
 import type { CommitIdentity } from '../render/fanout.js';
 
 const FILE_MODE = 0o600;
@@ -57,32 +57,43 @@ interface StoredEntry {
   isNew: boolean;
 }
 
-/** The dotenv depository keeps its values in its own block of the imported file; every other no-prompt store renders (Issue #108). */
-function rendersAfterImport(opts: ImportCommitOptions): boolean {
-  return opts.scope === 'project' && opts.depository !== 'env' && isAutoRenderable(opts.depository);
+/** The one policy `setSecret` uses (Issue #108), applied to an imported entry: what would the fan-out have done for it? */
+function policyFor(opts: ImportCommitOptions, entry: StoredEntry) {
+  return fanOutPolicy({ moved: false, isNew: entry.isNew, depository: opts.depository });
 }
 
-/** Names-only note for an import that stored names but did not complete, so nothing was rendered. */
-function notRenderedNote(opts: ImportCommitOptions, names: string[]): string | undefined {
-  if (names.length === 0 || !rendersAfterImport(opts)) return undefined;
-  return `${names.join(', ')} ${names.length === 1 ? 'was' : 'were'} stored but not rendered into this worktree's render block because the import did not complete; run \`enigma render\` once the issue is fixed.`;
+/**
+ * Names-only note for an import that stored names but did not complete, so no rendered copy was updated. Applies
+ * to every stored name whose policy would have fanned out, the dotenv depository included (another worktree may
+ * hold a render line for it).
+ */
+function notRenderedNote(opts: ImportCommitOptions, stored: StoredEntry[]): string | undefined {
+  if (opts.scope !== 'project') return undefined;
+  const names = stored.filter((e) => policyFor(opts, e).action !== 'none').map((e) => e.name);
+  if (names.length === 0) return undefined;
+  return `${names.join(', ')} ${names.length === 1 ? 'was' : 'were'} stored but ${names.length === 1 ? 'its' : 'their'} rendered copies were not updated because the import did not complete; run \`enigma render\` once the issue is fixed.`;
 }
 
 /**
  * Issue #108: after the import has COMMITTED (every entry stored, the plaintext rewrite done or not needed),
- * run one render fan-out pass per stored name: the same Rules A and B as every other writer, with the value
- * already in hand. Best-effort: its warnings join the import's.
+ * run one fan-out pass per stored name, under the same policy, Rules and locks as every other writer, with the
+ * value already in hand. A name whose plaintext line was left in place (`skippedMismatch`: edited on disk before
+ * the rewrite) is NOT fanned out: the file would hold two definitions and the older stored value could win.
+ * Best-effort: its warnings join the import's.
  */
-async function renderCommitted(opts: ImportCommitOptions, stored: StoredEntry[], warnings: string[]): Promise<void> {
+async function renderCommitted(opts: ImportCommitOptions, stored: StoredEntry[], skipped: string[], warnings: string[]): Promise<void> {
   if (opts.scope !== 'project') return;
   const projectId = computeProjectId(opts.cwd);
   for (const entry of stored) {
+    if (skipped.includes(entry.name)) continue;
+    const policy = policyFor(opts, entry);
+    if (policy.action !== 'set') continue;
     const fanned = await fanOutSet({
       name: entry.name,
       value: entry.value,
       projectId,
       worktree: opts.projectPath,
-      addWorktree: entry.isNew && isAutoRenderable(opts.depository),
+      addWorktree: policy.addWorktree,
       commit: entry.commit,
       actor: opts.actor,
     });
@@ -231,7 +242,7 @@ export async function commitImport(opts: ImportCommitOptions): Promise<ImportCom
           : `${succeeded.length} secret(s) (${names}) are already stored in ${opts.depository} before the failure on ${failed[0]!.name}; .env was left untouched. Fix the issue and rerun import with rotate enabled to overwrite them, or remove them from ${opts.depository} manually.`,
       );
     }
-    const note = notRenderedNote(opts, succeeded);
+    const note = notRenderedNote(opts, stored);
     if (note) warnings.push(note);
     return { succeeded, failed, notAttempted, skippedMismatch: [], fileRewritten: false, warnings };
   }
@@ -262,7 +273,7 @@ export async function commitImport(opts: ImportCommitOptions): Promise<ImportCom
   const needsWrite = rewritten !== currentContent;
 
   if (!needsWrite) {
-    await renderCommitted(opts, stored, warnings);
+    await renderCommitted(opts, stored, skippedMismatch, warnings);
     return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: false, warnings };
   }
 
@@ -276,11 +287,11 @@ export async function commitImport(opts: ImportCommitOptions): Promise<ImportCom
         `A temporary file containing the full rewritten .env content was left behind at ${writeResult.leftoverPath} and could not be removed automatically — delete it manually as soon as possible.`,
       );
     }
-    const note = notRenderedNote(opts, succeeded);
+    const note = notRenderedNote(opts, stored);
     if (note) warnings.push(note);
     return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: false, warnings };
   }
 
-  await renderCommitted(opts, stored, warnings);
+  await renderCommitted(opts, stored, skippedMismatch, warnings);
   return { succeeded, failed: [], notAttempted: [], skippedMismatch, fileRewritten: true, warnings };
 }

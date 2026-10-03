@@ -275,6 +275,11 @@ describe('commitImport (fs-mocked edge cases, Issue #13 review round 2)', () => 
     });
 
     it('renames a sibling temp file onto the target rather than truncating it in place', async () => {
+      // Issue #108: the deferred render fan-out also rewrites this same file atomically (a second rename onto it). This
+      // test is about the IMPORT's rewrite of the imported file, so the fan-out is off here. (On macOS tmpdir() is a
+      // symlink, so the fan-out renames onto the canonical /private/... spelling and the strict `to === envFilePath`
+      // filter below happened to miss it; on Linux the two spellings are identical and the filter counts both.)
+      __setFanoutHooksForTesting({ disabled: true });
       writeFileSync(envFilePath, 'OPENAI_API_KEY=sk-abc\n');
 
       await commitImport({
