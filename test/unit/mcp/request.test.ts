@@ -43,6 +43,7 @@ const { connectWithCapabilities } = await import('./harness.js');
 const { setSecret } = await import('../../../src/storage/manager.js');
 const { stopServer } = await import('../../../src/web/server.js');
 const { RequestStore } = await import('../../../src/request/store.js');
+const { URL_ELICITATION_ACK_TIMEOUT_MS } = await import('../../../src/mcp/elicit.js');
 
 describe('enigma_request', () => {
   let tmpHome: string;
@@ -185,18 +186,103 @@ describe('enigma_request', () => {
     await pair.close();
   });
 
-  it('decline/cancel: returns a cancelled status and never blocks on the request store', async () => {
-    const pair = await connectWithCapabilities({ elicitation: { url: {} } });
-    pair.client.setRequestHandler(ElicitRequestSchema, async () => ({ action: 'decline' }));
+  describe('Issue #118: a client that advertises URL elicitation but does not deliver it', () => {
+    const textOf = (result: unknown): string => ((result as { content?: Array<{ text: string }> }).content ?? [])[0]?.text ?? '';
+    const ARGS = { names: ['GITHUB_TOKEN'], reason: 'test', usage: 'interactive', scope: 'global', depository: 'encrypted' } as const;
 
-    const result = await pair.client.callTool({
-      name: 'enigma_request',
-      arguments: { names: ['GITHUB_TOKEN'], reason: 'test', usage: 'interactive', scope: 'global' },
+    /** First line of the fallback text is `{ request_id, url, expiresAt }`. */
+    function parseFallback(text: string): { request_id: string; url: string; expiresAt: string } {
+      return JSON.parse(text.split('\n')[0]!) as { request_id: string; url: string; expiresAt: string };
+    }
+
+    it.each([['decline'], ['cancel']] as const)(
+      '%s: falls back to the local link, the call is not an error, and the request stays open for enigma_await (the user never saw a form, so this is not a user cancel)',
+      async (action) => {
+        const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+        pair.client.setRequestHandler(ElicitRequestSchema, async () => ({ action }));
+
+        const result = await pair.client.callTool({ name: 'enigma_request', arguments: ARGS });
+
+        expect(result.isError).toBeFalsy();
+        const text = textOf(result);
+        const fallback = parseFallback(text);
+        expect(fallback.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/r\/[0-9a-f]{32}$/);
+        expect(fallback.request_id).toBe(fallback.url.split('/r/')[1]);
+        expect(text).toContain(action === 'cancel' ? 'cancelled the URL elicitation' : 'declined the URL elicitation');
+        expect(text).toContain('enigma_await');
+        expect(text).toContain('ui:"native"');
+        expect(text).not.toContain('Request cancelled');
+
+        // The request is still alive: the link serves the form and a submit is picked up by enigma_await.
+        const form = await fetch(fallback.url);
+        expect(form.status).toBe(200);
+        await fetch(fallback.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ GITHUB_TOKEN: SENTINEL, depository: 'encrypted', scope: 'global' }).toString(),
+        });
+        const awaited = await pair.client.callTool({ name: 'enigma_await', arguments: { request_id: fallback.request_id } });
+        expect(awaited.isError).toBeFalsy();
+        expect(textOf(awaited)).toBe('Stored GITHUB_TOKEN in encrypted (global)');
+        expect(textOf(awaited)).not.toContain(SENTINEL);
+        await pair.close();
+      },
+    );
+
+    it('the client answers elicitation/create with an error: falls back to the local link and never echoes the error text', async () => {
+      const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+      pair.client.setRequestHandler(ElicitRequestSchema, async () => {
+        throw new Error(`client-side failure ${SENTINEL}`);
+      });
+
+      const result = await pair.client.callTool({ name: 'enigma_request', arguments: ARGS });
+
+      expect(result.isError).toBeFalsy();
+      const text = textOf(result);
+      expect(parseFallback(text).url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/r\//);
+      expect(text).toContain('could not deliver the URL elicitation');
+      expect(text).not.toContain(SENTINEL);
+      expect(text).not.toContain('client-side failure');
+      await pair.close();
     });
 
-    expect(result.isError).toBe(true);
-    expect((result.content as Array<{ text: string }>)[0]?.text).toContain('cancelled');
-    await pair.close();
+    it('the client never answers: falls back after the acknowledgement timeout instead of hanging', async () => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+      try {
+        const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+        pair.client.setRequestHandler(ElicitRequestSchema, () => new Promise(() => {}));
+
+        const resultPromise = pair.client.callTool({ name: 'enigma_request', arguments: ARGS });
+        await vi.advanceTimersByTimeAsync(URL_ELICITATION_ACK_TIMEOUT_MS + 1_000);
+        const result = await resultPromise;
+
+        expect(result.isError).toBeFalsy();
+        expect(parseFallback(textOf(result)).url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/r\//);
+        expect(textOf(result)).toContain('did not acknowledge the URL elicitation in time');
+        await pair.close();
+      } finally {
+        vi.useRealTimers();
+      }
+    });
+
+    it('accept still blocks until the human submits (unchanged happy path)', async () => {
+      const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+      pair.client.setRequestHandler(ElicitRequestSchema, async (request) => {
+        if (request.params.mode !== 'url') throw new Error('expected url mode');
+        await fetch(request.params.url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ GITHUB_TOKEN: SENTINEL, depository: 'encrypted', scope: 'global' }).toString(),
+        });
+        return { action: 'accept' };
+      });
+
+      const result = await pair.client.callTool({ name: 'enigma_request', arguments: ARGS });
+
+      expect(result.isError).toBeFalsy();
+      expect(textOf(result)).toBe('Stored GITHUB_TOKEN in encrypted (global)');
+      await pair.close();
+    });
   });
 
   it('without elicitation.url capability: returns request_id/url text instructing enigma_await, without calling elicitInput', async () => {
@@ -396,6 +482,59 @@ describe('enigma_request remote access (Issue #12)', () => {
     expect(text).toContain('Remote access unavailable');
     expect(text).toContain('cloudflared');
     await pair.close();
+  });
+
+  it('Issue #118: remote:true + the URL elicitation is declined: the tunnel is stopped and its public link never reaches the tool result; the local link is offered instead', async () => {
+    const tunnelChild = stubCloudflaredAvailable();
+    const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+    let elicitedUrl = '';
+    pair.client.setRequestHandler(ElicitRequestSchema, async (request) => {
+      if (request.params.mode !== 'url') throw new Error('expected url mode');
+      elicitedUrl = request.params.url;
+      return { action: 'decline' };
+    });
+
+    const result = await pair.client.callTool({
+      name: 'enigma_request',
+      arguments: { names: ['OPENAI_API_KEY'], reason: 'test', usage: 'interactive', scope: 'global', depository: 'encrypted', remote: true },
+    });
+
+    expect(elicitedUrl).toMatch(/^https:\/\/remote-words\.trycloudflare\.com\/r\/[0-9a-f]{32}$/);
+    const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+    expect(result.isError).toBeFalsy();
+    expect(text).not.toContain('trycloudflare.com');
+    const fallback = JSON.parse(text.split('\n')[0]!) as { url: string; request_id: string };
+    expect(fallback.url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/r\//);
+    expect(text).toContain('Remote access was stopped for this request');
+    expect(tunnelChild.kill).toHaveBeenCalled();
+    await pair.close();
+  });
+
+  it('Issue #118 (review): remote:true + the client is merely SLOW (acknowledgement timeout): the tunnel is NOT stopped, since a human may be looking at its link, and the public link still never reaches the tool result', async () => {
+    const tunnelChild = stubCloudflaredAvailable();
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const pair = await connectWithCapabilities({ elicitation: { url: {} } });
+      pair.client.setRequestHandler(ElicitRequestSchema, () => new Promise(() => {}));
+
+      const resultPromise = pair.client.callTool({
+        name: 'enigma_request',
+        arguments: { names: ['OPENAI_API_KEY'], reason: 'test', usage: 'interactive', scope: 'global', depository: 'encrypted', remote: true },
+      });
+      await vi.advanceTimersByTimeAsync(URL_ELICITATION_ACK_TIMEOUT_MS + 1_000);
+      const result = await resultPromise;
+
+      const text = (result.content as Array<{ text: string }>)[0]?.text ?? '';
+      expect(result.isError).toBeFalsy();
+      expect(text).toContain('did not acknowledge the URL elicitation in time');
+      expect(text).not.toContain('trycloudflare.com');
+      expect(text).not.toContain('Remote access was stopped');
+      expect(JSON.parse(text.split('\n')[0]!).url).toMatch(/^http:\/\/127\.0\.0\.1:\d+\/r\//);
+      expect(tunnelChild.kill).not.toHaveBeenCalled();
+      await pair.close();
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it('remote:true + cloudflared available: elicits the tunnel URL, and the final text reports remote access was used', async () => {

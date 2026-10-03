@@ -166,6 +166,21 @@ export function registerActiveTunnel(requestId: string, attempt: RemoteAttempt):
 }
 
 /**
+ * Stops the tunnel tied to `requestId` right now and records `note`, for a
+ * request whose public link can no longer be delivered out of band (the URL
+ * elicitation that would have carried it was declined or failed, Issue #118).
+ * The request itself stays alive on its local link; the request-form page
+ * stops offering a QR for a link that no longer resolves.
+ */
+export function discardActiveTunnel(requestId: string, note: string): void {
+  const entry = active.get(requestId);
+  if (!entry?.tunnel) return;
+  entry.tunnel.stop();
+  entry.tunnel = undefined;
+  entry.note = note;
+}
+
+/**
  * The active tunnel's public origin for `requestId`, or `undefined` if none
  * is up (never started, or died unexpectedly) — used by the request-form
  * route to decide whether to render a QR code. A normal `stop()` (the

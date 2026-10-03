@@ -42761,6 +42761,13 @@ function registerActiveTunnel(requestId, attempt) {
     }
   });
 }
+function discardActiveTunnel(requestId, note) {
+  const entry = active.get(requestId);
+  if (!entry?.tunnel) return;
+  entry.tunnel.stop();
+  entry.tunnel = void 0;
+  entry.note = note;
+}
 function getActiveRemoteUrl(requestId) {
   return active.get(requestId)?.tunnel?.url;
 }
@@ -45130,9 +45137,10 @@ function supportsUrlElicitation(server) {
 function supportsFormElicitation(server) {
   return getSupportedElicitationModes(server.getClientCapabilities()?.elicitation).supportsFormMode;
 }
-async function elicitUrl(server, opts) {
-  return server.elicitInput({ mode: "url", elicitationId: opts.elicitationId, url: opts.url, message: opts.message });
+async function elicitUrl(server, opts, requestOptions) {
+  return server.elicitInput({ mode: "url", elicitationId: opts.elicitationId, url: opts.url, message: opts.message }, requestOptions);
 }
+var URL_ELICITATION_ACK_TIMEOUT_MS = 3e4;
 async function sendElicitationComplete(server, elicitationId) {
   await server.notification({ method: "notifications/elicitation/complete", params: { elicitationId } });
 }
@@ -48501,12 +48509,17 @@ async function runNative(args, cwd, server) {
     }
   }
 }
+function fallbackResult(record2, localUrl, remoteNote, instruction) {
+  const fallback = { request_id: record2.id, url: localUrl, expiresAt: new Date(record2.expiresAt).toISOString() };
+  const lines = [JSON.stringify(fallback), remoteNote, instruction].filter((line) => Boolean(line));
+  return textResult(lines.join("\n"));
+}
 function registerRequestTool(server) {
   server.registerTool(
     "enigma_request",
     {
       title: "Request secrets",
-      description: "Asks the user to enter one or more secret values out of band. Uses MCP URL-mode elicitation \u2014 the MCP specification (2025-11-25) forbids form-mode elicitation for credentials and mandates URL mode (ADR-002) \u2014 falling back to a request_id for enigma_await when the client does not advertise elicitation.url. Never returns a value (ADR-001).",
+      description: "Asks the user to enter one or more secret values out of band. Uses MCP URL-mode elicitation \u2014 the MCP specification (2025-11-25) forbids form-mode elicitation for credentials and mandates URL mode (ADR-002) \u2014 falling back to a request_id and a local URL for enigma_await when the client does not advertise elicitation.url, or advertises it but declines, cancels, errors or never answers (a headless host declines automatically; the user never saw a form). Never returns a value (ADR-001).",
       inputSchema: {
         names: external_exports.array(external_exports.string()).min(1).max(10),
         reason: external_exports.string(),
@@ -48564,21 +48577,37 @@ function registerRequestTool(server) {
       const url2 = `${origin}/r/${record2.id}`;
       const remoteNote = remoteAttempt?.tunnel ? `Remote access via ${remoteAttempt.tunnel.binary} is active for this request.` : remoteAttempt?.note;
       if (!clientSupportsUrl) {
-        const fallback = { request_id: record2.id, url: url2, expiresAt: new Date(record2.expiresAt).toISOString() };
-        const lines = [
-          JSON.stringify(fallback),
+        return fallbackResult(
+          record2,
+          url2,
           remoteNote,
           "Client does not support URL-mode elicitation. Call enigma_await with this request_id once the user has submitted the form."
-        ].filter((line) => Boolean(line));
-        return textResult(lines.join("\n"));
+        );
       }
-      const result = await elicitUrl(server.server, {
-        elicitationId: record2.id,
-        url: url2,
-        message: `Enter ${args.names.join(", ")} (${args.reason})`
-      });
-      if (result.action !== "accept") {
-        return textResult(`Request cancelled for ${args.names.join(", ")}`, true);
+      let outcomeLead;
+      let timedOut2 = false;
+      try {
+        const result = await elicitUrl(
+          server.server,
+          { elicitationId: record2.id, url: url2, message: `Enter ${args.names.join(", ")} (${args.reason})` },
+          { timeout: URL_ELICITATION_ACK_TIMEOUT_MS }
+        );
+        if (result.action !== "accept") outcomeLead = `The client ${result.action === "cancel" ? "cancelled" : "declined"} the URL elicitation`;
+      } catch (err) {
+        timedOut2 = err instanceof McpError && err.code === ErrorCode.RequestTimeout;
+        outcomeLead = timedOut2 ? "The client did not acknowledge the URL elicitation in time" : "The client could not deliver the URL elicitation (error)";
+      }
+      if (outcomeLead !== void 0) {
+        const stopTunnel = Boolean(remoteAttempt?.tunnel) && !timedOut2;
+        if (stopTunnel) {
+          discardActiveTunnel(record2.id, "Remote access was not used: the URL elicitation that would have carried the public link was not delivered.");
+        }
+        return fallbackResult(
+          record2,
+          `${handle.origin}/r/${record2.id}`,
+          stopTunnel ? "Remote access was stopped for this request; the link above is local only." : void 0,
+          `${outcomeLead}, so the user was probably never shown the web form (non-interactive hosts decline automatically). The request is still open. Ask the user to open this URL in their browser, then call enigma_await with this request_id once they have submitted the form. Or call enigma_request again with ui:"native" for a system dialog (macOS).`
+        );
       }
       try {
         const outcome = await resolveRequestOutcome(record2.id, cwd);

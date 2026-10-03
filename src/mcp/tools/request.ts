@@ -1,5 +1,6 @@
 import { z } from 'zod';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { ErrorCode, McpError } from '@modelcontextprotocol/sdk/types.js';
 import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import type { Scope } from '../../core/index-store.js';
 import { loadConfig } from '../../core/config.js';
@@ -7,12 +8,12 @@ import { EnigmaError } from '../../core/errors.js';
 import { nativeRequest } from '../../native/request.js';
 import type { RequestNameResult, RequestRecord } from '../../request/store.js';
 import { RequestStore } from '../../request/store.js';
-import { attemptRemoteTunnel, registerActiveTunnel, resolveRemotePreference, takeRemoteNote } from '../../remote/index.js';
+import { attemptRemoteTunnel, discardActiveTunnel, registerActiveTunnel, resolveRemotePreference, takeRemoteNote } from '../../remote/index.js';
 import type { RemoteAttempt } from '../../remote/index.js';
 import { hasSecret } from '../../storage/manager.js';
 import type { DepositoryId } from '../../storage/interfaces.js';
 import { startServer } from '../../web/server.js';
-import { elicitUrl, sendElicitationComplete, supportsFormElicitation, supportsUrlElicitation } from '../elicit.js';
+import { elicitUrl, sendElicitationComplete, supportsFormElicitation, supportsUrlElicitation, URL_ELICITATION_ACK_TIMEOUT_MS } from '../elicit.js';
 import { resolveRequestOutcome } from '../request-outcome.js';
 import { errorResult, renderOutcome, textResult } from '../result-text.js';
 import { DEPOSITORY_ID_SCHEMA, SCOPE_SCHEMA } from '../schemas.js';
@@ -134,13 +135,27 @@ async function runNative(args: RequestArgs, cwd: string, server: McpServer): Pro
   }
 }
 
+/**
+ * The `{ request_id, url, expiresAt }` fallback text: the request stays open
+ * on its LOCAL link and the agent is told how to finish it. Used when the
+ * client has no URL-mode elicitation, and when it advertises it but the
+ * elicitation is declined, cancelled, errors, or is never answered (a headless
+ * host without an elicitation handler declines automatically, so the human
+ * never even saw a prompt; Issue #118). Never carries a tunnel's public URL.
+ */
+function fallbackResult(record: RequestRecord, localUrl: string, remoteNote: string | undefined, instruction: string): CallToolResult {
+  const fallback = { request_id: record.id, url: localUrl, expiresAt: new Date(record.expiresAt).toISOString() };
+  const lines = [JSON.stringify(fallback), remoteNote, instruction].filter((line): line is string => Boolean(line));
+  return textResult(lines.join('\n'));
+}
+
 export function registerRequestTool(server: McpServer): void {
   server.registerTool(
     'enigma_request',
     {
       title: 'Request secrets',
       description:
-        'Asks the user to enter one or more secret values out of band. Uses MCP URL-mode elicitation — the MCP specification (2025-11-25) forbids form-mode elicitation for credentials and mandates URL mode (ADR-002) — falling back to a request_id for enigma_await when the client does not advertise elicitation.url. Never returns a value (ADR-001).',
+        'Asks the user to enter one or more secret values out of band. Uses MCP URL-mode elicitation — the MCP specification (2025-11-25) forbids form-mode elicitation for credentials and mandates URL mode (ADR-002) — falling back to a request_id and a local URL for enigma_await when the client does not advertise elicitation.url, or advertises it but declines, cancels, errors or never answers (a headless host declines automatically; the user never saw a form). Never returns a value (ADR-001).',
       inputSchema: {
         names: z.array(z.string()).min(1).max(10),
         reason: z.string(),
@@ -227,23 +242,57 @@ export function registerRequestTool(server: McpServer): void {
         : remoteAttempt?.note;
 
       if (!clientSupportsUrl) {
-        const fallback = { request_id: record.id, url, expiresAt: new Date(record.expiresAt).toISOString() };
-        const lines = [
-          JSON.stringify(fallback),
+        return fallbackResult(
+          record,
+          url,
           remoteNote,
           'Client does not support URL-mode elicitation. Call enigma_await with this request_id once the user has submitted the form.',
-        ].filter((line): line is string => Boolean(line));
-        return textResult(lines.join('\n'));
+        );
       }
 
-      const result = await elicitUrl(server.server, {
-        elicitationId: record.id,
-        url,
-        message: `Enter ${args.names.join(', ')} (${args.reason})`,
-      });
+      // The client advertises URL-mode elicitation, but advertising is not
+      // delivering: a headless host (e.g. Claude Code driven over stream-json
+      // with no elicitation handler) declines at once, a client may error, and
+      // one may never answer. In every such case the human was never shown the
+      // form, so this is NOT a user cancel and the request must not be thrown
+      // away with its link (Issue #118): fall back to the local link.
+      let outcomeLead: string | undefined;
+      /** The client may simply be slow (a human reading the prompt), not absent. */
+      let timedOut = false;
+      try {
+        const result = await elicitUrl(
+          server.server,
+          { elicitationId: record.id, url, message: `Enter ${args.names.join(', ')} (${args.reason})` },
+          { timeout: URL_ELICITATION_ACK_TIMEOUT_MS },
+        );
+        if (result.action !== 'accept') outcomeLead = `The client ${result.action === 'cancel' ? 'cancelled' : 'declined'} the URL elicitation`;
+      } catch (err) {
+        // Never echo the client's error text: it is not ours to relay. Method
+        // not found, unsupported mode and a dropped transport mean the form
+        // was not delivered; a timeout means we do not know.
+        timedOut = err instanceof McpError && err.code === ErrorCode.RequestTimeout;
+        outcomeLead = timedOut
+          ? 'The client did not acknowledge the URL elicitation in time'
+          : 'The client could not deliver the URL elicitation (error)';
+      }
 
-      if (result.action !== 'accept') {
-        return textResult(`Request cancelled for ${args.names.join(', ')}`, true);
+      if (outcomeLead !== undefined) {
+        // On a definite non-delivery (decline, cancel, error) the tunnel's
+        // public link can no longer reach the human and must never reach the
+        // model's context, so it is stopped rather than offered. On a timeout
+        // an interactive user may be looking at that link right now: leave the
+        // tunnel to its normal lifecycle (it stops when the request is
+        // fulfilled or expires) rather than turn it into a link that lies.
+        const stopTunnel = Boolean(remoteAttempt?.tunnel) && !timedOut;
+        if (stopTunnel) {
+          discardActiveTunnel(record.id, 'Remote access was not used: the URL elicitation that would have carried the public link was not delivered.');
+        }
+        return fallbackResult(
+          record,
+          `${handle.origin}/r/${record.id}`,
+          stopTunnel ? 'Remote access was stopped for this request; the link above is local only.' : undefined,
+          `${outcomeLead}, so the user was probably never shown the web form (non-interactive hosts decline automatically). The request is still open. Ask the user to open this URL in their browser, then call enigma_await with this request_id once they have submitted the form. Or call enigma_request again with ui:"native" for a system dialog (macOS).`,
+        );
       }
 
       try {
