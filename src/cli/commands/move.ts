@@ -7,6 +7,8 @@ import { projectId as computeProjectId } from '../../core/project.js';
 import { appendAuditEvent, auditErrorText, auditScopeFields, classifyCleanupError } from '../../core/audit.js';
 import { DEPOSITORY_MODULES } from '../../storage/detect.js';
 import { EnigmaError } from '../../core/errors.js';
+import type { Scope } from '../../core/index-store.js';
+import { opLockScopeId, withSecretOpLock } from '../../storage/op-lock.js';
 import type { DepositoryId } from '../../storage/interfaces.js';
 
 const USAGE = 'enigma move NAME --to ID [--scope project|global]';
@@ -28,7 +30,28 @@ export async function cmdMove(argv: string[]): Promise<number> {
   const scopeFlag = parseScope(flags.scope);
   const cwd = process.cwd();
   const pid = computeProjectId(cwd);
-  const entry = resolveIndexEntry(readIndex(), name, scopeFlag, pid);
+  const probe = resolveIndexEntry(readIndex(), name, scopeFlag, pid);
+  if (!probe) {
+    throw new EnigmaError({ code: 'E_NOT_FOUND', message: `${name} not found`, secretName: name });
+  }
+
+  // Issue #125: the whole move — read, write the new copy, commit, delete the old copy, reconcile rendered copies —
+  // runs under the secret's operation lock, so no other change to NAME can land between the commit and the cleanup.
+  // The scope resolved above is pinned for the lock key and re-resolved inside it.
+  try {
+    return await withSecretOpLock(name, opLockScopeId(probe.scope, probe.projectId), () =>
+      moveLocked(name, target, probe.scope, cwd, pid),
+    );
+  } catch (err) {
+    if (err instanceof EnigmaError && err.code === 'E_LOCK_TIMEOUT' && err.message.startsWith('another change to ')) {
+      appendAuditEvent({ op: 'move', name, depository: target, actor: 'cli', ok: false, error: auditErrorText(err), ...auditScopeFields(probe) });
+    }
+    throw err;
+  }
+}
+
+async function moveLocked(name: string, target: DepositoryId, scope: Scope, cwd: string, pid: string | undefined): Promise<number> {
+  const entry = resolveIndexEntry(readIndex(), name, scope, pid);
   if (!entry) {
     throw new EnigmaError({ code: 'E_NOT_FOUND', message: `${name} not found`, secretName: name });
   }
@@ -68,14 +91,15 @@ export async function cmdMove(argv: string[]): Promise<number> {
     actor: 'cli',
     auditOp: 'move',
     skipRenderFanout: true,
+    opLockHeld: true,
   });
   const warnings = [...result.warnings];
 
   // Best-effort cleanup of the old value; the index already points at the new depository. Never delete an old
   // location the index still references: a newer commit may have reused it (a stable address such as encrypted's
-  // `<id>/NAME` or env's bare NAME), and deleting it would lose the value that commit stored. This narrows the
-  // window, it does not close it: the check is a read of the index followed by the delete, so a same-value
-  // repopulation committed in between can still be deleted (pre-existing, tracked as #125: fresh store refs).
+  // `<id>/NAME` or env's bare NAME), and deleting it would lose the value that commit stored. Between Enigma
+  // processes no such commit can land here any more — every change to NAME holds the operation lock this move
+  // holds (Issue #125); `locationReclaimed` and compare-and-delete remain as defence in depth.
   const oldModule = DEPOSITORY_MODULES.find((m) => m.id === entry.depository);
   if (oldModule) {
     await beforeCleanup?.();

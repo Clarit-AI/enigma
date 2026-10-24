@@ -300,3 +300,74 @@ export function acquireFileLock(lockPath: string, label: string = 'the lock'): L
     throw wrapAcquireError(err, lockPath);
   }
 }
+/** Default wait budget for `acquireFileLockAsync` (Issue #125). */
+export let ASYNC_LOCK_TIMEOUT_MS = 30_000;
+/** Poll interval for `acquireFileLockAsync`. */
+export let ASYNC_LOCK_RETRY_INTERVAL_MS = 25;
+
+/** Test-only: shrink the async lock's wait budget. Restore in `afterEach`. */
+export function __setAsyncLockTimingForTesting(opts: { timeoutMs?: number; retryIntervalMs?: number }): void {
+  if (opts.timeoutMs !== undefined) ASYNC_LOCK_TIMEOUT_MS = opts.timeoutMs;
+  if (opts.retryIntervalMs !== undefined) ASYNC_LOCK_RETRY_INTERVAL_MS = opts.retryIntervalMs;
+}
+
+/**
+ * `acquireFileLock` for a lock that may be HELD ACROSS AWAITS — including a
+ * Keychain, Touch ID or 1Password prompt (Issue #125, the per-secret
+ * operation lock). Same anchor, modes and errors as `acquireFileLock`; the
+ * only difference is how it waits: between attempts it yields the event
+ * loop (`setTimeout`) instead of blocking the thread (`Atomics.wait`), so a
+ * waiting MCP server keeps serving other requests.
+ *
+ * `flock(2)` binds to the open file description, so a second acquire from
+ * the SAME process on a fresh fd waits like any other process. Never
+ * re-acquire a lock this call chain already holds — that waits on itself
+ * until the timeout.
+ */
+export async function acquireFileLockAsync(
+  lockPath: string,
+  label: string = 'the lock',
+  opts: { timeoutMs?: number } = {},
+): Promise<Lock> {
+  const timeoutMs = opts.timeoutMs ?? ASYNC_LOCK_TIMEOUT_MS;
+  ensureLockDir(lockPath);
+  const addon = loadIndexLock();
+  const fd = openAnchor(lockPath);
+  const deadline = Date.now() + timeoutMs;
+  try {
+    for (;;) {
+      if (addon.tryLockSync(fd)) {
+        writeInfoMetadata(fd);
+        return {
+          release: () => {
+            try {
+              addon.unlockSync(fd);
+            } catch {
+              // best-effort: close below still runs
+            }
+            try {
+              closeSync(fd);
+            } catch {
+              // best-effort
+            }
+          },
+        };
+      }
+      if (Date.now() >= deadline) {
+        throw new EnigmaError({
+          code: 'E_LOCK_TIMEOUT',
+          message: `Could not acquire ${lockPath} within ${timeoutMs} ms; another process holds ${label}.`,
+        });
+      }
+      await new Promise((r) => setTimeout(r, ASYNC_LOCK_RETRY_INTERVAL_MS));
+    }
+  } catch (err) {
+    try {
+      closeSync(fd);
+    } catch {
+      // best-effort
+    }
+    if (err instanceof EnigmaError) throw err;
+    throw wrapAcquireError(err, lockPath);
+  }
+}

@@ -15,6 +15,11 @@
 import { existsSync, writeFileSync } from 'node:fs';
 import { __setFanoutGateForTesting, __setFanoutHooksForTesting } from '../../src/render/fanout.js';
 import { setSecret } from '../../src/storage/manager.js';
+import { __setSecretOpLockBypassForTesting } from '../../src/storage/op-lock.js';
+
+// Issue #125: FANOUT_BYPASS_OP_LOCK=1 runs without the per-secret operation lock, so the race tests can still drive
+// fan-outs of one name that overlap (the lock would serialize them). Read by this test worker only.
+if (process.env.FANOUT_BYPASS_OP_LOCK === '1') __setSecretOpLockBypassForTesting(true);
 
 const [, , cwd, name, value, goFile, signalFile] = process.argv;
 if (!cwd || !name || value === undefined) {

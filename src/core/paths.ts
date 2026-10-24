@@ -42,6 +42,27 @@ export function indexLockPath(): string {
   return join(enigmaHome(), 'index.lock');
 }
 
+/**
+ * Anchor for the per-secret operation lock (Issue #125): one per
+ * (scope id, NAME), where the scope id is `global` or the project id. Held
+ * across a whole set / rotate / move / delete (depository write -> index
+ * commit -> old-copy cleanup -> render fan-out), so two changes to one
+ * name never interleave. Hashed so a NAME or project id never forms a path.
+ */
+export function secretOpLockPath(name: string, scopeId: string): string {
+  const key = createHash('sha256').update(`${scopeId}\0${name}`).digest('hex').slice(0, 32);
+  return join(enigmaHome(), 'locks', `op-${key}.lock`);
+}
+
+/**
+ * Anchor for the `encrypted` depository's vault lock (Issue #87): held
+ * around every read-modify-write of `secrets.enc`, so two writers never
+ * drop each other's entry.
+ */
+export function vaultLockPath(): string {
+  return join(enigmaHome(), 'locks', 'vault.lock');
+}
+
 /* ------------------------------------------------------------------ *
  *  Render ledger (Issue #106)                                         *
  * ------------------------------------------------------------------ *

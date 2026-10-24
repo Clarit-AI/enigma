@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { EnigmaError } from '../../src/core/errors.js';
 import { auditLogPath } from '../../src/core/paths.js';
+import { __setSecretOpLockBypassForTesting } from '../../src/storage/op-lock.js';
 
 const SENTINEL = 'sk-sentinel-value-should-never-appear';
 
@@ -96,6 +97,7 @@ describe('storage manager', () => {
   });
 
   afterEach(() => {
+    __setSecretOpLockBypassForTesting(false);
     if (originalHome === undefined) delete process.env.ENIGMA_HOME;
     else process.env.ENIGMA_HOME = originalHome;
     rmSync(tmpHome, { recursive: true, force: true });
@@ -475,6 +477,9 @@ describe('storage manager', () => {
       return { stdout: '' };
     };
 
+    // Issue #125: the per-secret operation lock now makes the rotate below wait for the delete; bypass it to keep
+    // exercising the ref-identity guard inside deleteSecret (defence in depth).
+    __setSecretOpLockBypassForTesting(true);
     const deletePromise = deleteSecret('NAME_CHANGED', { scope: 'global', actor: 'cli' });
     await new Promise((resolve) => setImmediate(resolve));
 
