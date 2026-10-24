@@ -2,9 +2,9 @@
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-Enigma keeps secret values out of a coding agent's context window while it still gets to use them: request, store, run, and reveal, with no `get` path back to the model.
+Enigma keeps secret values out of a coding agent's context window while it still gets to use them: request, store, run, and reveal, with no `get` path back to the model. (The CLI's `enigma get` exists for humans and scripts; the read-guard blocks the agent from running it.)
 
-Status: pre-release, targeting v1. The product requirements are in [PRD.md](PRD.md); engineering context starts at [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md).
+Status: pre-release, targeting v1. Latest release: **v0.3.3** (`enigma--v0.3.3`, plugin marketplace). The product requirements are in [PRD.md](PRD.md); engineering context starts at [PROJECT_CONTEXT.md](PROJECT_CONTEXT.md).
 
 ## Scope
 
@@ -48,12 +48,30 @@ Store a key and use it, from inside a Claude Code session with the `enigma` plug
 > I need to add my OpenAI API key so I can call the API from this project.
 ```
 
-Claude Code calls `enigma_request`, which opens a local form at `http://127.0.0.1:<port>/r/<id>` (or a native macOS dialog). You type the key there, once, out of band. From then on:
+Claude Code calls `enigma_request`, which opens a local form at `http://127.0.0.1:<port>/r/<id>` (or, on macOS only, a native dialog). You type the key there, once, out of band. From then on:
 
 ```bash
 enigma run -- node scripts/call-openai.mjs   # injects OPENAI_API_KEY into the child only
 enigma list                                  # names, scopes, depositories, never values
 ```
+
+### CLI reference
+
+| Command | What it does |
+|---|---|
+| `enigma add NAME [--depository ID] [--scope project\|global] [--description TEXT] [--usage interactive\|unattended]` | Store a value you type at a hidden terminal prompt. |
+| `enigma list [--scope project\|global\|all] [--json]` | Names, scopes and depositories. Never values. |
+| `enigma remove NAME [--scope project\|global]` | Delete a secret. |
+| `enigma move NAME --to ID [--scope project\|global]` | Move a secret to another depository. |
+| `enigma run [--only A,B] [--scope project\|global] -- <command>` | Inject secrets into one child process's environment. |
+| `enigma get NAME [--scope project\|global]` | Print one value to stdout, with a warning. For humans and scripts only; the read-guard blocks the agent from running it. Prefer `enigma run`. |
+| `enigma import [PATH] [--depository ID] [--rotate] [--json]` | Import an existing `.env` file. |
+| `enigma render [NAME] [--json]` | Write project secrets into the worktree's `.env` render block (see [Rendering into `.env`](#rendering-into-env)). |
+| `enigma migrate-scope [--from PATH] [--apply] [--prune-unrecoverable]` | Re-key project-scope entries recorded before the repository-level project id (index only; never reads a value). |
+| `enigma doctor [--json]` | Platform, depositories, PATH link, missing manifest names, pending requests. |
+| `enigma install [--uninstall]` | Register the marketplace and install (or uninstall) the Claude Code plugin. |
+
+`request` and `reveal` are deliberately not CLI commands. Use the MCP tools or the `/enigma:request` and `/enigma:reveal` slash commands.
 
 ## Install
 
@@ -98,7 +116,7 @@ This registers your checkout itself as a local marketplace source, so rebuilding
 ## First request, step by step
 
 1. **Ask.** Tell the agent what you need in plain language, "add my OpenAI key," "I need a GitHub token for this repo." The `enigma` skill (bundled with the plugin) recognizes this and calls `enigma_request` with the name(s), never asking you to paste anything into chat.
-2. **Fill the form, out of band.** Claude Code opens the request URL (a local page, or a native macOS dialog if you asked for that). You pick a depository from a table showing each one's prompt profile (below) and a scope (this project, or global), type the value, and submit. The value goes straight from your browser to Enigma's local server; it is never sent back through MCP.
+2. **Fill the form, out of band.** Claude Code opens the request URL (a local page, or a native dialog if you asked for one; native dialogs are macOS-only). If your client doesn't support URL-mode elicitation, or declines, cancels or doesn't answer within 30 seconds, the agent gets the local link instead. It asks you to open it, then calls `enigma_await` to collect the names-only result. You pick a depository from a table showing each one's prompt profile (below) and a scope (this project, or global), type the value, and submit. The value goes straight from your browser to Enigma's local server; it is never sent back through MCP.
 3. **Get a names-only confirmation.** The agent's tool call returns `"Stored OPENAI_API_KEY in encrypted (project)"`, nothing else. Nothing about the value itself ever reaches the model.
 4. **Use it.** `enigma run -- <command>` injects the real value into that one child process's environment. The agent sees the child's stdout/stderr, never the injected variable. (`enigma` is on your `PATH` from your first session — see [Install](#install). If it isn't, run `enigma doctor` to see why.)
 
@@ -137,11 +155,25 @@ The **prompt profile** is what a depository costs you on every *read*. This is t
 
 (Source of truth: `promptProfile` in each `src/storage/depositories/*.ts` module. This table is generated by reading them, not copied from another document.)
 
+### Declaring a project's secrets (`.enigma.json`)
+
+A project can list the secret names it needs in `.enigma.json`, under `secrets`. Enigma compares that list against what is actually stored for this project (or globally) and reports any missing names. The `SessionStart` hook reports them, and so does `enigma doctor`. Names only; the manifest never holds a value.
+
+### Rendering into `.env`
+
+Some apps read their secrets from a `.env` file rather than from `enigma run`. `enigma render` writes this worktree's project-scope secrets into a managed `# enigma:render:begin` / `# enigma:render:end` block in that file. Every line outside the block is left byte-identical.
+
+- **Plain `enigma render`** writes every project secret held in a no-prompt depository (`env` or `encrypted`). Secrets in prompting stores (Keychain, secret-service, 1Password) are never rendered automatically the first time; `enigma render NAME` renders one explicitly.
+- **Kept current automatically.** Once a name is rendered, `add`, `remove`, `move`, `import` and the request form update its rendered line for you, without a separate `enigma render`.
+- **Configuration** lives under `render` in `.enigma.json`: `enabled` (default on), `path` (default `.env`) and an optional `names` list to narrow what gets rendered. Global-scope secrets are never rendered.
+
+The full rules (damaged blocks, symlinks, failure semantics) are in [`docs/api-contracts.md`](docs/api-contracts.md).
+
 ## What the hooks do
 
 Enigma installs three Claude Code hooks (`plugins/enigma/hooks/hooks.json`), all bundled into one file (`dist/hooks.mjs`) dispatched by event name:
 
-- **`SessionStart`** injects the *names* of secrets Enigma knows about into context, so the agent can say "I see you have `OPENAI_API_KEY` stored" without ever seeing its value.
+- **`SessionStart`** injects the *names* of secrets Enigma knows about into context, so the agent can say "I see you have `OPENAI_API_KEY` stored" without ever seeing its value. It also reports names that `.enigma.json` declares but that aren't stored, any submitted request whose result never reached the agent (with the `enigma_await` call to collect it), and the state of the `enigma` PATH link.
 - **`PreToolUse`** (the read-guard) denies a `Read`, `Grep`, `Glob`, or `Bash` call that would read a `.env` file, Enigma's config directory, the Keychain, or a 1Password item directly, and tells the agent what to call instead. It normalizes `${IFS}` word-splitting and `$'...'` ANSI-C quoting before matching, since those are the cheapest ways to dodge a plain-text pattern.
 - **`PostToolUse`** (the tripwire) scans a tool's output for the plaintext of any secret Enigma tracks and warns with `LEAK: value of NAME appeared in tool output` if one shows up. It can only warn, not redact, because Claude Code has no output-rewrite hook.
 
