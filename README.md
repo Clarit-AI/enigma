@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="assets/enigma-hero.png" alt="Enigma: a padlock between a connection line and a terminal prompt" width="100%">
+</p>
+
 # Enigma
 
 [![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
