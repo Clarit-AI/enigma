@@ -8,6 +8,7 @@
 // #87: several processes writing different names into the encrypted vault at once. Before the vault lock, each
 // read the same snapshot and the later rename dropped the others' entries.
 import { spawn } from 'node:child_process';
+import type { ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
@@ -43,10 +44,25 @@ beforeAll(async () => {
 afterAll(() => rmSync(bundleDir, { recursive: true, force: true }));
 
 let sb: Sandbox;
+// Every spawned worker, so a failed assertion cannot leave one parked forever on a `go` file that teardown removes.
+let children: ChildProcess[] = [];
 beforeEach(() => {
   sb = makeSandbox();
+  children = [];
 });
-afterEach(() => sb.cleanup());
+afterEach(async () => {
+  const live = children.filter((c) => c.exitCode === null && c.signalCode === null);
+  await Promise.all(
+    live.map(
+      (c) =>
+        new Promise<void>((r) => {
+          c.once('exit', () => r());
+          c.kill('SIGKILL');
+        }),
+    ),
+  );
+  sb.cleanup();
+});
 
 interface Run {
   exit: Promise<{ code: number | null; stderr: string }>;
@@ -58,6 +74,7 @@ function run(args: string[]): Run {
     stdio: ['ignore', 'ignore', 'pipe'],
     env: { ...process.env, ENIGMA_HOME: process.env.ENIGMA_HOME!, ENIGMA_NATIVE_DIR: NATIVE_DIR },
   });
+  children.push(child);
   let stderr = '';
   let done = false;
   child.stderr!.on('data', (c: Buffer) => (stderr += c.toString()));

@@ -3,7 +3,9 @@
  *
  * Every change to one secret — `setSecret` (set / rotate / import), `deleteSecret` and `enigma move` — holds this
  * lock across its WHOLE sequence: depository write -> index commit -> old-copy cleanup -> render fan-out. Two
- * changes to the same (scope id, NAME) therefore never interleave, in any depository. That closes the move-cleanup
+ * changes to the same (scope id, NAME) therefore never interleave, in any depository. Exception: an import entry
+ * skips its own fan-out (the batch renders after the whole batch commits, outside this lock), so a change racing
+ * the import between that entry's commit and the batch fan-out can leave a rendered line stale or missing (#133). That closes the move-cleanup
  * data loss: a cleanup can no longer delete a copy that a concurrent writer stored at the same address (env's bare
  * NAME, encrypted's `<id>/NAME`) between its "still referenced?" read and its delete, because that writer cannot
  * run until the cleanup is done.
