@@ -42353,7 +42353,7 @@ var StdioServerTransport = class {
 };
 
 // src/core/version.ts
-var ENIGMA_VERSION = true ? "0.3.3" : "unknown";
+var ENIGMA_VERSION = true ? "0.3.4" : "unknown";
 
 // src/core/errors.ts
 var EnigmaError = class _EnigmaError extends Error {
