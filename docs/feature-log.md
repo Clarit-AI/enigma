@@ -2,7 +2,14 @@
 
 ## Completed
 
-### `v0.3.3` — prepared 2026-10-02 (not yet tagged: `enigma--v0.3.3` is pushed only at release)
+### Unreleased
+
+Two ways a stored secret could disappear while its name stayed in the index (`E_NOT_FOUND` on the next read).
+
+- Changes to one secret no longer interleave. `set`, `add --rotate`, `move` and `remove` of one name hold a per-secret lock for their whole sequence (write, index commit, old-copy cleanup, render fan-out), and `import` holds it per entry for the write and index commit (its batch render fan-out runs outside the lock; #133), so a `move`'s cleanup can no longer delete a copy that another writer stored at the same address. A second change to the same name waits, and after 30 s fails with `E_LOCK_TIMEOUT` naming the secret; different names never wait on each other. It also makes different commands changing one name behave like sequential ones for the render fan-out (Issue #125; departs from the issue's "fresh store refs" proposal, which cannot protect a `.env` value, whose address is the variable name itself).
+- Two processes storing different names in the `encrypted` depository at once no longer drop one another's entry: the vault's read-modify-write runs under a lock (Issue #87).
+
+### `v0.3.3` — shipped 2026-10-03 as `enigma--v0.3.3`
 
 Fixes for credential prompts found in real use (a headless host never shows the web form; native dialogs for several names were confusing), and rendered copies that stay current.
 
@@ -114,7 +121,7 @@ critiqued in `v0-3-0-plan-critique`; post-release resync in `v0-3-0-resync`.
 - Read-guard rule taxonomy, comments/docs only, no behavior change (Issues #46, #48): `src/hooks/read-guard.ts`'s header comment now names the two structurally different rule shapes in the file (SCAN rules, which examine every token and are safe under over-splitting; HEAD rules, keyed to a fragment's first token(s), which are not — this is what made round 4's `echo ';' $NAME` bypass possible after three rounds where "more splitting, more denial" held), states the segmentation invariant `matchQuoteSpan`/`splitSegments` guarantee (a quote span that pairs successfully can never straddle a segment boundary, because the quote check runs before the separator check at every position) and why `tokenize` and `splitSegments` deliberately slice a matched span differently, and records two decisions as decisions rather than open gaps: a displaced head on `enigma get`/`security find-generic-password`/`op read` is not a functioning bypass because it corrupts the real CLI's own `argv[0]` dispatch too (verified against `src/cli/index.ts`), and backslash escaping outside `$'...'` remains an accepted, pre-existing gap. `docs/SECURITY.md` and `docs/api-contracts.md` §5 were checked against the updated comment and found still accurate; neither needed a change.
 
 ## Known Tech Debt
-- **The encrypted depository has its own unlocked `secrets.enc` read-modify-write path** (Issue [#87](https://github.com/Clarit-AI/enigma/issues/87)). Issue #66's `flock(2)` lock serializes index writes only; concurrent encrypted-value durability is not established. `set()` and `deleteIfUnchanged()` in `src/storage/depositories/encrypted.ts` read the whole vault, patch one entry, and write it back with no exclusion — two concurrent writers lose the earlier entry, while its name still lands in the locked index, leaving an entry that `resolve()` reports as `E_NOT_FOUND`. The index-lock tests prove index serialization, not vault durability, and neither #66 nor #70's same-reference rotation work covers this.
+- ~~**The encrypted depository has its own unlocked `secrets.enc` read-modify-write path** (Issue [#87](https://github.com/Clarit-AI/enigma/issues/87)).~~ Fixed: `locks/vault.lock` (see Unreleased).
 - **leak-fence fixtures are written into the real `src/` tree** (Issue [#88](https://github.com/Clarit-AI/enigma/issues/88)), which forces a cross-test name-based skip in `reason-field-surfaces.test.ts`'s walker. The race is mitigated rather than eliminated, and the same issue tracks the one MCP integration setup timeout seen across ten full parallel runs on PR #76. A later passing run does not disprove either. Kept as a separate follow-up from the repository-identity fix; no blanket parallelism disable or retry-to-green policy has been approved.
 - `docs/feature-log.md` still has not backfilled the ~19 merged PRs between the bootstrap and Issue #15.
 - ~~`docs/api-contracts.md` §3 documents `enigma request`/`enigma reveal` as CLI commands...~~ Fixed by Issue #45 (see Completed).

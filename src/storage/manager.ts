@@ -25,6 +25,7 @@ import { DEPOSITORY_MODULES } from './detect.js';
 import { checkEnvGitignore } from './depositories/env.js';
 import { fanOutRemove, reconcileAfterCommit } from '../render/fanout.js';
 import type { CommitIdentity } from '../render/fanout.js';
+import { opLockScopeId, withSecretOpLock } from './op-lock.js';
 import type { Depository, DepositoryContext, DepositoryId } from './interfaces.js';
 
 function getDepositoryModule(id: DepositoryId) {
@@ -109,6 +110,8 @@ export interface SetSecretOptions {
   auditOp?: AuditEvent['op'];
   /** Issue #108: do not fan out to rendered copies; the caller will, after its own batch commits (`enigma import`). */
   skipRenderFanout?: boolean;
+  /** Issue #125: the caller already holds this secret's operation lock (`enigma move`); do not take it again. */
+  opLockHeld?: boolean;
 }
 
 export interface SetSecretResult {
@@ -118,7 +121,33 @@ export interface SetSecretResult {
   commit: CommitIdentity;
 }
 
+let beforeIndexCommit: (() => Promise<void> | void) | undefined;
+
+/** Test-only: runs after the depository write and before the index commit, so a test can race a writer exactly there (Issue #125). */
+export function __setSecretBeforeCommitHookForTesting(fn: (() => Promise<void> | void) | undefined): void {
+  beforeIndexCommit = fn;
+}
+
+/**
+ * Store a secret (set, rotate, or one entry of an import). Issue #125: the whole write -> commit -> cleanup ->
+ * fan-out sequence runs under this secret's operation lock (`src/storage/op-lock.ts`), so it never interleaves with
+ * another change to the same name.
+ */
 export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult> {
+  if (opts.opLockHeld) return setSecretLocked(opts);
+  const pid = opts.scope === 'project' ? computeProjectId(opts.cwd ?? process.cwd()) : undefined;
+  try {
+    return await withSecretOpLock(opts.name, opLockScopeId(opts.scope, pid), () => setSecretLocked(opts));
+  } catch (err) {
+    if (err instanceof EnigmaError && err.code === 'E_LOCK_TIMEOUT' && err.message.startsWith('another change to ')) {
+      const projectPath = opts.scope === 'project' || opts.depository === 'env' ? findProjectPath(opts.cwd ?? process.cwd()) : undefined;
+      appendAuditEvent({ op: opts.auditOp ?? 'set', name: opts.name, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err), ...auditScopeFields({ scope: opts.scope, projectId: pid, projectPath }) });
+    }
+    throw err;
+  }
+}
+
+async function setSecretLocked(opts: SetSecretOptions): Promise<SetSecretResult> {
   // Issue #80: computed before the first refusal site so every audit line —
   // including an early validateName/E_SCOPE_INVALID refusal — carries the
   // project attribution. Pure fs reads of opts.cwd, no side effects.
@@ -221,6 +250,7 @@ export async function setSecret(opts: SetSecretOptions): Promise<SetSecretResult
   // inside the lock, where the delta sees the post-acquire index. Captured
   // for the post-commit cleanup below; the pre-lock `existing` may be stale.
   let displaced: IndexEntry | undefined;
+  await beforeIndexCommit?.();
   // Issue #108: the entry as actually committed — identity of THIS commit for the render fan-out.
   let committed: IndexEntry = entry;
   try {
@@ -355,8 +385,27 @@ export interface DeleteSecretResult {
   warnings: string[];
 }
 
+/**
+ * Delete a secret. Issue #125: the depository delete, index removal and render strip run under the secret's
+ * operation lock. The scope is resolved once before the lock (D1.5 shadowing for an omitted scope) and then pinned,
+ * so the lock key and the entry removed are always the same secret.
+ */
 export async function deleteSecret(name: string, opts: DeleteSecretOptions): Promise<DeleteSecretResult> {
   const pid = opts.cwd ? computeProjectId(opts.cwd) : undefined;
+  const { removed: target } = removeIndexEntry(readIndex(), name, opts.scope, pid);
+  try {
+    return await withSecretOpLock(name, opLockScopeId(target.scope, target.projectId), () =>
+      deleteSecretLocked(name, { ...opts, scope: target.scope }, pid),
+    );
+  } catch (err) {
+    if (err instanceof EnigmaError && err.code === 'E_LOCK_TIMEOUT' && err.message.startsWith('another change to ')) {
+      appendAuditEvent({ op: 'remove', name, depository: target.depository, actor: opts.actor, ok: false, error: auditErrorText(err), ...auditScopeFields(target) });
+    }
+    throw err;
+  }
+}
+
+async function deleteSecretLocked(name: string, opts: DeleteSecretOptions, pid: string | undefined): Promise<DeleteSecretResult> {
   const index = readIndex();
   const { removed } = removeIndexEntry(index, name, opts.scope, pid);
 

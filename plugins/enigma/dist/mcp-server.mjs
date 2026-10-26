@@ -43140,6 +43140,13 @@ function secretsPath() {
 function indexLockPath() {
   return join2(enigmaHome(), "index.lock");
 }
+function secretOpLockPath(name, scopeId) {
+  const key = createHash2("sha256").update(`${scopeId}\0${name}`).digest("hex").slice(0, 32);
+  return join2(enigmaHome(), "locks", `op-${key}.lock`);
+}
+function vaultLockPath() {
+  return join2(enigmaHome(), "locks", "vault.lock");
+}
 function renderLedgerPath() {
   return join2(enigmaHome(), "render-ledger.json");
 }
@@ -43439,6 +43446,48 @@ function acquireFileLock(lockPath, label = "the lock") {
     throw wrapAcquireError(err, lockPath);
   }
 }
+var ASYNC_LOCK_TIMEOUT_MS = 3e4;
+var ASYNC_LOCK_RETRY_INTERVAL_MS = 25;
+async function acquireFileLockAsync(lockPath, label = "the lock", opts = {}) {
+  const timeoutMs = opts.timeoutMs ?? ASYNC_LOCK_TIMEOUT_MS;
+  ensureLockDir(lockPath);
+  const addon = loadIndexLock();
+  const fd = openAnchor(lockPath);
+  const deadline = Date.now() + timeoutMs;
+  try {
+    for (; ; ) {
+      if (addon.tryLockSync(fd)) {
+        writeInfoMetadata(fd);
+        return {
+          release: () => {
+            try {
+              addon.unlockSync(fd);
+            } catch {
+            }
+            try {
+              closeSync(fd);
+            } catch {
+            }
+          }
+        };
+      }
+      if (Date.now() >= deadline) {
+        throw new EnigmaError({
+          code: "E_LOCK_TIMEOUT",
+          message: `Could not acquire ${lockPath} within ${timeoutMs} ms; another process holds ${label}.`
+        });
+      }
+      await new Promise((r) => setTimeout(r, ASYNC_LOCK_RETRY_INTERVAL_MS));
+    }
+  } catch (err) {
+    try {
+      closeSync(fd);
+    } catch {
+    }
+    if (err instanceof EnigmaError) throw err;
+    throw wrapAcquireError(err, lockPath);
+  }
+}
 
 // src/core/index-store.ts
 var EMPTY_INDEX = { version: 1, entries: [] };
@@ -43632,16 +43681,26 @@ function readFailed() {
     depository: "encrypted"
   });
 }
+function withVaultLock(fn) {
+  const lock = acquireFileLock(vaultLockPath(), "the encrypted vault lock");
+  try {
+    return fn();
+  } finally {
+    lock.release();
+  }
+}
 function createEncryptedDepository() {
   return {
     id: "encrypted",
     promptProfile: "none",
     async set(ref, value) {
-      const key = getOrCreateKey();
-      const file2 = readSecretsFile();
-      file2.entries[ref] = encryptValue(value, key);
-      writeSecretsFile(file2);
-      return ref;
+      return withVaultLock(() => {
+        const key = getOrCreateKey();
+        const file2 = readSecretsFile();
+        file2.entries[ref] = encryptValue(value, key);
+        writeSecretsFile(file2);
+        return ref;
+      });
     },
     async resolve(ref) {
       const key = readKey();
@@ -43656,11 +43715,13 @@ function createEncryptedDepository() {
       }
     },
     async delete(ref) {
-      const file2 = readSecretsFile();
-      if (ref in file2.entries) {
-        delete file2.entries[ref];
-        writeSecretsFile(file2);
-      }
+      withVaultLock(() => {
+        const file2 = readSecretsFile();
+        if (ref in file2.entries) {
+          delete file2.entries[ref];
+          writeSecretsFile(file2);
+        }
+      });
     },
     // Issue #70: compare-and-delete in one synchronous read-modify-write. If
     // the key's content can't be verified against the captured displaced
@@ -43668,19 +43729,21 @@ function createEncryptedDepository() {
     // conservative answer is to leave it — a skipped cleanup leaks an orphan,
     // a wrong delete loses a live value.
     async deleteIfUnchanged(ref, expectedValue) {
-      const key = readKey();
-      if (!key) return false;
-      const file2 = readSecretsFile();
-      const entry = file2.entries[ref];
-      if (!entry) return false;
-      try {
-        if (decryptEntry(entry, key) !== expectedValue) return false;
-      } catch {
-        return false;
-      }
-      delete file2.entries[ref];
-      writeSecretsFile(file2);
-      return true;
+      return withVaultLock(() => {
+        const key = readKey();
+        if (!key) return false;
+        const file2 = readSecretsFile();
+        const entry = file2.entries[ref];
+        if (!entry) return false;
+        try {
+          if (decryptEntry(entry, key) !== expectedValue) return false;
+        } catch {
+          return false;
+        }
+        delete file2.entries[ref];
+        writeSecretsFile(file2);
+        return true;
+      });
     },
     async has(ref) {
       return ref in readSecretsFile().entries;
@@ -45337,6 +45400,33 @@ async function reconcileAfterCommit(input2) {
   });
 }
 
+// src/storage/op-lock.ts
+function opLockScopeId(scope, projectId2) {
+  return scope === "global" ? "global" : `project:${projectId2 ?? ""}`;
+}
+var bypass = false;
+async function withSecretOpLock(name, scopeId, fn) {
+  if (bypass) return fn();
+  let lock;
+  try {
+    lock = await acquireFileLockAsync(secretOpLockPath(name, scopeId), `the lock for ${name}`);
+  } catch (err) {
+    if (err instanceof EnigmaError && err.code === "E_LOCK_TIMEOUT") {
+      throw new EnigmaError({
+        code: "E_LOCK_TIMEOUT",
+        message: `another change to ${name} is in progress; try again when it finishes`,
+        secretName: name
+      });
+    }
+    throw err;
+  }
+  try {
+    return await fn();
+  } finally {
+    lock.release();
+  }
+}
+
 // src/storage/manager.ts
 function getDepositoryModule(id) {
   const mod = DEPOSITORY_MODULES.find((m) => m.id === id);
@@ -45374,7 +45464,21 @@ function strictlyAfter(stamp, previous) {
   const prev = Date.parse(previous);
   return prev >= Date.parse(stamp) ? new Date(prev + 1).toISOString() : stamp;
 }
+var beforeIndexCommit;
 async function setSecret(opts) {
+  if (opts.opLockHeld) return setSecretLocked(opts);
+  const pid = opts.scope === "project" ? projectId(opts.cwd ?? process.cwd()) : void 0;
+  try {
+    return await withSecretOpLock(opts.name, opLockScopeId(opts.scope, pid), () => setSecretLocked(opts));
+  } catch (err) {
+    if (err instanceof EnigmaError && err.code === "E_LOCK_TIMEOUT" && err.message.startsWith("another change to ")) {
+      const projectPath = opts.scope === "project" || opts.depository === "env" ? findProjectPath(opts.cwd ?? process.cwd()) : void 0;
+      appendAuditEvent({ op: opts.auditOp ?? "set", name: opts.name, depository: opts.depository, actor: opts.actor, ok: false, error: auditErrorText(err), ...auditScopeFields({ scope: opts.scope, projectId: pid, projectPath }) });
+    }
+    throw err;
+  }
+}
+async function setSecretLocked(opts) {
   const needsProjectPath = opts.scope === "project" || opts.depository === "env";
   const projectPath = needsProjectPath ? findProjectPath(opts.cwd ?? process.cwd()) : void 0;
   const pid = opts.scope === "project" ? projectId(opts.cwd ?? process.cwd()) : void 0;
@@ -45442,6 +45546,7 @@ async function setSecret(opts) {
     updatedAt: now
   };
   let displaced;
+  await beforeIndexCommit?.();
   let committed = entry;
   try {
     mutateIndex((current) => {
@@ -45515,6 +45620,21 @@ function listSecrets(opts = {}) {
 }
 async function deleteSecret(name, opts) {
   const pid = opts.cwd ? projectId(opts.cwd) : void 0;
+  const { removed: target } = removeIndexEntry(readIndex(), name, opts.scope, pid);
+  try {
+    return await withSecretOpLock(
+      name,
+      opLockScopeId(target.scope, target.projectId),
+      () => deleteSecretLocked(name, { ...opts, scope: target.scope }, pid)
+    );
+  } catch (err) {
+    if (err instanceof EnigmaError && err.code === "E_LOCK_TIMEOUT" && err.message.startsWith("another change to ")) {
+      appendAuditEvent({ op: "remove", name, depository: target.depository, actor: opts.actor, ok: false, error: auditErrorText(err), ...auditScopeFields(target) });
+    }
+    throw err;
+  }
+}
+async function deleteSecretLocked(name, opts, pid) {
   const index = readIndex();
   const { removed } = removeIndexEntry(index, name, opts.scope, pid);
   const depository = createDepository(removed.depository, { projectPath: projectPathFor(removed, opts.cwd) });

@@ -14,6 +14,7 @@ import { buildRenderPlan, executeRender } from '../../../src/render/render.js';
 import { commitImport } from '../../../src/storage/import-commit.js';
 import { parseDotEnv } from '../../../src/storage/dotenv-file.js';
 import { deleteSecret, setSecret } from '../../../src/storage/manager.js';
+import { __setSecretOpLockBypassForTesting } from '../../../src/storage/op-lock.js';
 import type { FakeStore, Sandbox } from './fanout-helpers.js';
 import { block, installFakePromptingStore, makeRepo, makeSandbox, readEnv, seedTarget } from './fanout-helpers.js';
 
@@ -23,6 +24,9 @@ let priorCwd: string;
 let stderr: ReturnType<typeof vi.spyOn>;
 
 beforeEach(() => {
+  // Issue #125: these suites drive cross-command interleavings that the per-secret operation lock now prevents;
+  // the render fan-out's Rules A-C stay as defence in depth, so they keep their tests with the lock bypassed.
+  __setSecretOpLockBypassForTesting(true);
   sb = makeSandbox();
   priorCwd = process.cwd();
   vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
@@ -30,6 +34,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  __setSecretOpLockBypassForTesting(false);
   process.chdir(priorCwd);
   fake?.restore();
   fake = undefined;

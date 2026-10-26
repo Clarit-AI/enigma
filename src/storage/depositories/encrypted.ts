@@ -1,7 +1,8 @@
 import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { EnigmaError } from '../../core/errors.js';
-import { keyPath, secretsPath } from '../../core/paths.js';
+import { keyPath, secretsPath, vaultLockPath } from '../../core/paths.js';
+import { acquireFileLock } from '../../core/file-lock.js';
 import { readJsonFile, writeJsonFileAtomic } from '../../core/secure-file.js';
 import type { Depository, DepositoryModule } from '../interfaces.js';
 
@@ -69,17 +70,34 @@ function readFailed(): never {
   });
 }
 
+/**
+ * Issue #87: every read-modify-write of `secrets.enc` (and first-use key creation) runs under one interprocess
+ * lock. Without it two writers each read the same snapshot and the later `rename` drops the earlier one's entry,
+ * leaving an index entry that resolves to `E_NOT_FOUND`. The section is synchronous and short; reads stay
+ * lock-free because `writeJsonFileAtomic` never exposes a torn file.
+ */
+function withVaultLock<T>(fn: () => T): T {
+  const lock = acquireFileLock(vaultLockPath(), 'the encrypted vault lock');
+  try {
+    return fn();
+  } finally {
+    lock.release();
+  }
+}
+
 function createEncryptedDepository(): Depository {
   return {
     id: 'encrypted',
     promptProfile: 'none',
 
     async set(ref, value) {
-      const key = getOrCreateKey();
-      const file = readSecretsFile();
-      file.entries[ref] = encryptValue(value, key);
-      writeSecretsFile(file);
-      return ref;
+      return withVaultLock(() => {
+        const key = getOrCreateKey();
+        const file = readSecretsFile();
+        file.entries[ref] = encryptValue(value, key);
+        writeSecretsFile(file);
+        return ref;
+      });
     },
 
     async resolve(ref) {
@@ -96,11 +114,13 @@ function createEncryptedDepository(): Depository {
     },
 
     async delete(ref) {
-      const file = readSecretsFile();
-      if (ref in file.entries) {
-        delete file.entries[ref];
-        writeSecretsFile(file);
-      }
+      withVaultLock(() => {
+        const file = readSecretsFile();
+        if (ref in file.entries) {
+          delete file.entries[ref];
+          writeSecretsFile(file);
+        }
+      });
     },
 
     // Issue #70: compare-and-delete in one synchronous read-modify-write. If
@@ -109,19 +129,21 @@ function createEncryptedDepository(): Depository {
     // conservative answer is to leave it — a skipped cleanup leaks an orphan,
     // a wrong delete loses a live value.
     async deleteIfUnchanged(ref, expectedValue) {
-      const key = readKey();
-      if (!key) return false;
-      const file = readSecretsFile();
-      const entry = file.entries[ref];
-      if (!entry) return false;
-      try {
-        if (decryptEntry(entry, key) !== expectedValue) return false;
-      } catch {
-        return false;
-      }
-      delete file.entries[ref];
-      writeSecretsFile(file);
-      return true;
+      return withVaultLock(() => {
+        const key = readKey();
+        if (!key) return false;
+        const file = readSecretsFile();
+        const entry = file.entries[ref];
+        if (!entry) return false;
+        try {
+          if (decryptEntry(entry, key) !== expectedValue) return false;
+        } catch {
+          return false;
+        }
+        delete file.entries[ref];
+        writeSecretsFile(file);
+        return true;
+      });
     },
 
     async has(ref) {

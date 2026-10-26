@@ -58,7 +58,7 @@ function spawnWorker(cwd: string, name: string, value: string, gate?: { goFile: 
   const args = [workerPath, cwd, name, value, ...(gate ? [gate.goFile, gate.signalFile] : [])];
   const child = spawn(process.execPath, args, {
     stdio: ['ignore', 'pipe', 'pipe'],
-    env: { ...process.env, ENIGMA_HOME: process.env.ENIGMA_HOME!, ENIGMA_NATIVE_DIR: NATIVE_DIR, ...extraEnv },
+    env: { ...process.env, ENIGMA_HOME: process.env.ENIGMA_HOME!, ENIGMA_NATIVE_DIR: NATIVE_DIR, FANOUT_BYPASS_OP_LOCK: '1', ...extraEnv },
   });
   let stdout = '';
   let stderr = '';
