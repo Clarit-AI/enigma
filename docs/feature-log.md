@@ -2,12 +2,13 @@
 
 ## Completed
 
-### Unreleased
+### `v0.3.4` — shipped 2026-10-25 as `enigma--v0.3.4`
 
-Two ways a stored secret could disappear while its name stayed in the index (`E_NOT_FOUND` on the next read).
+Two ways a stored secret could disappear while its name stayed in the index (`E_NOT_FOUND` on the next read), plus dependency security fixes.
 
 - Changes to one secret no longer interleave. `set`, `add --rotate`, `move` and `remove` of one name hold a per-secret lock for their whole sequence (write, index commit, old-copy cleanup, render fan-out), and `import` holds it per entry for the write and index commit (its batch render fan-out runs outside the lock; #133), so a `move`'s cleanup can no longer delete a copy that another writer stored at the same address. A second change to the same name waits, and after 30 s fails with `E_LOCK_TIMEOUT` naming the secret; different names never wait on each other. It also makes different commands changing one name behave like sequential ones for the render fan-out (Issue #125; departs from the issue's "fresh store refs" proposal, which cannot protect a `.env` value, whose address is the variable name itself).
 - Two processes storing different names in the `encrypted` depository at once no longer drop one another's entry: the vault's read-modify-write runs under a lock (Issue #87).
+- Dependencies: `@modelcontextprotocol/sdk` 1.30.0 → 1.32.2 and `zod` 4.6.5 → 4.6.7 (both bundled into `dist/mcp-server.mjs`), plus lockfile-only fixes for vite, vitest, body-parser, fast-uri, hono, ip-address and source-map-js; `npm audit` reports 0 vulnerabilities (PR #131).
 
 ### `v0.3.3` — shipped 2026-10-03 as `enigma--v0.3.3`
 
