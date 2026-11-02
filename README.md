@@ -6,7 +6,7 @@
 
 <div align="center">
 
-[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Clarit-AI/enigma) ![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/Clarit-AI/enigma?logo=CodeRabbit&logoColor=%23FFFFFF&color=%23FF570A) [![Built with Showrunner](https://svg.khaentertainment.com/badge.svg?gold=0)](https://svg.khaentertainment.com/go)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/Clarit-AI/enigma) ![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/Clarit-AI/enigma?logo=CodeRabbit&logoColor=%23FFFFFF&color=%23FF570A) [![Built with Showrunner](https://svg.khaentertainment.com/badge.svg?gold=0&project=Clarit-AI/enigma)](https://svg.khaentertainment.com/go?project=Clarit-AI/enigma)
 
 </div>
 
