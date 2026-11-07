@@ -14,6 +14,7 @@ import { parseDotEnv, removeDotEnvEntries } from './dotenv-file.js';
 import type { ParsedDotEnvEntry } from './dotenv-file.js';
 import type { DepositoryId } from './interfaces.js';
 import { setSecret } from './manager.js';
+import { OpLocksError, acquireSecretOpLocks, opLockScopeId } from './op-lock.js';
 import { isAutoRenderable, reconcileAfterCommit } from '../render/fanout.js';
 import type { CommitIdentity } from '../render/fanout.js';
 
@@ -161,8 +162,61 @@ function ambiguousValueError(entry: ParsedDotEnvEntry, envFilePath: string): Eni
  *   `warnings` array on every run — logging it per-import would just
  *   duplicate that, not add a record of anything that could otherwise go
  *   unseen.
+ * - A batch that cannot take its operation locks (Issue #133) IS audited, once,
+ *   for the name it stopped at: nothing was stored and nothing else records it,
+ *   the same reasoning as the ambiguous-value refusal. `setSecret` writes the
+ *   same line when its own single lock times out.
+ *
+ * Locking (Issue #133): the whole batch, every store, the rewrite and the
+ * render fan-out, runs under the operation lock of every entry's name
+ * (`acquireSecretOpLocks`, sorted order, one shared timeout), so a concurrent
+ * change to one of those names runs entirely before or entirely after the
+ * import. If the locks can't be taken, nothing is stored and the result
+ * reports the blocked name under `failed` (it is never thrown: the web route
+ * reads a throw as "outcome unknown", which would be false here).
  */
 export async function commitImport(opts: ImportCommitOptions): Promise<ImportCommitResult> {
+  const pid = opts.scope === 'project' ? computeProjectId(opts.cwd) : undefined;
+  let locks: { release(): void };
+  try {
+    locks = await acquireSecretOpLocks(
+      opts.entries.map((e) => e.name),
+      opLockScopeId(opts.scope, pid),
+    );
+  } catch (err) {
+    if (!(err instanceof OpLocksError)) throw err;
+    const cause = err.cause;
+    const failure: ImportCommitFailure = {
+      name: err.secretName,
+      errorCode: cause instanceof EnigmaError ? cause.code : 'E_UNKNOWN',
+      message: cause instanceof EnigmaError ? cause.message : undefined,
+    };
+    appendAuditEvent({
+      op: 'import',
+      name: err.secretName,
+      depository: opts.depository,
+      actor: opts.actor,
+      ok: false,
+      error: auditErrorText(cause),
+      ...auditScopeFields({ scope: opts.scope, projectId: pid, projectPath: opts.projectPath }),
+    });
+    return {
+      succeeded: [],
+      failed: [failure],
+      notAttempted: opts.entries.map((e) => e.name).filter((name) => name !== err.secretName),
+      skippedMismatch: [],
+      fileRewritten: false,
+      warnings: checkEnvGitignore(opts.projectPath),
+    };
+  }
+  try {
+    return await commitImportLocked(opts);
+  } finally {
+    locks.release();
+  }
+}
+
+async function commitImportLocked(opts: ImportCommitOptions): Promise<ImportCommitResult> {
   const stored: StoredEntry[] = [];
   const succeeded: string[] = [];
   const failed: ImportCommitFailure[] = [];
@@ -194,6 +248,7 @@ export async function commitImport(opts: ImportCommitOptions): Promise<ImportCom
       }
       // Issue #108: no render fan-out per entry. An import that aborts must leave the file genuinely untouched
       // (the loud-abort contract), so rendering waits until the whole batch, rewrite included, has committed.
+      // Issue #133: `commitImport` already holds this name's operation lock for the whole batch.
       const result = await setSecret({
         name: entry.name,
         value: entry.value,
@@ -205,6 +260,7 @@ export async function commitImport(opts: ImportCommitOptions): Promise<ImportCom
         createVault: opts.createVault,
         auditOp: 'import',
         skipRenderFanout: true,
+        opLockHeld: true,
       });
       stored.push({ name: entry.name, value: entry.value, commit: result.commit, isNew: !result.rotated });
       succeeded.push(entry.name);

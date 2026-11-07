@@ -4,6 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { __setFanoutHooksForTesting } from '../../../../src/render/fanout.js';
+import { __setAsyncLockTimingForTesting, acquireFileLockAsync } from '../../../../src/core/file-lock.js';
+import { secretOpLockPath } from '../../../../src/core/paths.js';
+import { projectId } from '../../../../src/core/project.js';
+import { opLockScopeId } from '../../../../src/storage/op-lock.js';
 
 
 /** Mirrors request-form.test.ts: keeps `1password` availability deterministic regardless of the host machine. */
@@ -49,6 +53,7 @@ describe('GET/POST /i/:id', () => {
 
   afterEach(async () => {
     __setFanoutHooksForTesting(undefined);
+    __setAsyncLockTimingForTesting({ timeoutMs: 30_000, retryIntervalMs: 25 });
     await stopServer();
     RequestStore.__resetForTests();
     process.chdir(originalCwd);
@@ -167,6 +172,30 @@ describe('GET/POST /i/:id', () => {
 
     const stored = listSecrets({ scope: 'all', cwd: tmpProject });
     expect(stored.map((e) => e.name)).toEqual(['OPENAI_API_KEY']);
+  });
+
+  it('POST while another change holds a name\'s operation lock reports that name as failed, not as an unknown outcome, and stores nothing (Issue #133)', async () => {
+    const original = 'OPENAI_API_KEY=sk-abc\n';
+    writeFileSync(envPath(), original);
+    const record = RequestStore.create({ kind: 'import', names: ['OPENAI_API_KEY'], values: { OPENAI_API_KEY: 'sk-abc' }, envFilePath: envPath() });
+    __setAsyncLockTimingForTesting({ timeoutMs: 200, retryIntervalMs: 10 });
+    const held = await acquireFileLockAsync(secretOpLockPath('OPENAI_API_KEY', opLockScopeId('project', projectId(tmpProject))), 'test holder');
+
+    let resp: Response;
+    try {
+      resp = await fetch(`${origin}/i/${record.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+      });
+    } finally {
+      held.release();
+    }
+
+    expect(resp.status).toBe(200);
+    expect(RequestStore.get(record.id)?.results).toEqual([{ name: 'OPENAI_API_KEY', ok: false, errorCode: 'E_LOCK_TIMEOUT' }]);
+    expect(readFileSync(envPath(), 'utf8')).toBe(original);
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
   });
 
   it('POST refuses an ambiguous value carried in via the picker, WITH THE SAME REASON TEXT the direct --depository path surfaces (Issue #13 review, round 4, finding 2 — a test whose title claims parity must assert it)', async () => {
