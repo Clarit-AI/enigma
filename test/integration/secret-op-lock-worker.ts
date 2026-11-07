@@ -9,10 +9,20 @@
 //                                                                         its depository write and waits for goFile
 //                                                                         BEFORE its index commit (op lock held)
 //   secret-op-lock-worker move <cwd> <name> <to>                       — `enigma move NAME --to <to> --scope project`
+//   secret-op-lock-worker import <cwd> <sourceFile> <content> <count>  — <count> times: write <content> to
+//                                                                         <sourceFile>, then `commitImport` it into
+//                                                                         encrypted with rotate (Issue #133). A
+//                                                                         failed entry exits 1 with `ERR <code>`.
+//                                                                         LOCK_TIMEOUT_MS shortens the op-lock wait;
+//                                                                         LOCK_STEP_MS pauses between batch locks.
 //
 // Exits 0 on success; on failure prints `ERR <code>` (never a value) and exits 1.
 import { existsSync, writeFileSync } from 'node:fs';
 import { cmdMove } from '../../src/cli/commands/move.js';
+import { __setAsyncLockTimingForTesting } from '../../src/core/file-lock.js';
+import { parseDotEnv } from '../../src/storage/dotenv-file.js';
+import { commitImport } from '../../src/storage/import-commit.js';
+import { __setOpLocksStepDelayForTesting } from '../../src/storage/op-lock.js';
 import { encryptedDepositoryModule } from '../../src/storage/depositories/encrypted.js';
 import { __setSecretBeforeCommitHookForTesting, setSecret } from '../../src/storage/manager.js';
 import type { DepositoryId } from '../../src/storage/interfaces.js';
@@ -43,7 +53,30 @@ async function main(): Promise<number> {
     process.chdir(cwd);
     return cmdMove([name, '--to', to, '--scope', 'project']);
   }
-  process.stderr.write('usage: secret-op-lock-worker vault|set|move ...\n');
+  if (mode === 'import') {
+    const [cwd, sourceFile, content, count] = rest as [string, string, string, string];
+    if (process.env.LOCK_TIMEOUT_MS) __setAsyncLockTimingForTesting({ timeoutMs: Number(process.env.LOCK_TIMEOUT_MS) });
+    if (process.env.LOCK_STEP_MS) __setOpLocksStepDelayForTesting(Number(process.env.LOCK_STEP_MS));
+    for (let i = 0; i < Number(count); i++) {
+      writeFileSync(sourceFile, content);
+      const result = await commitImport({
+        entries: parseDotEnv(content).entries,
+        depository: 'encrypted',
+        scope: 'project',
+        cwd,
+        projectPath: cwd,
+        envFilePath: sourceFile,
+        actor: 'cli',
+        rotate: true,
+      });
+      if (result.failed.length > 0) {
+        process.stderr.write(`ERR ${result.failed[0]!.errorCode}\n`);
+        return 1;
+      }
+    }
+    return 0;
+  }
+  process.stderr.write('usage: secret-op-lock-worker vault|set|move|import ...\n');
   return 2;
 }
 
