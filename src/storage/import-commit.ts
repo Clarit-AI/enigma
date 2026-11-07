@@ -200,13 +200,22 @@ export async function commitImport(opts: ImportCommitOptions): Promise<ImportCom
       error: auditErrorText(cause),
       ...auditScopeFields({ scope: opts.scope, projectId: pid, projectPath: opts.projectPath }),
     });
+    // Nothing was stored, so this result must reach the caller: the gitignore check is best effort here (it
+    // throws on, e.g., a directory-shaped or unreadable .gitignore, and the web route would read that throw
+    // as "outcome unknown").
+    let warnings: string[] = [];
+    try {
+      warnings = checkEnvGitignore(opts.projectPath);
+    } catch {
+      // omit the warning rather than lose the structured lock failure
+    }
     return {
       succeeded: [],
       failed: [failure],
       notAttempted: opts.entries.map((e) => e.name).filter((name) => name !== err.secretName),
       skippedMismatch: [],
       fileRewritten: false,
-      warnings: checkEnvGitignore(opts.projectPath),
+      warnings,
     };
   }
   try {

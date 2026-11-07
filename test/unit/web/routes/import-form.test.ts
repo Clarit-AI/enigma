@@ -198,6 +198,31 @@ describe('GET/POST /i/:id', () => {
     expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
   });
 
+  it('the held-lock failure is still reported when the .gitignore check would throw (a directory-shaped .gitignore; PR #141 review)', async () => {
+    const original = 'OPENAI_API_KEY=sk-abc\n';
+    writeFileSync(envPath(), original);
+    mkdirSync(join(tmpProject, '.gitignore'));
+    const record = RequestStore.create({ kind: 'import', names: ['OPENAI_API_KEY'], values: { OPENAI_API_KEY: 'sk-abc' }, envFilePath: envPath() });
+    __setAsyncLockTimingForTesting({ timeoutMs: 200, retryIntervalMs: 10 });
+    const held = await acquireFileLockAsync(secretOpLockPath('OPENAI_API_KEY', opLockScopeId('project', projectId(tmpProject))), 'test holder');
+
+    let resp: Response;
+    try {
+      resp = await fetch(`${origin}/i/${record.id}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ depository: 'encrypted' }).toString(),
+      });
+    } finally {
+      held.release();
+    }
+
+    expect(resp.status).toBe(200);
+    expect(RequestStore.get(record.id)?.results).toEqual([{ name: 'OPENAI_API_KEY', ok: false, errorCode: 'E_LOCK_TIMEOUT' }]);
+    expect(readFileSync(envPath(), 'utf8')).toBe(original);
+    expect(listSecrets({ scope: 'all', cwd: tmpProject })).toEqual([]);
+  });
+
   it('POST refuses an ambiguous value carried in via the picker, WITH THE SAME REASON TEXT the direct --depository path surfaces (Issue #13 review, round 4, finding 2 — a test whose title claims parity must assert it)', async () => {
     const source = 'PORT=3000 # dev port\n';
     writeFileSync(envPath(), source);

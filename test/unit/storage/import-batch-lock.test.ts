@@ -159,15 +159,25 @@ describe('acquireSecretOpLocks', () => {
   });
 
   it('one deadline for the whole batch, not one per name', async () => {
-    __setAsyncLockTimingForTesting({ timeoutMs: 300, retryIntervalMs: 10 });
-    const held = await acquireFileLockAsync(secretOpLockPath('C', 'global'), 'test holder');
+    // A is held for 400 ms of a 600 ms budget, C for longer. With one shared deadline the batch gives up about
+    // 600 ms in; with a fresh budget per name it would wait 400 ms for A and then a full 600 ms for C (~1000 ms).
+    __setAsyncLockTimingForTesting({ timeoutMs: 600, retryIntervalMs: 10 });
+    const heldA = await acquireFileLockAsync(secretOpLockPath('A', 'global'), 'test holder');
+    const heldC = await acquireFileLockAsync(secretOpLockPath('C', 'global'), 'test holder');
+    const releaseA = setTimeout(() => heldA.release(), 400);
     const start = Date.now();
+    let err: unknown;
     try {
-      await expect(acquireSecretOpLocks(['A', 'B', 'C'], 'global')).rejects.toBeInstanceOf(OpLocksError);
+      err = await acquireSecretOpLocks(['A', 'B', 'C'], 'global').catch((e: unknown) => e);
     } finally {
-      held.release();
+      clearTimeout(releaseA);
+      heldA.release();
+      heldC.release();
     }
-    expect(Date.now() - start).toBeLessThan(1_000);
+    const elapsed = Date.now() - start;
+    expect((err as OpLocksError).secretName).toBe('C');
+    expect(elapsed).toBeGreaterThanOrEqual(550);
+    expect(elapsed).toBeLessThan(850);
   });
 
   it('a failure names the blocked secret and releases the locks already taken', async () => {

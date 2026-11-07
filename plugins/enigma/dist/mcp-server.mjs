@@ -46247,13 +46247,18 @@ async function commitImport(opts) {
       error: auditErrorText(cause),
       ...auditScopeFields({ scope: opts.scope, projectId: pid, projectPath: opts.projectPath })
     });
+    let warnings = [];
+    try {
+      warnings = checkEnvGitignore(opts.projectPath);
+    } catch {
+    }
     return {
       succeeded: [],
       failed: [failure2],
       notAttempted: opts.entries.map((e) => e.name).filter((name) => name !== err.secretName),
       skippedMismatch: [],
       fileRewritten: false,
-      warnings: checkEnvGitignore(opts.projectPath)
+      warnings
     };
   }
   try {
