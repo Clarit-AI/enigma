@@ -2,11 +2,13 @@
 
 ## Completed
 
-### Unreleased
+### `v0.3.5` — shipped 2026-11-11 as `enigma--v0.3.5`
+
+One remaining race between a change to a secret and an import of the same name.
 
 - `enigma import` holds the per-secret lock of every name in its batch until its render fan-out has finished, so a change racing an import of the same name runs entirely before or after it. Before, a rotate between an entry's store and the batch's fan-out could leave the name with no line in `.env`. An import that can't take a lock within 30 s now stores nothing and reports the blocked name, instead of storing the entries before it (Issue #133).
 
-### `v0.3.4` — shipped 2026-10-25 as `enigma--v0.3.4`
+### `v0.3.4` — shipped 2026-10-27 as `enigma--v0.3.4`
 
 Two ways a stored secret could disappear while its name stayed in the index (`E_NOT_FOUND` on the next read), plus dependency security fixes.
 
