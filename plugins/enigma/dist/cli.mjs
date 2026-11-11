@@ -2875,11 +2875,9 @@ function opLockScopeId(scope, projectId2) {
   return scope === "global" ? "global" : `project:${projectId2 ?? ""}`;
 }
 var bypass = false;
-async function withSecretOpLock(name, scopeId, fn) {
-  if (bypass) return fn();
-  let lock;
+async function acquireOne(name, scopeId, timeoutMs) {
   try {
-    lock = await acquireFileLockAsync(secretOpLockPath(name, scopeId), `the lock for ${name}`);
+    return await acquireFileLockAsync(secretOpLockPath(name, scopeId), `the lock for ${name}`, { timeoutMs });
   } catch (err) {
     if (err instanceof EnigmaError && err.code === "E_LOCK_TIMEOUT") {
       throw new EnigmaError({
@@ -2890,6 +2888,43 @@ async function withSecretOpLock(name, scopeId, fn) {
     }
     throw err;
   }
+}
+var stepDelayMs = 0;
+function opLockOrder(names) {
+  return [...new Set(names)].sort((a, b) => a < b ? -1 : a > b ? 1 : 0);
+}
+var OpLocksError = class extends Error {
+  constructor(secretName, cause) {
+    super(`could not take the operation lock for ${secretName}`);
+    this.secretName = secretName;
+    this.cause = cause;
+  }
+  secretName;
+  cause;
+  name = "OpLocksError";
+};
+async function acquireSecretOpLocks(names, scopeId) {
+  if (bypass) return { release: () => {
+  } };
+  const held = [];
+  const releaseAll = () => {
+    for (const lock of held.splice(0).reverse()) lock.release();
+  };
+  const deadline = Date.now() + ASYNC_LOCK_TIMEOUT_MS;
+  for (const name of opLockOrder(names)) {
+    try {
+      held.push(await acquireOne(name, scopeId, Math.max(0, deadline - Date.now())));
+      if (stepDelayMs > 0) await new Promise((r) => setTimeout(r, stepDelayMs));
+    } catch (err) {
+      releaseAll();
+      throw new OpLocksError(name, err);
+    }
+  }
+  return { release: releaseAll };
+}
+async function withSecretOpLock(name, scopeId, fn) {
+  if (bypass) return fn();
+  const lock = await acquireOne(name, scopeId);
   try {
     return await fn();
   } finally {
@@ -3927,6 +3962,51 @@ function ambiguousValueError(entry, envFilePath) {
   });
 }
 async function commitImport(opts) {
+  const pid = opts.scope === "project" ? projectId(opts.cwd) : void 0;
+  let locks;
+  try {
+    locks = await acquireSecretOpLocks(
+      opts.entries.map((e) => e.name),
+      opLockScopeId(opts.scope, pid)
+    );
+  } catch (err) {
+    if (!(err instanceof OpLocksError)) throw err;
+    const cause = err.cause;
+    const failure = {
+      name: err.secretName,
+      errorCode: cause instanceof EnigmaError ? cause.code : "E_UNKNOWN",
+      message: cause instanceof EnigmaError ? cause.message : void 0
+    };
+    appendAuditEvent({
+      op: "import",
+      name: err.secretName,
+      depository: opts.depository,
+      actor: opts.actor,
+      ok: false,
+      error: auditErrorText(cause),
+      ...auditScopeFields({ scope: opts.scope, projectId: pid, projectPath: opts.projectPath })
+    });
+    let warnings = [];
+    try {
+      warnings = checkEnvGitignore(opts.projectPath);
+    } catch {
+    }
+    return {
+      succeeded: [],
+      failed: [failure],
+      notAttempted: opts.entries.map((e) => e.name).filter((name) => name !== err.secretName),
+      skippedMismatch: [],
+      fileRewritten: false,
+      warnings
+    };
+  }
+  try {
+    return await commitImportLocked(opts);
+  } finally {
+    locks.release();
+  }
+}
+async function commitImportLocked(opts) {
   const stored = [];
   const succeeded = [];
   const failed = [];
@@ -3959,7 +4039,8 @@ async function commitImport(opts) {
         rotate: opts.rotate,
         createVault: opts.createVault,
         auditOp: "import",
-        skipRenderFanout: true
+        skipRenderFanout: true,
+        opLockHeld: true
       });
       stored.push({ name: entry.name, value: entry.value, commit: result.commit, isNew: !result.rotated });
       succeeded.push(entry.name);

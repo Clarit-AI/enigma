@@ -69,10 +69,10 @@ interface Run {
   exited: () => boolean;
 }
 
-function run(args: string[]): Run {
+function run(args: string[], extraEnv: Record<string, string> = {}): Run {
   const child = spawn(process.execPath, [workerPath, ...args], {
     stdio: ['ignore', 'ignore', 'pipe'],
-    env: { ...process.env, ENIGMA_HOME: process.env.ENIGMA_HOME!, ENIGMA_NATIVE_DIR: NATIVE_DIR },
+    env: { ...process.env, ...extraEnv, ENIGMA_HOME: process.env.ENIGMA_HOME!, ENIGMA_NATIVE_DIR: NATIVE_DIR },
   });
   children.push(child);
   let stderr = '';
@@ -119,6 +119,25 @@ describe('per-secret operation lock — real processes (Issue #125)', () => {
     expect(entry?.depository).toBe('encrypted');
     await expect(resolveSecret('TOKEN', { scope: 'project', cwd: w!, actor: 'cli' })).resolves.toBe('v1');
   }, 60_000);
+});
+
+describe('import batch lock — real processes (Issue #133)', () => {
+  it('two imports of the same names in opposite order never deadlock: both finish, every name resolves', async () => {
+    const { worktrees: [w] } = makeRepo(sb);
+    const rounds = '5';
+    // LOCK_STEP_MS holds each batch between its lock grabs, so the two imports reliably interleave there; out of
+    // order they would deadlock (each holding a lock the other needs), surfacing as E_LOCK_TIMEOUT, not a 30 s hang.
+    const env = { LOCK_TIMEOUT_MS: '3000', LOCK_STEP_MS: '100' };
+    const a = run(['import', w!, join(w!, 'a.env'), 'ALPHA=a1\nBRAVO=a2\nCHARLIE=a3\n', rounds], env);
+    const b = run(['import', w!, join(w!, 'b.env'), 'CHARLIE=b3\nBRAVO=b2\nALPHA=b1\n', rounds], env);
+    const [ra, rb] = await Promise.all([a.exit, b.exit]);
+    expect(ra.code, ra.stderr).toBe(0);
+    expect(rb.code, rb.stderr).toBe(0);
+
+    for (const name of ['ALPHA', 'BRAVO', 'CHARLIE']) {
+      await expect(resolveSecret(name, { scope: 'project', cwd: w!, actor: 'cli' })).resolves.toMatch(/^[ab][123]$/);
+    }
+  }, 120_000);
 });
 
 describe('encrypted vault lock — real processes (Issue #87)', () => {
