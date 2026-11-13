@@ -15,7 +15,7 @@ import type { DepositoryId } from '../../storage/interfaces.js';
 import { startServer } from '../../web/server.js';
 import { elicitUrl, sendElicitationComplete, supportsFormElicitation, supportsUrlElicitation, URL_ELICITATION_ACK_TIMEOUT_MS } from '../elicit.js';
 import { resolveRequestOutcome } from '../request-outcome.js';
-import { errorResult, renderOutcome, textResult } from '../result-text.js';
+import { awaitAfterLine, errorResult, relayLinkLines, renderOutcome, textResult } from '../result-text.js';
 import { DEPOSITORY_ID_SCHEMA, SCOPE_SCHEMA } from '../schemas.js';
 
 interface RequestArgs {
@@ -146,7 +146,13 @@ async function runNative(args: RequestArgs, cwd: string, server: McpServer): Pro
  */
 function fallbackResult(record: RequestRecord, localUrl: string, remoteNote: string | undefined, instruction: string): CallToolResult {
   const fallback = { request_id: record.id, url: localUrl, expiresAt: new Date(record.expiresAt).toISOString() };
-  const lines = [JSON.stringify(fallback), remoteNote, instruction].filter((line): line is string => Boolean(line));
+  RequestStore.setRelayLink(record.id, localUrl); // Issue #142: enigma_await hands it back if it was never opened
+  const lines = [
+    JSON.stringify(fallback),
+    ...relayLinkLines(localUrl, awaitAfterLine('submitted the form')),
+    instruction,
+    remoteNote,
+  ].filter((line): line is string => Boolean(line));
   return textResult(lines.join('\n'));
 }
 
@@ -247,7 +253,7 @@ export function registerRequestTool(server: McpServer): void {
           record,
           url,
           remoteNote,
-          'Client does not support URL-mode elicitation. Call enigma_await with this request_id once the user has submitted the form.',
+          'This client does not support URL-mode elicitation, so it will not show the link to the user itself.',
         );
       }
 
@@ -292,7 +298,7 @@ export function registerRequestTool(server: McpServer): void {
           record,
           `${handle.origin}/r/${record.id}`,
           stopTunnel ? 'Remote access was stopped for this request; the link above is local only.' : undefined,
-          `${outcomeLead}, so the user was probably never shown the web form (non-interactive hosts decline automatically). The request is still open. Ask the user to open this URL in their browser, then call enigma_await with this request_id once they have submitted the form. Or call enigma_request again with ui:"native" for a system dialog (macOS).`,
+          `${outcomeLead}, so the user was probably never shown the web form (non-interactive hosts decline automatically). The request is still open. Or call enigma_request again with ui:"native" for a system dialog (macOS).`,
         );
       }
 

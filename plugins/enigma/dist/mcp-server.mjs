@@ -42538,6 +42538,16 @@ var RequestStore = {
     record2.usedAt = Date.now();
     return record2;
   },
+  /** Issue #142: record the link a fallback result gave the agent to relay. No-op for an unknown id. */
+  setRelayLink(id, url2) {
+    const record2 = records.get(id);
+    if (record2) record2.relayLink = url2;
+  },
+  /** Issue #142: the human loaded the form page. Only the first load is kept. No-op for an unknown id. */
+  markOpened(id) {
+    const record2 = records.get(id);
+    if (record2 && record2.openedAt === void 0) record2.openedAt = Date.now();
+  },
   /**
    * Records the outcome of a used request/reveal and THEN resolves the
    * fulfilment waiter, in that order — a caller waking up from
@@ -45716,6 +45726,16 @@ async function resolveSecret(name, opts) {
 }
 
 // src/mcp/result-text.ts
+function relayLinkLines(url2, then) {
+  return [
+    "The user cannot see this link until you send it. Put it in your reply to the user now, then end your turn.",
+    `Link for the user: ${url2}`,
+    ...then ? [then] : []
+  ];
+}
+function awaitAfterLine(userAction) {
+  return `Call enigma_await with this request_id only after the user says they have ${userAction}.`;
+}
 function textResult(text, isError = false) {
   return { content: [{ type: "text", text }], isError };
 }
@@ -45783,12 +45803,24 @@ async function resolveRequestOutcome(id, cwd) {
 }
 
 // src/mcp/tools/await.ts
+var openGraceMs = 6e4;
+var openPollMs = 250;
+async function waitForOpen(id) {
+  const deadline = Date.now() + openGraceMs;
+  for (; ; ) {
+    const record2 = RequestStore.get(id);
+    if (!record2 || record2.relayLink === void 0) return true;
+    if (record2.openedAt !== void 0 || record2.usedAt !== void 0 || record2.results !== void 0) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, Math.min(openPollMs, Math.max(0, deadline - Date.now()))));
+  }
+}
 function registerAwaitTool(server) {
   server.registerTool(
     "enigma_await",
     {
       title: "Await a pending request",
-      description: "Blocks until a request created via enigma_request (without URL-mode elicitation support) has been fulfilled by the user, or returns E_REQUEST_EXPIRED. Never returns a value (ADR-001).",
+      description: "Blocks the turn until a request from enigma_request or enigma_import has been fulfilled by the user, or returns E_REQUEST_EXPIRED. Call it only AFTER you have sent the user the link from that result and they have said they submitted it: text you write before a running tool call may not be shown, so calling it early can leave the user without the link. If the link has not been opened within about a minute, it returns without blocking further: the request is still pending, and the result repeats the link for you to send. Never returns a value (ADR-001).",
       inputSchema: {
         request_id: external_exports.string()
       }
@@ -45799,6 +45831,19 @@ function registerAwaitTool(server) {
         return errorResult(
           new EnigmaError({ code: "E_REQUEST_EXPIRED", message: `request ${args.request_id} is unknown or has expired` })
         );
+      }
+      if (!await waitForOpen(args.request_id)) {
+        const record2 = RequestStore.get(args.request_id);
+        if (record2?.relayLink !== void 0 && record2.openedAt === void 0 && record2.usedAt === void 0) {
+          const pending = { request_id: record2.id, state: "pending", url: record2.relayLink, expiresAt: new Date(record2.expiresAt).toISOString() };
+          return textResult(
+            [
+              JSON.stringify(pending),
+              "The user has not opened the link yet, so they probably have not seen it. The request is still open.",
+              ...relayLinkLines(record2.relayLink, awaitAfterLine(record2.kind === "import" ? "chosen a depository" : "submitted the form"))
+            ].join("\n")
+          );
+        }
       }
       try {
         const outcome = await resolveRequestOutcome(args.request_id, cwd);
@@ -46863,6 +46908,7 @@ async function handleImportFormGet(res, id) {
     sendErrorPage(res, 410, "Already used", "This link has already been used.");
     return;
   }
+  RequestStore.markOpened(record2.id);
   await renderForm(res, record2);
 }
 async function handleImportFormPost(req, res, id) {
@@ -48767,6 +48813,7 @@ async function handleRequestFormGet(res, id) {
     sendErrorPage(res, 410, "Already used", "This link has already been used.");
     return;
   }
+  RequestStore.markOpened(record2.id);
   await renderForm2(res, record2);
 }
 async function handleRequestFormPost(req, res, id) {
@@ -49237,9 +49284,13 @@ function registerImportTool(server) {
       const url2 = `${handle.origin}/i/${record2.id}`;
       if (!supportsUrlElicitation(server.server)) {
         const fallback = { request_id: record2.id, url: url2, expiresAt: new Date(record2.expiresAt).toISOString() };
+        RequestStore.setRelayLink(record2.id, url2);
         return textResult(
-          `${JSON.stringify(fallback)}
-Client does not support URL-mode elicitation. Call enigma_await with this request_id once the user has chosen a depository.`
+          [
+            JSON.stringify(fallback),
+            ...relayLinkLines(url2, awaitAfterLine("chosen a depository")),
+            "This client does not support URL-mode elicitation, so it will not show the link to the user itself."
+          ].join("\n")
         );
       }
       const names = parsed.entries.map((e) => e.name);
@@ -49545,7 +49596,13 @@ async function runNative(args, cwd, server) {
 }
 function fallbackResult(record2, localUrl, remoteNote, instruction) {
   const fallback = { request_id: record2.id, url: localUrl, expiresAt: new Date(record2.expiresAt).toISOString() };
-  const lines = [JSON.stringify(fallback), remoteNote, instruction].filter((line) => Boolean(line));
+  RequestStore.setRelayLink(record2.id, localUrl);
+  const lines = [
+    JSON.stringify(fallback),
+    ...relayLinkLines(localUrl, awaitAfterLine("submitted the form")),
+    instruction,
+    remoteNote
+  ].filter((line) => Boolean(line));
   return textResult(lines.join("\n"));
 }
 function registerRequestTool(server) {
@@ -49615,7 +49672,7 @@ function registerRequestTool(server) {
           record2,
           url2,
           remoteNote,
-          "Client does not support URL-mode elicitation. Call enigma_await with this request_id once the user has submitted the form."
+          "This client does not support URL-mode elicitation, so it will not show the link to the user itself."
         );
       }
       let outcomeLead;
@@ -49640,7 +49697,7 @@ function registerRequestTool(server) {
           record2,
           `${handle.origin}/r/${record2.id}`,
           stopTunnel ? "Remote access was stopped for this request; the link above is local only." : void 0,
-          `${outcomeLead}, so the user was probably never shown the web form (non-interactive hosts decline automatically). The request is still open. Ask the user to open this URL in their browser, then call enigma_await with this request_id once they have submitted the form. Or call enigma_request again with ui:"native" for a system dialog (macOS).`
+          `${outcomeLead}, so the user was probably never shown the web form (non-interactive hosts decline automatically). The request is still open. Or call enigma_request again with ui:"native" for a system dialog (macOS).`
         );
       }
       try {
@@ -49742,8 +49799,9 @@ function registerRevealTool(server) {
       const url2 = `${handle.origin}/v/${record2.id}`;
       if (!supportsUrlElicitation(server.server)) {
         const fallback = { request_id: record2.id, url: url2, expiresAt: new Date(record2.expiresAt).toISOString() };
-        return textResult(`${JSON.stringify(fallback)}
-Open this link to reveal ${args.name}.`);
+        return textResult(
+          [JSON.stringify(fallback), ...relayLinkLines(url2, `The user opens it to reveal ${args.name}; nothing comes back to you.`)].join("\n")
+        );
       }
       const result = await elicitUrl(server.server, { elicitationId: record2.id, url: url2, message: `Reveal ${args.name}` });
       if (result.action !== "accept") {

@@ -4,7 +4,37 @@ import { EnigmaError } from '../../core/errors.js';
 import { RequestStore } from '../../request/store.js';
 import { takeRemoteNote } from '../../remote/index.js';
 import { resolveRequestOutcome } from '../request-outcome.js';
-import { errorResult, textResult } from '../result-text.js';
+import { awaitAfterLine, errorResult, relayLinkLines, textResult } from '../result-text.js';
+
+/**
+ * Issue #142: how long `enigma_await` waits for the human to OPEN a relayed link before giving the turn back. An
+ * agent that calls it straight after `enigma_request`, before the human has the link, is released after this
+ * instead of blocking for the request's whole lifetime.
+ */
+let openGraceMs = 60_000;
+let openPollMs = 250;
+
+/** Test-only: shrink the open-grace wait. Restore in `afterEach`. */
+export function __setAwaitOpenGraceForTesting(opts: { graceMs?: number; pollMs?: number }): void {
+  if (opts.graceMs !== undefined) openGraceMs = opts.graceMs;
+  if (opts.pollMs !== undefined) openPollMs = opts.pollMs;
+}
+
+/**
+ * True once the relayed link has been opened or the request has moved on (submitted, fulfilled or gone); false
+ * if the grace period ran out with the link still unopened. A request with no relayed link (its link reached the
+ * human through URL-mode elicitation) is never held back here.
+ */
+async function waitForOpen(id: string): Promise<boolean> {
+  const deadline = Date.now() + openGraceMs;
+  for (;;) {
+    const record = RequestStore.get(id);
+    if (!record || record.relayLink === undefined) return true;
+    if (record.openedAt !== undefined || record.usedAt !== undefined || record.results !== undefined) return true;
+    if (Date.now() >= deadline) return false;
+    await new Promise((r) => setTimeout(r, Math.min(openPollMs, Math.max(0, deadline - Date.now()))));
+  }
+}
 
 export function registerAwaitTool(server: McpServer): void {
   server.registerTool(
@@ -12,7 +42,7 @@ export function registerAwaitTool(server: McpServer): void {
     {
       title: 'Await a pending request',
       description:
-        'Blocks until a request created via enigma_request (without URL-mode elicitation support) has been fulfilled by the user, or returns E_REQUEST_EXPIRED. Never returns a value (ADR-001).',
+        'Blocks the turn until a request from enigma_request or enigma_import has been fulfilled by the user, or returns E_REQUEST_EXPIRED. Call it only AFTER you have sent the user the link from that result and they have said they submitted it: text you write before a running tool call may not be shown, so calling it early can leave the user without the link. If the link has not been opened within about a minute, it returns without blocking further: the request is still pending, and the result repeats the link for you to send. Never returns a value (ADR-001).',
       inputSchema: {
         request_id: z.string(),
       },
@@ -24,6 +54,21 @@ export function registerAwaitTool(server: McpServer): void {
         return errorResult(
           new EnigmaError({ code: 'E_REQUEST_EXPIRED', message: `request ${args.request_id} is unknown or has expired` }),
         );
+      }
+
+      // Issue #142: don't hold the turn for a link the human may never have received.
+      if (!(await waitForOpen(args.request_id))) {
+        const record = RequestStore.get(args.request_id);
+        if (record?.relayLink !== undefined && record.openedAt === undefined && record.usedAt === undefined) {
+          const pending = { request_id: record.id, state: 'pending', url: record.relayLink, expiresAt: new Date(record.expiresAt).toISOString() };
+          return textResult(
+            [
+              JSON.stringify(pending),
+              'The user has not opened the link yet, so they probably have not seen it. The request is still open.',
+              ...relayLinkLines(record.relayLink, awaitAfterLine(record.kind === 'import' ? 'chosen a depository' : 'submitted the form')),
+            ].join('\n'),
+          );
+        }
       }
 
       try {

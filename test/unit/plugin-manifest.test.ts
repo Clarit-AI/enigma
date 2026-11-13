@@ -126,7 +126,12 @@ describe('Issue #69 doc pins (AC11/AC12) — focused wording pins, not an eval h
     expect(body).toMatch(/background-watch/);
     expect(body).toContain('GET /r/<request_id>/status');
     expect(body).toMatch(/`\{"state":"pending"\}`/);
-    expect(body).toMatch(/call `enigma_await` immediately/);
+    // The no-watcher fallback (Issue #142 replaced "call enigma_await immediately ... always-correct"): send the
+    // link, end the turn, await when the user replies — never block in the same turn as the request.
+    expect(body).toMatch(/no background-watch tool, send the link, end your turn, and call `enigma_await` when the user replies/);
+    expect(body).toMatch(/Never call `enigma_await` in the same turn as `enigma_request`/);
+    expect(body).not.toMatch(/call `enigma_await` immediately/);
+    expect(body).not.toMatch(/always-correct/);
     // The watch must end on ANY non-pending response — fulfilled, 404, or a
     // connection failure — and hand off to enigma_await for the authoritative
     // outcome; a dead link is never polled forever (PR #78 review batch).

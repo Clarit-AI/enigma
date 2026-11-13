@@ -248,6 +248,7 @@ export async function handleRequestFormGet(res: ServerResponse, id: string): Pro
     sendErrorPage(res, 410, 'Already used', 'This link has already been used.');
     return;
   }
+  RequestStore.markOpened(record.id); // Issue #142: enigma_await stops treating this link as undelivered
   await renderForm(res, record);
 }
 

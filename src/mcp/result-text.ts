@@ -5,6 +5,26 @@ import type { RequestNameResult } from '../request/store.js';
 import { getSkippedNameCount } from '../request/store.js';
 import { listSecrets } from '../storage/manager.js';
 
+/**
+ * Issue #142: the lines every fallback result puts right after its JSON line when the AGENT must relay a link to the
+ * human (the client could not show it). The agent is told to send it and end its turn BEFORE any blocking call:
+ * a host may not show text written before a still-running tool call, so a turn blocked in `enigma_await` can leave
+ * the human without the link. `then` is what to do after the human acts, or undefined when nothing follows (reveal).
+ * The URL is local and carries only the random id.
+ */
+export function relayLinkLines(url: string, then: string | undefined): string[] {
+  return [
+    'The user cannot see this link until you send it. Put it in your reply to the user now, then end your turn.',
+    `Link for the user: ${url}`,
+    ...(then ? [then] : []),
+  ];
+}
+
+/** Issue #142: the follow-up line for a request or import whose outcome comes back through `enigma_await`. */
+export function awaitAfterLine(userAction: string): string {
+  return `Call enigma_await with this request_id only after the user says they have ${userAction}.`;
+}
+
 export function textResult(text: string, isError = false): CallToolResult {
   return { content: [{ type: 'text', text }], isError };
 }

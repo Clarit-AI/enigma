@@ -3740,6 +3740,16 @@ var RequestStore = {
     record.usedAt = Date.now();
     return record;
   },
+  /** Issue #142: record the link a fallback result gave the agent to relay. No-op for an unknown id. */
+  setRelayLink(id, url) {
+    const record = records.get(id);
+    if (record) record.relayLink = url;
+  },
+  /** Issue #142: the human loaded the form page. Only the first load is kept. No-op for an unknown id. */
+  markOpened(id) {
+    const record = records.get(id);
+    if (record && record.openedAt === void 0) record.openedAt = Date.now();
+  },
   /**
    * Records the outcome of a used request/reveal and THEN resolves the
    * fulfilment waiter, in that order — a caller waking up from
@@ -4602,6 +4612,7 @@ async function handleImportFormGet(res, id) {
     sendErrorPage(res, 410, "Already used", "This link has already been used.");
     return;
   }
+  RequestStore.markOpened(record.id);
   await renderForm(res, record);
 }
 async function handleImportFormPost(req, res, id) {
@@ -6539,6 +6550,7 @@ async function handleRequestFormGet(res, id) {
     sendErrorPage(res, 410, "Already used", "This link has already been used.");
     return;
   }
+  RequestStore.markOpened(record.id);
   await renderForm2(res, record);
 }
 async function handleRequestFormPost(req, res, id) {

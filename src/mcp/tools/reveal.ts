@@ -4,7 +4,7 @@ import { clipboardReveal } from '../../native/clipboard.js';
 import { RequestStore } from '../../request/store.js';
 import { startServer } from '../../web/server.js';
 import { elicitUrl, sendElicitationComplete, supportsUrlElicitation } from '../elicit.js';
-import { errorResult, textResult } from '../result-text.js';
+import { errorResult, relayLinkLines, textResult } from '../result-text.js';
 import { SCOPE_SCHEMA } from '../schemas.js';
 
 export function registerRevealTool(server: McpServer): void {
@@ -41,7 +41,9 @@ export function registerRevealTool(server: McpServer): void {
 
       if (!supportsUrlElicitation(server.server)) {
         const fallback = { request_id: record.id, url, expiresAt: new Date(record.expiresAt).toISOString() };
-        return textResult(`${JSON.stringify(fallback)}\nOpen this link to reveal ${args.name}.`);
+        return textResult(
+          [JSON.stringify(fallback), ...relayLinkLines(url, `The user opens it to reveal ${args.name}; nothing comes back to you.`)].join('\n'),
+        );
       }
 
       const result = await elicitUrl(server.server, { elicitationId: record.id, url, message: `Reveal ${args.name}` });

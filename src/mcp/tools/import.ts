@@ -12,7 +12,7 @@ import type { ImportCommitResult } from '../../storage/import-commit.js';
 import { startServer } from '../../web/server.js';
 import { elicitUrl, sendElicitationComplete, supportsUrlElicitation } from '../elicit.js';
 import { resolveRequestOutcome } from '../request-outcome.js';
-import { errorResult, renderOutcome, textResult } from '../result-text.js';
+import { awaitAfterLine, errorResult, relayLinkLines, renderOutcome, textResult } from '../result-text.js';
 import { DEPOSITORY_ID_SCHEMA } from '../schemas.js';
 
 function renderImportSummary(result: ImportCommitResult, invalidNames: string[], cwd: string): { text: string; isError: boolean } {
@@ -97,8 +97,13 @@ export function registerImportTool(server: McpServer): void {
 
       if (!supportsUrlElicitation(server.server)) {
         const fallback = { request_id: record.id, url, expiresAt: new Date(record.expiresAt).toISOString() };
+        RequestStore.setRelayLink(record.id, url); // Issue #142
         return textResult(
-          `${JSON.stringify(fallback)}\nClient does not support URL-mode elicitation. Call enigma_await with this request_id once the user has chosen a depository.`,
+          [
+            JSON.stringify(fallback),
+            ...relayLinkLines(url, awaitAfterLine('chosen a depository')),
+            'This client does not support URL-mode elicitation, so it will not show the link to the user itself.',
+          ].join('\n'),
         );
       }
 
