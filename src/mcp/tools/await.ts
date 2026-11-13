@@ -9,9 +9,12 @@ import { awaitAfterLine, errorResult, relayLinkLines, textResult } from '../resu
 /**
  * Issue #142: how long `enigma_await` waits for the human to OPEN a relayed link before giving the turn back. An
  * agent that calls it straight after `enigma_request`, before the human has the link, is released after this
- * instead of blocking for the request's whole lifetime.
+ * instead of blocking for the request's whole lifetime. It must stay well under the MCP SDK client's default
+ * request timeout (`DEFAULT_REQUEST_TIMEOUT_MSEC`, 60 s), whose clock starts before ours: at 60 s the client gave
+ * up first and the agent got `-32001 Request timed out` instead of the link (PR #144 review). A test pins the margin.
  */
-let openGraceMs = 60_000;
+export const DEFAULT_OPEN_GRACE_MS = 45_000;
+let openGraceMs = DEFAULT_OPEN_GRACE_MS;
 let openPollMs = 250;
 
 /** Test-only: shrink the open-grace wait. Restore in `afterEach`. */
@@ -42,7 +45,7 @@ export function registerAwaitTool(server: McpServer): void {
     {
       title: 'Await a pending request',
       description:
-        'Blocks the turn until a request from enigma_request or enigma_import has been fulfilled by the user, or returns E_REQUEST_EXPIRED. Call it only AFTER you have sent the user the link from that result and they have said they submitted it: text you write before a running tool call may not be shown, so calling it early can leave the user without the link. If the link has not been opened within about a minute, it returns without blocking further: the request is still pending, and the result repeats the link for you to send. Never returns a value (ADR-001).',
+        'Blocks the turn until a request from enigma_request or enigma_import has been fulfilled by the user, or returns E_REQUEST_EXPIRED. Call it only AFTER you have sent the user the link from that result and they have said they submitted it: text you write before a running tool call may not be shown, so calling it early can leave the user without the link. If the link has not been opened within about 45 seconds, it returns without blocking further: the request is still pending, and the result repeats the link for you to send. Never returns a value (ADR-001).',
       inputSchema: {
         request_id: z.string(),
       },

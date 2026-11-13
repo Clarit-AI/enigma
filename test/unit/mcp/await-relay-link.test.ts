@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { ElicitRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { connectWithCapabilities } from './harness.js';
-import { __setAwaitOpenGraceForTesting } from '../../../src/mcp/tools/await.js';
+import { DEFAULT_REQUEST_TIMEOUT_MSEC } from '@modelcontextprotocol/sdk/shared/protocol.js';
+import { DEFAULT_OPEN_GRACE_MS, __setAwaitOpenGraceForTesting } from '../../../src/mcp/tools/await.js';
 import { RequestStore } from '../../../src/request/store.js';
 import { setSecret } from '../../../src/storage/manager.js';
 import { stopServer } from '../../../src/web/server.js';
@@ -35,7 +36,7 @@ describe('Issue #142: relaying the link before awaiting', () => {
   });
 
   afterEach(async () => {
-    __setAwaitOpenGraceForTesting({ graceMs: 60_000, pollMs: 250 });
+    __setAwaitOpenGraceForTesting({ graceMs: DEFAULT_OPEN_GRACE_MS, pollMs: 250 });
     await stopServer();
     RequestStore.__resetForTests();
     process.chdir(originalCwd);
@@ -43,6 +44,12 @@ describe('Issue #142: relaying the link before awaiting', () => {
     else process.env.ENIGMA_HOME = originalHome;
     rmSync(tmpHome, { recursive: true, force: true });
     rmSync(project, { recursive: true, force: true });
+  });
+
+  it('the open-grace wait ends well before a default MCP client gives up on the call (PR #144 review)', () => {
+    // The client's timer starts before ours and the pending result still has to travel back: at 60 s the client
+    // timed out first and the agent got -32001 instead of the link. Keep at least 10 s of margin.
+    expect(DEFAULT_OPEN_GRACE_MS + 10_000).toBeLessThanOrEqual(DEFAULT_REQUEST_TIMEOUT_MSEC);
   });
 
   describe('fallback results lead with the relay instruction, the URL on its own line', () => {

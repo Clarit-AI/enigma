@@ -45803,7 +45803,8 @@ async function resolveRequestOutcome(id, cwd) {
 }
 
 // src/mcp/tools/await.ts
-var openGraceMs = 6e4;
+var DEFAULT_OPEN_GRACE_MS = 45e3;
+var openGraceMs = DEFAULT_OPEN_GRACE_MS;
 var openPollMs = 250;
 async function waitForOpen(id) {
   const deadline = Date.now() + openGraceMs;
@@ -45820,7 +45821,7 @@ function registerAwaitTool(server) {
     "enigma_await",
     {
       title: "Await a pending request",
-      description: "Blocks the turn until a request from enigma_request or enigma_import has been fulfilled by the user, or returns E_REQUEST_EXPIRED. Call it only AFTER you have sent the user the link from that result and they have said they submitted it: text you write before a running tool call may not be shown, so calling it early can leave the user without the link. If the link has not been opened within about a minute, it returns without blocking further: the request is still pending, and the result repeats the link for you to send. Never returns a value (ADR-001).",
+      description: "Blocks the turn until a request from enigma_request or enigma_import has been fulfilled by the user, or returns E_REQUEST_EXPIRED. Call it only AFTER you have sent the user the link from that result and they have said they submitted it: text you write before a running tool call may not be shown, so calling it early can leave the user without the link. If the link has not been opened within about 45 seconds, it returns without blocking further: the request is still pending, and the result repeats the link for you to send. Never returns a value (ADR-001).",
       inputSchema: {
         request_id: external_exports.string()
       }
