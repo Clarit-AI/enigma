@@ -76,6 +76,14 @@ export interface RequestRecord {
   createdAt: number;
   expiresAt: number;
   usedAt?: number;
+  /**
+   * Issue #142: the link a fallback result handed to the AGENT to relay to the human (set only on that path, via
+   * `setRelayLink`; never set when the client delivered the link itself through URL-mode elicitation). Local only
+   * and carries nothing but the random id. `enigma_await` returns it again if the human has not opened it yet.
+   */
+  relayLink?: string;
+  /** Issue #142: first time the human loaded the form page (GET /r/:id or /i/:id). The status poll never sets it. */
+  openedAt?: number;
   /** Set once POST /r/:id has attempted a write for every name (Issue #10 reads this after the waiter resolves). */
   results?: RequestNameResult[];
   /**
@@ -350,6 +358,18 @@ export const RequestStore = {
 
     record.usedAt = Date.now();
     return record;
+  },
+
+  /** Issue #142: record the link a fallback result gave the agent to relay. No-op for an unknown id. */
+  setRelayLink(id: string, url: string): void {
+    const record = records.get(id);
+    if (record) record.relayLink = url;
+  },
+
+  /** Issue #142: the human loaded the form page. Only the first load is kept. No-op for an unknown id. */
+  markOpened(id: string): void {
+    const record = records.get(id);
+    if (record && record.openedAt === undefined) record.openedAt = Date.now();
   },
 
   /**

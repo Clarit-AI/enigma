@@ -2,6 +2,10 @@
 
 ## Completed
 
+### Unreleased
+
+- Agents now send you the request link before waiting on it. When the client can't show the form itself, `enigma_request`, `enigma_import` and `enigma_reveal` tell the agent the user can't see the link until it's sent, to put it in its reply and end its turn, and to call `enigma_await` only after you've submitted. The skill no longer recommends calling `enigma_await` straight after `enigma_request`. If an agent still awaits before you've opened the link, `enigma_await` returns after 45 s with `state: "pending"` and the link, instead of blocking the turn for up to 15 minutes (Issue #142).
+
 ### `v0.3.5` — shipped 2026-11-11 as `enigma--v0.3.5`
 
 One remaining race between a change to a secret and an import of the same name.

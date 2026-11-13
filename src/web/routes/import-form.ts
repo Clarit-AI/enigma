@@ -63,6 +63,7 @@ export async function handleImportFormGet(res: ServerResponse, id: string): Prom
     sendErrorPage(res, 410, 'Already used', 'This link has already been used.');
     return;
   }
+  RequestStore.markOpened(record.id); // Issue #142: enigma_await stops treating this link as undelivered
   await renderForm(res, record);
 }
 
